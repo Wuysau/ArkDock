@@ -1,0 +1,14 @@
+{
+  "id": "harmonyos-26.0.0.105-windows-stage",
+  "sdkVersion": "26.0.0.105",
+  "apiVersion": 26,
+  "hvigorVersion": "6.26.8",
+  "viewport": { "width": 360, "height": 640 },
+  "transport": "loopback-websocket-jpeg40be-and-private-command-pipe-1.0.1",
+  "files": {
+    "sdk/default/openharmony/previewer/common/bin/Previewer.exe": "356baec698a3769a94d069d43848b163f82d5695c5745ee0f4800b77c7f1c05d",
+    "hvigor/bin/hvigorw.js": "468c9cdbb1dc43799a2024fea63c6c5f60993e3837b4a4d131b14680aac1aa05",
+    "hvigor/hvigor-ohos-plugin/index.js": "a8e21ba8a4c8d98419a56c035cadacf28bdd6399040826ad4d647633fa688b44"
+  },
+  "evidence": "docs/evidence/sdk-26-preview.md"
+}

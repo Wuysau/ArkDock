@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "jsx-a11y"],
+  "categories": { "correctness": "error" },
+  "rules": { "no-debugger": "error", "no-eval": "error" },
+  "ignorePatterns": ["src/ipc/model.ts"]
+}

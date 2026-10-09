@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "enums": {
+    "Environment": [
+      "windowsLocal",
+      "wsl",
+      "remote"
+    ],
+    "Phase": [
+      "idle",
+      "discovering",
+      "selectProject",
+      "untrusted",
+      "sdkMissing",
+      "protocolBlocked",
+      "building",
+      "running",
+      "stale",
+      "crashed",
+      "stopped",
+      "unsupported"
+    ],
+    "EvidenceSource": [
+      "registration",
+      "uia",
+      "processArguments",
+      "history",
+      "title",
+      "manual"
+    ],
+    "CheckStatus": [
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "SKIPPED"
+    ]
+  },
+  "structs": {
+    "ProcessRef": {
+      "pid": "u32",
+      "startedAt": "string"
+    },
+    "TargetInfo": {
+      "id": "string",
+      "title": "string",
+      "app": "string",
+      "process": "ProcessRef"
+    },
+    "ProjectRef": {
+      "id": "string",
+      "name": "string",
+      "environment": "Environment",
+      "workspaceRoot": "string",
+      "appRoot": "string",
+      "module": "string",
+      "variant": "string",
+      "sdkId": "string?"
+    },
+    "Evidence": {
+      "source": "EvidenceSource",
+      "targetId": "string?",
+      "process": "ProcessRef?",
+      "sessionId": "string?",
+      "observedAt": "u64",
+      "expiresAt": "u64",
+      "environment": "Environment",
+      "rawPath": "string",
+      "verifiable": "bool",
+      "activeScope": "bool"
+    },
+    "Candidate": {
+      "id": "string",
+      "project": "ProjectRef",
+      "evidence": "Evidence[]",
+      "valid": "bool",
+      "autoEligible": "bool",
+      "reasons": "string[]"
+    },
+    "Diagnostic": {
+      "code": "string",
+      "message": "string",
+      "status": "CheckStatus",
+      "observedAt": "u64",
+      "workspaceId": "string?",
+      "sessionId": "string?",
+      "buildId": "string?",
+      "backendId": "string?"
+    },
+    "BackendStatus": {
+      "id": "string",
+      "mode": "string",
+      "available": "bool",
+      "reason": "string",
+      "sdkPath": "string?",
+      "sdkVersion": "string?",
+      "canClick": "bool",
+      "canSwipe": "bool",
+      "canText": "bool",
+      "canRotate": "bool"
+    },
+    "BuildStatus": {
+      "generation": "u64",
+      "displayedGeneration": "u64?",
+      "buildId": "string?",
+      "durationMs": "u64?",
+      "error": "string?",
+      "stale": "bool"
+    },
+    "AppSnapshot": {
+      "revision": "u64",
+      "phase": "Phase",
+      "target": "TargetInfo?",
+      "project": "ProjectRef?",
+      "candidates": "Candidate[]",
+      "trusted": "bool",
+      "sessionId": "string?",
+      "backend": "BackendStatus",
+      "build": "BuildStatus",
+      "diagnostics": "Diagnostic[]",
+      "dockHint": "string?",
+      "layoutRequired": "bool",
+      "sessionRef": "SessionRef?"
+    },
+    "NativeFrame": {
+      "sessionId": "string",
+      "buildId": "string",
+      "generation": "u64",
+      "sequence": "u64",
+      "width": "u32",
+      "height": "u32",
+      "capturedAt": "u64",
+      "rotation": "u32",
+      "pngBase64": "string"
+    },
+    "RequestScope": {
+      "targetId": "string?",
+      "sessionId": "string?"
+    },
+    "SessionRef": {
+      "id": "string",
+      "project": "ProjectRef",
+      "target": "TargetInfo",
+      "bindingEvidence": "Evidence[]",
+      "sdkId": "string?"
+    }
+  },
+  "commands": {
+    "click_preview": {
+      "scope": "RequestScope",
+      "buildId": "string",
+      "generation": "u64",
+      "x": "u32",
+      "y": "u32"
+    },
+    "snapshot": {},
+    "minimize_window": {
+      "scope": "RequestScope"
+    },
+    "close_window": {
+      "scope": "RequestScope"
+    },
+    "begin_drag": {
+      "scope": "RequestScope"
+    },
+    "rediscover": {
+      "scope": "RequestScope"
+    },
+    "select_candidate": {
+      "candidateId": "string",
+      "scope": "RequestScope"
+    },
+    "select_directory": {
+      "scope": "RequestScope"
+    },
+    "detach": {
+      "scope": "RequestScope"
+    },
+    "set_trust": {
+      "projectId": "string",
+      "trusted": "bool",
+      "scope": "RequestScope"
+    },
+    "configure_sdk": {
+      "scope": "RequestScope"
+    },
+    "refresh_preview": {
+      "scope": "RequestScope"
+    },
+    "stop_preview": {
+      "scope": "RequestScope"
+    },
+    "arrange_side_by_side": {
+      "consent": "bool",
+      "scope": "RequestScope"
+    }
+  }
+}

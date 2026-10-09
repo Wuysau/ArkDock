@@ -1,0 +1,49 @@
+{
+  "name": "arkdock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=24.18.0"
+  },
+  "scripts": {
+    "dev": "node tools/desktop.mjs dev",
+    "dev:ui": "vite --host 127.0.0.1",
+    "dev:demo": "vite --config vite.demo.config.ts --host 127.0.0.1 --port 1421",
+    "build:demo": "vite build --config vite.demo.config.ts",
+    "test:ui": "node tools/ui-visual.mjs",
+    "build": "vite build",
+    "desktop:build": "node tools/desktop.mjs build",
+    "format:check": "node tools/check-format.mjs",
+    "lint": "oxlint src tools tests --deny-warnings && node tools/check-boundaries.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-isolation=none tests/portable/*.test.mjs",
+    "test:portable": "node --test --test-isolation=none tests/portable/*.test.mjs",
+    "ipc:generate": "node tools/generate-ipc.mjs",
+    "ipc:check": "node tools/generate-ipc.mjs --check",
+    "harness:check": "node tools/verify-harness.mjs",
+    "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets",
+    "verify": "node tools/verify.mjs",
+    "verify:native": "node tools/native-gate.mjs",
+    "verify:windows": "node tools/windows-smoke.mjs",
+    "verify:ui": "node tools/ui-smoke.mjs",
+    "verify:release": "node tools/verify.mjs --release",
+    "doctor": "node tools/doctor.mjs"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1",
+    "@types/node": "22.20.0",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "oxlint": "1.76.0",
+    "typescript": "6.0.3",
+    "vite": "6.4.3"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "backendId": "native-previewer",
+  "protocolVerified": false,
+  "reason": "尚无经真实 SDK 核验的独立启动、画面和输入协议；不得用测试替身通过。"
+}

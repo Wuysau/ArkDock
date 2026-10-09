@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "arkdock-native-counter",
+  "version": "1.0.0",
+  "description": "Actual ArkTS native acceptance application; not a discovery fixture.",
+  "dependencies": {},
+  "devDependencies": {}
+}

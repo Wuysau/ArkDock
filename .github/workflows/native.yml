@@ -1,0 +1,24 @@
+name: ArkDock native acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_root:
+        description: Legal SDK version root on the configured Windows runner
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: [self-hosted, Windows, X64]
+    env:
+      ARKDOCK_SDK: ${{ inputs.sdk_root }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:release
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-acceptance
+          path: artifacts/

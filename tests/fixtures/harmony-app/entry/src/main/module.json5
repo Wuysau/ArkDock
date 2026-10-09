@@ -1,0 +1,8 @@
+{
+  module: {
+    name: 'entry', type: 'entry', srcEntry: './ets/EntryAbility.ets',
+    description: 'ArkDock read-only discovery fixture', mainElement: 'EntryAbility',
+    deviceTypes: ['phone'], deliveryWithInstall: true, installationFree: false,
+    pages: '$profile:main_pages',
+  },
+}

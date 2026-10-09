@@ -1,0 +1,110 @@
+//! Independent external docking. Native handles stay inside this backend module.
+//! The caller owns the Tauri drag operation and must validate IPC/session provenance.
+
+use crate::ipc::model::TargetInfo;
+
+#[cfg(any(windows, test))]
+mod geometry;
+#[cfg(any(windows, test))]
+mod lifecycle;
+#[cfg(windows)]
+mod outline;
+#[cfg(windows)]
+mod windows;
+
+#[derive(Clone, Debug, Default)]
+pub struct WindowUpdate {
+    pub target: Option<TargetInfo>,
+    pub dock_hint: Option<String>,
+    pub layout_required: bool,
+}
+
+pub struct WindowController {
+    #[cfg(windows)]
+    inner: windows::Controller,
+}
+
+#[cfg(all(windows, feature = "desktop"))]
+#[derive(Clone)]
+pub(crate) struct DiscoveryScope {
+    pub handle: isize,
+}
+
+impl WindowController {
+    #[cfg(all(windows, feature = "desktop"))]
+    pub(crate) fn discovery_scope(&self, target_id: &str) -> Result<DiscoveryScope, String> {
+        self.inner.discovery_scope(target_id)
+    }
+    /// Start after the independent main window has been created. `emit` runs on the
+    /// hook thread: queue the update; do not call blocking controller methods there.
+    pub fn start(
+        own_handle: isize,
+        emit: impl Fn(WindowUpdate) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            windows::Controller::start(own_handle, emit).map(|inner| Self { inner })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (own_handle, emit);
+            Err("Windows external docking is unsupported on this platform".into())
+        }
+    }
+
+    /// Arm detection before the Tauri main-thread `startDragging` call. Only an
+    /// observed native move-size start/end pair can bind a target.
+    pub fn begin_drag(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.begin_drag()
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Windows external docking is unsupported on this platform".into())
+        }
+    }
+
+    /// Unbind and restore a consent layout only if both windows still match it.
+    pub fn detach(&self) {
+        #[cfg(windows)]
+        self.inner.detach();
+    }
+
+    /// `Ok` means Windows accepted the asynchronous requests. Actual application
+    /// is reported later in `dock_hint`; no acceptance is fabricated.
+    pub fn arrange_side_by_side(&self, consent: bool) -> Result<(), String> {
+        if !consent {
+            return Err("Explicit consent is required to move the target window".into());
+        }
+        #[cfg(windows)]
+        {
+            self.inner.arrange_side_by_side()
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Windows external docking is unsupported on this platform".into())
+        }
+    }
+
+    pub fn current_target(&self) -> Option<TargetInfo> {
+        #[cfg(windows)]
+        {
+            self.inner.current_target()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_platform_never_creates_a_fake_controller() {
+        assert!(WindowController::start(0, |_| {}).is_err());
+    }
+}

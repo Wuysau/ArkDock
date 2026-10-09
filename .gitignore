@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+.local/
+artifacts/
+.playwright-cli/
+src-tauri/gen/schemas/
+*.local.json
+*.log
+*.tsbuildinfo
+examples/native-counter/.hvigor/
+examples/native-counter/.preview/
+examples/native-counter/build/
+examples/native-counter/entry/build/
+examples/native-counter/oh_modules/

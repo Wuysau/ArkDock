@@ -1,0 +1,12 @@
+# pnpm 11 的项目设置；仍然只有一个桌面项目。
+packages:
+  - '.'
+storeDir: .local/pnpm-store
+cacheDir: .local/pnpm-cache
+saveExact: true
+strictPeerDependencies: true
+# doctor/便携检查可在缺依赖时执行；缺依赖仍由 verify 明确 BLOCKED。
+# 保留状态警告，安装仍需用户显式运行且保留供应链政策校验。
+verifyDepsBeforeRun: warn
+allowBuilds:
+  esbuild: true
