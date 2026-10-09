@@ -1,6 +1,7 @@
 // Isolated browser acceptance for explicit UI fixtures. This cannot pass native gates.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -15,7 +16,7 @@ const quick = process.argv.includes('--quick');
 const url = suppliedUrl ?? 'http://127.0.0.1:1421/ui-demo.html';
 const parsedUrl = new URL(url);
 if (parsedUrl.hostname !== '127.0.0.1' || parsedUrl.protocol !== 'http:' || parsedUrl.pathname !== '/ui-demo.html') throw new Error('UI fixture acceptance only accepts the explicit loopback ui-demo.html entry.');
-let server; let browser; let driver; let profile; let serverTail = '';
+let server; let browser; let driver; let profile; let serverTail = ''; let demoBuild = null;
 function files(path) { return readdirSync(path, { withFileTypes: true }).flatMap((item) => item.isDirectory() ? files(join(path, item.name)) : [join(path, item.name)]); }
 async function waitUntil(predicate, message, timeout = 12_000) {
   const start = Date.now();
@@ -40,7 +41,7 @@ async function connectDebugger(port) {
   };
   const send = (method, params = {}) => new Promise((done, reject) => {
     const requestId = ++id;
-    const timer = setTimeout(() => { pending.delete(requestId); reject(new Error(`Debugger timeout: ${method}`)); }, 12_000);
+    const timer = setTimeout(() => { pending.delete(requestId); reject(new Error(`Debugger timeout: ${method}`)); }, method === 'Page.captureScreenshot' ? 45_000 : 12_000);
     pending.set(requestId, { resolve: done, reject, timer }); socket.send(JSON.stringify({ id: requestId, method, params }));
   });
   const evaluate = async (expression) => {
@@ -56,7 +57,7 @@ async function check(name, operation) {
   try { await operation(); checks.push({ status: 'PASS', name }); console.log(`PASS ${name}`); }
   catch (error) {
     let context;
-    try { context = await driver.evaluate('({active:{tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.slice(0,150),aria:document.activeElement?.getAttribute("aria-label")},motion:document.documentElement.dataset.motion,fixture:window.__ARKDOCK_DEMO__?.current(),calls:window.__ARKDOCK_DEMO__?.calls,body:document.body.textContent.slice(-2500),animations:document.getAnimations().filter(e=>e.playState==="running").map(e=>({name:e.animationName,duration:e.effect.getComputedTiming().duration}))})'); } catch { /* Report the original assertion. */ }
+    try { context = await driver.evaluate('({documentFocused:document.hasFocus(),focusTrace:window.__ARKDOCK_FOCUS_TRACE__,active:{tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.slice(0,150),aria:document.activeElement?.getAttribute("aria-label")},motion:document.documentElement.dataset.motion,fixture:window.__ARKDOCK_DEMO__?.current(),calls:window.__ARKDOCK_DEMO__?.calls,body:document.body.textContent.slice(-2500),animations:document.getAnimations().filter(e=>e.playState==="running").map(e=>({name:e.animationName,duration:e.effect.getComputedTiming().duration}))})'); } catch { /* Report the original assertion. */ }
     checks.push({ status: 'FAIL', name, reason: error.message, context }); console.error(`FAIL ${name}: ${error.message}`); process.exitCode = 1;
   }
 }
@@ -87,14 +88,21 @@ async function screenshot(name) {
   const path = join(evidence, `${name}.png`); writeFileSync(path, Buffer.from(image.data, 'base64')); screenshots.push(path);
 }
 function luminance(color) {
-  const components = color.startsWith('#') ? color.slice(1).match(/.{2}/g).map(item=>parseInt(item,16)) : color.match(/[\d.]+/g).slice(0,3).map(Number);
+  const hex = color.startsWith('#') ? color.slice(1) : null;
+  const expanded = hex?.length === 3 ? [...hex].map(item=>item+item).join('') : hex;
+  const components = expanded ? expanded.match(/.{2}/g).map(item=>parseInt(item,16)) : color.match(/[\d.]+/g).slice(0,3).map(Number);
   return components.map(value=>{const c=value/255;return c<=.04045?c/12.92:((c+.055)/1.055)**2.4;}).reduce((sum,value,index)=>sum+value*[.2126,.7152,.0722][index],0);
 }
 function contrastRatio(foreground,background) { const values=[luminance(foreground),luminance(background)].sort((a,b)=>b-a);return (values[0]+.05)/(values[1]+.05); }
 try {
   mkdirSync(evidence, { recursive: true });
   if (!suppliedUrl) {
-    server = spawn(process.execPath, [resolve('node_modules/vite/bin/vite.js'), '--config', 'vite.demo.config.ts'], { cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Test a fixed explicit demo build. Live development HMR must not reset in-flight race fixtures.
+    const built = spawnSync(process.execPath, [resolve('node_modules/vite/bin/vite.js'), 'build', '--config', 'vite.demo.config.ts'], { cwd: process.cwd(), windowsHide: true, encoding: 'utf8', timeout: 30_000 });
+    serverTail = `${built.stdout ?? ''}${built.stderr ?? ''}`.slice(-6000);
+    if (built.status !== 0) throw new Error(`Isolated demo build failed: ${serverTail}`);
+    demoBuild = { capturedAt: new Date().toISOString(), directory: resolve('artifacts/ui-demo-dist'), assets: files('artifacts/ui-demo-dist').map(path=>({path,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')})) };
+    server = spawn(process.execPath, [resolve('node_modules/vite/bin/vite.js'), 'preview', '--config', 'vite.demo.config.ts', '--host', '127.0.0.1', '--port', '1421', '--strictPort'], { cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const remember = (chunk) => { serverTail = (serverTail + chunk).slice(-6000); };
     server.stdout.on('data', remember); server.stderr.on('data', remember);
     await waitUntil(async () => { try { return (await fetch(url, { signal: AbortSignal.timeout(1000) })).ok; } catch { return false; } }, 'Isolated Vite demo server did not start');
@@ -170,6 +178,27 @@ try {
     await driver.evaluate('window.__ARKDOCK_DEMO__.emitOldState()'); await pause(40);
     assert.notEqual((await state()).workspace, 'discovering');
   });
+  await check('V2: cancellation survives newly identified session and never detaches a newer target', async () => {
+    await load('discovering'); await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("detach","command")');
+    await click('button','取消关联'); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Deferred cancellation was not requested');
+    await scenario('reliable'); await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');
+    await waitUntil(async()=>!(await state()).fixture.target,'Cancel did not invalidate the newly discovered session on the same target');
+    assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(e=>e.command==="detach").length'),2);
+    await load('discovering'); await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("detach","command")');
+    await click('button','取消关联'); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Second deferred cancellation was not requested');
+    await driver.evaluate('window.__ARKDOCK_DEMO__.switchTarget()'); await pause(40); const targetId=(await state()).fixture.target.id;
+    await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()'); await pause(80);
+    assert.equal((await state()).fixture.target.id,targetId);assert.equal((await state()).workspace,'discovering');
+    assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(e=>e.command==="detach").length'),1);
+  });
+  await check('V3: delayed trust response cannot close or overwrite a newer session trust panel', async () => {
+    await load('trust'); await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("set_trust","response")');
+    await click('button','信任此工程'); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Trust response did not defer');
+    await scenario('trust'); const sessionId=(await state()).fixture.sessionId;
+    await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()'); await pause(80);
+    assert.equal((await state()).fixture.sessionId,sessionId);assert.equal((await state()).workspace,'untrusted');
+    assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'工程信任');
+  });
   await check('V3: build completion without current frame waits; old session frame rejected', async () => {
     await load('waiting'); assert.equal((await state()).preview, 'waitingFrame'); assert.equal(await driver.evaluate('!!document.querySelector(".native-frame")'), false);
     await scenario('running'); assert.equal((await state()).preview, 'running');
@@ -203,6 +232,27 @@ try {
     await key('Escape'); await pause(40);
     assert.equal(await driver.evaluate('!!document.querySelector("dialog,[role=dialog]")'), false);
     assert.ok(await driver.evaluate('document.activeElement?.getAttribute("aria-label")==="更多操作" || document.activeElement?.textContent.includes("偏好设置")'));
+  });
+  await check('V4: delayed action completion preserves diagnostics opened after the request', async () => {
+    await load('running');
+    await driver.evaluate('(()=>{const trace=[];window.__ARKDOCK_FOCUS_TRACE__=trace;const note=(event,target)=>{trace.push({event,time:performance.now(),focused:document.hasFocus(),active:document.activeElement?.tagName,activeLabel:document.activeElement?.getAttribute("aria-label"),target:target?.tagName,targetLabel:target?.getAttribute("aria-label"),targetText:target?.textContent?.slice(0,50)});if(trace.length>60)trace.shift()};const original=HTMLElement.prototype.focus;HTMLElement.prototype.focus=function(...args){note("focus called",this);original.apply(this,args);note("focus returned",this)};for(const event of ["focusin","focusout"])document.addEventListener(event,e=>note(event,e.target));new MutationObserver(records=>{note("disabled/child mutation "+records.length);requestAnimationFrame(()=>note("RAF after mutation"))}).observe(document.querySelector(".app"),{subtree:true,attributes:true,attributeFilter:["disabled"],childList:true});})()');
+    await click('[aria-label="预览能力"]');await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("refresh_preview","response")');
+    await click('button','手动刷新');await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Refresh response did not defer');
+    await waitUntil(()=>driver.evaluate('[...document.querySelectorAll("dialog button")].some(e=>e.textContent.trim()==="手动刷新" && e.disabled)'),'Pending action button did not enter confirmed disabled state');
+    await waitUntil(()=>driver.evaluate('!!document.activeElement?.closest("dialog")'),'Disabling the focused action lost modal focus');
+    await key('Escape');await waitUntil(()=>driver.evaluate('!document.querySelector("dialog")'),'Controls sheet did not close before opening diagnostics');
+    await click('[aria-label="打开诊断"]');await waitUntil(()=>driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")==="运行日志"'),'Diagnostics did not open before releasing the delayed response');
+    assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志');
+    await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');await pause(80);
+    assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志');
+  });
+  await check('V4: error toast cannot steal modal focus and becomes dismissible after the sheet closes', async () => {
+    await load('none');await click('button','选择工程目录');await pause(50);
+    assert.equal(await driver.evaluate('document.querySelector("[aria-label=关闭提示]")?.disabled'),true);
+    for(let index=0;index<14;index++)await key('Tab');
+    assert.equal(await driver.evaluate('!!document.activeElement?.closest("dialog")'),true);
+    await key('Escape');await pause(40);await click('[aria-label="关闭提示"]');await pause(30);
+    assert.equal(await driver.evaluate('!!document.querySelector(".toast")'),false);
   });
   await check('V4: real CSS motion starts and rapid events replace prior transitions; reduced motion eliminates loops/displacement', async () => {
     await load('running'); await click('[aria-label="打开诊断"]');
@@ -240,7 +290,7 @@ try {
     const mutations = await driver.evaluate('new Promise(resolve=>{let header=0;const observer=new MutationObserver(records=>{header+=records.length});observer.observe(document.querySelector(".header"),{attributes:true,childList:true,subtree:true,characterData:true});for(let index=0;index<200;index++)window.__ARKDOCK_DEMO__.emitCurrentFrame();requestAnimationFrame(()=>requestAnimationFrame(()=>{observer.disconnect();resolve(header)}));})');
     const after = await driver.send('Performance.getMetrics');
     const wanted = new Set(['LayoutCount','RecalcStyleCount','JSHeapUsedSize','TaskDuration','ScriptDuration']);
-    performance.push({workload:'200 explicitly injected labelled test frames in one event burst; no FPS assertion',headerMutations:mutations,before:before.metrics.filter(e=>wanted.has(e.name)),after:after.metrics.filter(e=>wanted.has(e.name))});
+    performance.push({workload:'200 explicitly injected labelled test frames in one event burst; no FPS assertion',motionPreference:await driver.evaluate('document.documentElement.dataset.motion'),headerMutations:mutations,before:before.metrics.filter(e=>wanted.has(e.name)),after:after.metrics.filter(e=>wanted.has(e.name))});
     assert.equal(mutations,0); assert.equal((await state()).preview,'running');
   });
   await check('V3: production bundle excludes fixtures and demo route import', async () => {
@@ -259,7 +309,7 @@ try {
   // The only removable tree is the exact temporary profile this process created.
   if (profile && resolve(profile).startsWith(`${resolve(tmpdir())}${sep}arkdock-ui-owned-`)) { await pause(250); try { rmSync(profile, { recursive: true, force: true }); } catch { /* Browser release may be delayed; retain this owned profile. */ } }
   mkdirSync(evidence, { recursive: true });
-  writeFileSync(join(evidence, 'checks.json'), `${JSON.stringify({ capturedAt: new Date().toISOString(), scope: 'V1–V4 browser UI fixtures only; no native window or HarmonyOS claim', dockLogicalSizes: sizes, extraDemoBannerDip: 44, url, node: process.version, platform: process.platform, checks, screenshots, browserErrors, serverTail }, null, 2)}\n`);
+  writeFileSync(join(evidence, 'checks.json'), `${JSON.stringify({ capturedAt: new Date().toISOString(), scope: 'V1–V4 browser UI fixtures only; no native window or HarmonyOS claim', dockLogicalSizes: sizes, extraDemoBannerDip: 44, demoBuild, url, node: process.version, platform: process.platform, checks, screenshots, browserErrors, serverTail }, null, 2)}\n`);
   writeFileSync(join(evidence, 'motion-samples.json'), `${JSON.stringify({ scope: 'CSS animation samples from running owned Chromium; not native snap animation or FPS measurement', samples: motion }, null, 2)}\n`);
   writeFileSync(join(evidence, 'performance.json'), `${JSON.stringify({scope:'Browser counters under explicit UI fixture frame burst; no native transport, Windows compositor, or 60 FPS claim',samples:performance}, null, 2)}\n`);
   writeFileSync(join(evidence, 'contrast.json'), `${JSON.stringify({scope:'Measured core text tokens and actual primary action colors; not a complete assistive-technology audit',samples:contrast}, null, 2)}\n`);

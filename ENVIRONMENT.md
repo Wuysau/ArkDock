@@ -14,6 +14,13 @@
 
 ## 启动与检查
 
+本机已有 portable 工具时，仅在当前 PowerShell 设置：
+
+```powershell
+$env:PATH = 'D:/CodingTools/node-v24.21.0-win-x64;D:/CodingTools/ArkDock-pnpm/node_modules/.bin;' + $env:PATH
+$env:ARKDOCK_SDK = 'D:/CodingTools/HarmonyOS/command-line-tools'
+```
+
 ```powershell
 pnpm install --frozen-lockfile
 pnpm dev:ui
@@ -41,7 +48,9 @@ SDK 商业工具不纳入仓库；缺 SDK 或协议不能以测试画面通过�
 
 ## 本次代码检查点
 
-已运行基础 pnpm verify（退出 0）及 Rust desktop 71 项测试（退出 0）。
-界面、动效与当前新代码的真实桌面联动仍在验收中，不能据此宣称全部完成。
+基础 pnpm verify、Rust desktop 71 项、便携回归 31 项均退出 0。
+真实 verify:ui（含无边框鼠标缩放）与 verify:native（SDK 帧/点击/更新/失败恢复）退出 0。
+verify:windows 压力回归退出 1：最大化目标并排布局/迟到恢复仍需定位。
+单屏基础联动通过不能覆盖该失败或不同 DPI 双屏。原生吸附目前即时定位，尚无缓动。
 本次提交仅保存源码、配置、测试/工具与环境说明；设计、参考图片和 Harness 文档保留本地。
 全量 verify 含文档引用检查，需要未提交的本地文档；代码检查可单独使用上面的命令。

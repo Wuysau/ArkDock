@@ -10,7 +10,25 @@ export function Sheet({ title, children, close, kind = 'panel', returnFocus }: {
     const previous = anchor.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const preferred = ref.current?.querySelector<HTMLElement>('[data-autofocus]');
     (preferred ?? ref.current)?.focus();
+    const surface = ref.current;
+    let scheduled: number | null = null;
+    const keepFocus = () => {
+      if (scheduled !== null) return;
+      scheduled = requestAnimationFrame(() => {
+        scheduled = null;
+        // A focused action becoming disabled can make Chromium move focus to BODY.
+        // Keep focus in this local dialog only while this document itself has focus.
+        const active = document.activeElement;
+        if (surface?.isConnected && document.hasFocus() && (!surface.contains(active) || active?.matches(':disabled'))) surface.focus();
+      });
+    };
+    const observer = new MutationObserver(keepFocus);
+    if (surface) observer.observe(surface, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+    document.addEventListener('focusin', keepFocus);
+    document.addEventListener('focusout', keepFocus);
     return () => {
+      observer.disconnect(); document.removeEventListener('focusin', keepFocus); document.removeEventListener('focusout', keepFocus);
+      if (scheduled !== null) cancelAnimationFrame(scheduled);
       requestAnimationFrame(() => {
         // React removes inert with the closing dialog. A replacement dialog owns focus instead.
         if (!document.querySelector('dialog[open]') && previous?.isConnected) previous.focus();

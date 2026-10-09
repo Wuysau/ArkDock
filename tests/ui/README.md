@@ -7,7 +7,8 @@
 `pnpm build:demo` 只生成 `artifacts/ui-demo-dist`，不是发布包。
 `pnpm build` 生成正式 `dist`；`pnpm test:ui` 检查生产包未包含 fixture、演示入口或测试图。
 
-浏览器验收脚本默认启动自己拥有的 Vite 1421 和私有无头 Chromium，并在结束后关闭。
+浏览器验收脚本默认先构建独立演示，再启动自己拥有的 Vite preview 1421 和私有无头 Chromium，
+在结束后关闭。当前轮使用固定构建，不受并行编辑的 HMR 重载影响；manifest 保存构建文件哈希。
 Windows 需安装 Chrome 或 Edge；自定义位置可设置 `ARKDOCK_UI_BROWSER`。
 已启动独立演示服务时，可运行 `node tools/ui-visual.mjs --url=http://127.0.0.1:1421/ui-demo.html`。
 脚本不控制用户的浏览器配置、目标应用或已有 ArkDock 进程。

@@ -122,6 +122,26 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .art-device { display: grid; place-items: center; position: absolute; width: 56px; height: 91px; top: 58px; left: 96px; transform: rotate(7deg); border: 2px solid var(--highlight); border-radius: 12px; background: linear-gradient(155deg, color-mix(in srgb, var(--accent) 30%, var(--bg)), var(--bg)); box-shadow: 0 6px 18px rgb(75 130 255 / 18%); }
 .art-link { position: absolute; left: 72px; top: 97px; color: var(--highlight); background: var(--surface); border: 1px solid var(--line); border-radius: 50%; width: 31px; height: 31px; display: grid; place-items: center; }
 .welcome-footnote { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; margin-top: 14px; }
+.app[data-binding="unbound"] .workspace-strip,
+.app[data-binding="unbound"] .preview-toolbar,
+.app[data-binding="unbound"] .state-strip,
+.app[data-binding="candidate"] .workspace-strip,
+.app[data-binding="candidate"] .preview-toolbar { display: none; }
+.app[data-binding="unbound"] .stage-caption,
+.app[data-binding="candidate"] .stage-caption { visibility: hidden; }
+.welcome-state .welcome-art { margin-bottom: 28px; width: 188px; height: 166px; }
+.welcome-state .art-window { width: 130px; height: 105px; top: 18px; left: 12px; background: linear-gradient(140deg, color-mix(in srgb, var(--accent) 52%, var(--surface)), var(--surface)); border-color: var(--highlight); }
+.welcome-state .art-device { width: 63px; height: 105px; left: 112px; top: 64px; box-shadow: 0 0 28px rgb(75 130 255 / 22%), 0 8px 22px rgb(0 0 0 / 22%); }
+.welcome-state .art-link { top: 109px; left: 88px; }
+.welcome-features { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding-top: 22px; margin-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.welcome-features > span { display: flex; align-items: center; gap: 9px; }
+.welcome-features svg { color: var(--highlight); }
+.scanner-orbit { width: 148px; height: 148px; position: relative; flex-shrink: 0; margin-bottom: 26px; display: grid; place-items: center; }
+.scanner-orbit > span { position: absolute; inset: 0; border: 1px dashed color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 50%; }
+.scanner-orbit > span:nth-child(2) { inset: 14px; border-style: solid; border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.scanner-orbit > span:nth-child(3) { inset: 28px; border-style: solid; border-color: var(--accent); opacity: .65; }
+.scanner-orbit::before { content: ""; position: absolute; inset: 14px; border: 2px solid transparent; border-top-color: var(--highlight); border-radius: 50%; box-shadow: 0 -6px 20px rgb(75 130 255 / 16%); animation: task-spin 2200ms linear infinite; }
+.scanner-orbit > div { width: 67px; height: 67px; display: grid; place-items: center; color: var(--highlight); background: radial-gradient(circle, rgb(75 130 255 / 30%), rgb(75 130 255 / 7%)); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 50%; }
 .bridge-notice { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 10px 12px; text-align: left; max-width: 100%; }
 .bridge-notice > svg { color: var(--highlight); flex-shrink: 0; }
 .bridge-notice > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -247,6 +267,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
   .empty h1 { font-size: 18px; }
   .welcome-footnote { margin-top: 6px; font-size: 9px; }
   .bridge-notice { padding: 6px 10px; }
+  .welcome-state .welcome-art { height: 136px; margin-bottom: 12px; transform: scale(.85); }
+  .welcome-features { padding-top: 14px; gap: 8px; font-size: 11px; }
+  .scanner-orbit { width: 112px; height: 112px; margin-bottom: 12px; }
 }
 :root[data-motion="reduce"] *, :root[data-motion="reduce"] *::before, :root[data-motion="reduce"] *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important; }
 :root[data-motion="reduce"] .sheet, :root[data-motion="reduce"] .state-strip, :root[data-motion="reduce"] .toast, :root[data-motion="reduce"] .task-spinner { animation: none !important; }

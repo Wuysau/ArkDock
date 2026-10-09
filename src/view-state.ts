@@ -1,4 +1,5 @@
 import type { AppSnapshot, Candidate, NativeFrame, Phase } from './ipc/model.ts';
+import { hasDockCandidate } from './request-state.ts';
 
 export function applySnapshot(current: AppSnapshot | null, incoming: AppSnapshot): AppSnapshot {
   return current && incoming.revision <= current.revision ? current : incoming;
@@ -79,7 +80,7 @@ export function mapFramePoint(frame: Pick<NativeFrame, 'width' | 'height'>,
 /** These dimensions describe confirmed backend state, never a timer or a predicted command result. */
 export function deriveUiState(state: AppSnapshot | null, frame: NativeFrame | null): UiState {
   const binding: BindingState = state?.phase === 'unsupported' ? 'unavailable'
-    : state?.target ? 'bound' : state?.dockHint ? 'candidate' : 'unbound';
+    : hasDockCandidate(state?.dockHint) ? 'candidate' : state?.target ? 'bound' : 'unbound';
   const workspace: WorkspaceState = state?.phase === 'discovering' ? 'discovering'
     : state?.phase === 'selectProject' ? 'selecting'
       : state?.project ? state.project.environment !== 'windowsLocal' ? 'unavailable'

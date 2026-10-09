@@ -28,7 +28,9 @@ public static class ArkDockWindowTest {
     long result=0;
     EnumWindows((h,p) => { uint observed; GetWindowThreadProcessId(h,out observed);
       var title=new StringBuilder(1024); GetWindowText(h,title,title.Capacity);
-      if(observed==pid && IsWindowVisible(h) && GetWindow(h,4)==IntPtr.Zero && title.ToString()=="ArkDock") { result=h.ToInt64(); return false; }
+      var name=new StringBuilder(256); GetClassName(h,name,name.Capacity);
+      // Tao's thread event target can share the title but is not the actual WebView window.
+      if(observed==pid && IsWindowVisible(h) && GetWindow(h,4)==IntPtr.Zero && title.ToString()=="ArkDock" && name.ToString()=="Tauri Window") { result=h.ToInt64(); return false; }
       return true;
     },IntPtr.Zero); return result;
   }

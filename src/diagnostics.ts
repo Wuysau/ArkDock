@@ -9,7 +9,9 @@ export function diagnosticText(state: AppSnapshot | null): string {
     ...state.diagnostics.map((item) => `${new Date(item.observedAt).toISOString()} ${item.status} ${item.code}: ${item.message}`)].join('\n');
   let redacted = text;
   for (const path of paths) redacted = redacted.split(path).join('[本地路径]');
-  return redacted.replace(/[A-Z]:[\\/][^\s"<>，；]+/gi, '[本地路径]')
-    .replace(/\\\\[^\s"<>，；]+/g, '[网络路径]')
-    .replace(/\/(?:home|Users|mnt|workspaces)\/[^\s"<>，；]+/g, '[环境路径]');
+  // Unknown paths can contain spaces, apostrophes and separators. Redact the rest of that log line
+  // conservatively; diagnostic code/status and following records remain available.
+  return redacted.replace(/[A-Z]:[\\/][^\r\n]*/gi, '[本地路径]')
+    .replace(/\\\\[^\r\n]*/g, '[网络路径]')
+    .replace(/\/(?:home|Users|mnt|workspaces)\/[^\r\n]*/g, '[环境路径]');
 }

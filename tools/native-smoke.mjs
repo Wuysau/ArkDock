@@ -43,6 +43,16 @@ async function until(name, test, timeout = 150_000) {
 async function check(id, name, execute) {
   await execute(); checks.push({ id, status: 'PASS', name }); console.log(`PASS ${id} ${name}`);
 }
+async function clickUiControl(expression, name) {
+  let point;
+  await until(name, async () => {
+    point = await view.evaluate(`(() => { const button = ${expression}; if (!button || button.disabled) return null; const r = button.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+    return Boolean(point);
+  }, 10_000);
+  await view.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
+  await view.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+}
+const trustThroughUi = () => clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual execution trust confirmation');
 async function frame(name) {
   const data = await view.evaluate('document.querySelector(".native-frame")?.src.split(",")[1]');
   assert.ok(data, 'Actual native frame must be delivered to the UI');
@@ -91,9 +101,10 @@ try {
   const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter')), 15_000);
   const candidate = selected.candidates.find((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter'));
   assert.equal(candidate.autoEligible, false);
-  const associated = await invoke('select_candidate', { candidateId:candidate.id });
+  await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.querySelector("code")?.textContent === ${JSON.stringify(candidate.project.appRoot)})`,'Actual candidate selection');
+  const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && state.sessionId, 10_000);
   projectId = associated.project.id; originalTrust = associated.trusted;
-  if (!originalTrust) await invoke('set_trust', { projectId, trusted:true });
+  if (!originalTrust) await trustThroughUi();
   let running;
   await check('D1', 'Actual SDK build, Previewer and PNG delivery into ArkDock', async () => {
     running = await until('Build and first native frame', (state) => state.phase === 'running' && state.build.displayedGeneration === state.build.generation);
@@ -102,6 +113,8 @@ try {
     currentLog = logFrom(running);
     assert.match(readFileSync(currentLog,'utf8'), /ARKDOCK_NATIVE_REVISION=FIRST/);
     await frame('before-click');
+    const initialScreenshot = await view.send('Page.captureScreenshot',{format:'png'});
+    writeFileSync('artifacts/native-first-frame-window.png',Buffer.from(initialScreenshot.data,'base64'));
   });
   await check('B4/C1', 'Revoking trust during real async build cancels it; regrant starts a new session', async () => {
     const oldSession = running.sessionId;
@@ -113,10 +126,11 @@ try {
     assert.equal(revoked.phase,'untrusted');
     assert.equal(revoked.sessionId,null);
     await assert.rejects(invoke('refresh_preview'),/TRUST_REQUIRED/);
-    await invoke('set_trust', {projectId,trusted:true});
+    await trustThroughUi();
     running = await until('Real rebuild after regrant', (state) => state.phase === 'running' && state.sessionId !== oldSession && state.build.displayedGeneration === state.build.generation);
     currentLog = logFrom(running);
     await until('Regrant image in React', async () => (await view.evaluate('document.querySelector(".native-frame")?.alt'))?.includes(running.build.buildId), 10_000);
+    assert.equal(await view.evaluate('!!document.querySelector("dialog")'),false,'Trust confirmation must release the native input surface');
   });
   await check('D2', 'Click on ArkDock image changes actual ArkUI component count', async () => {
     const previous = await frame('before-click');

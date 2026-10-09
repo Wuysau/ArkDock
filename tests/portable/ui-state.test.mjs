@@ -42,7 +42,7 @@ test('窗口、工程和预览保持独立；绑定与信任不能伪造首帧',
 });
 
 test('真实 dockHint 是候选提示，SDK 缺失保持 unavailable 并说明原因', () => {
-  const hint = deriveUiState(snapshot({ target: null, project: null, sessionId: null, dockHint: '右侧可贴边' }), null);
+  const hint = deriveUiState(snapshot({ target: null, project: null, sessionId: null, dockHint: 'Release to bind Terminal' }), null);
   assert.equal(hint.binding, 'candidate');
   const missing = snapshot({ phase: 'sdkMissing', backend: { ...snapshot().backend, available: false, reason: 'SDK_MISSING: 未配置合法 SDK' } });
   const ui = deriveUiState(missing, null);

@@ -36,7 +36,7 @@ function base(revision: number): AppSnapshot {
 function snapshot(scenario: Scenario, revision: number): AppSnapshot {
   const value = base(revision);
   if (scenario === 'welcome') return value;
-  if (scenario === 'hint') return { ...value, dockHint: '松开以连接 · 测试目标' };
+  if (scenario === 'hint') return { ...value, dockHint: 'Release to bind Windows Terminal' };
   value.target = { ...target };
   if (scenario === 'discovering') return { ...value, phase: 'discovering' };
   if (scenario === 'multi' || scenario === 'weak' || scenario === 'none') return { ...value, phase: 'selectProject', candidates: scenario === 'none' ? [] : scenario === 'weak' ? [candidate(0)] : Array.from({ length: 6 }, (_, index) => candidate(index)) };
@@ -89,12 +89,17 @@ export interface FixtureDriver {
   emitOldFrame(): void;
   switchTarget(): void;
   current(): AppSnapshot;
+  deferNext(command: keyof CommandArgs, mode: 'command' | 'response'): void;
+  releaseDeferred(): void;
+  hasDeferred(): boolean;
 }
 export function createFixtureDriver(initial: Scenario): FixtureDriver {
   let revision = 1; let current = snapshot(initial, revision); let previous: AppSnapshot | null = null; let oldFrame: NativeFrame | null = null; let initialPending = true;
   const png = calibrationPng(); let sequence = 0;
   const subscriptions = new Set<{ state: (state: AppSnapshot) => void; frame: (frame: NativeFrame) => void }>();
   const calls: FixtureDriver['calls'] = [];
+  let queued: { command: keyof CommandArgs; mode: 'command' | 'response' } | null = null;
+  let deferred: (() => void) | null = null;
   const copy = (value: AppSnapshot) => structuredClone(value);
   const emitState = () => { for (const listener of subscriptions) listener.state(copy(current)); };
   const frameFor = (state: AppSnapshot): NativeFrame => ({ sessionId: state.sessionId!, buildId: state.build.buildId!, generation: state.build.generation, sequence: ++sequence, width: 360, height: 640, capturedAt: stamp, rotation: 0, pngBase64: png });
@@ -107,16 +112,13 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       publish(good); emitFrame(); current = { ...next, revision: ++revision }; emitState();
     } else { publish(next); if (scenario === 'running' || scenario === 'recovery') emitFrame(); }
   }
-  const bridge: UiBridge = {
-    available: true,
-    async request<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope?: RequestScope) {
-      calls.push({ command, args: structuredClone(args), scope });
+  async function perform<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope?: RequestScope): Promise<AppSnapshot> {
       if (command === 'snapshot') {
         if (initialPending && (initial === 'stale' || initial === 'diagnostics')) load(initial);
         else { emitState(); if (initialPending && (initial === 'running' || initial === 'recovery')) emitFrame(); }
         initialPending = false; return copy(current);
       }
-      if (scope?.targetId !== (current.target?.id ?? null) || scope?.sessionId !== current.sessionId) throw new Error('UI 测试：请求属于已失效的绑定会话。');
+      if (scope?.targetId !== (current.target?.id ?? null) || scope?.sessionId !== current.sessionId) throw new Error('STALE_REQUEST: UI 测试请求属于已失效的绑定会话。');
       const name: string = command;
       if (name === 'minimize_window' || name === 'close_window') throw new Error('UI 演示不能操作系统窗口；请使用 Windows 桌面运行验证。');
       if (name === 'click_preview') {
@@ -126,7 +128,7 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       if (name === 'detach') publish(base(++revision));
       else if (name === 'rediscover') publish({ ...current, revision: ++revision, phase: 'discovering', candidates: [], project: null, sessionId: null, trusted: false, sessionRef: null });
       else if (name === 'cancel_discovery') publish({ ...current, revision: ++revision, phase: 'selectProject', candidates: [], dockHint: null });
-      else if (name === 'begin_drag') publish({ ...current, revision: ++revision, dockHint: '松开以连接 · 测试目标' });
+      else if (name === 'begin_drag') publish({ ...current, revision: ++revision, dockHint: 'Release to bind Windows Terminal' });
       else if (name === 'select_candidate') {
         const chosen = current.candidates.find((item) => item.id === (args as unknown as { candidateId: string }).candidateId);
         if (!chosen?.valid) throw new Error('UI 测试：候选不可访问。');
@@ -140,7 +142,21 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       else if (name === 'configure_sdk' || name === 'select_directory') throw new Error('UI 演示不打开系统目录对话框；请在桌面环境选择真实路径。');
       else if (name === 'arrange_side_by_side') throw new Error('UI 演示不能改变目标窗口布局。');
       else throw new Error(`UI 演示没有实现 ${name}；不会伪装执行成功。`);
-      return copy(current);
+    return copy(current);
+  }
+  function hold(complete: () => Promise<AppSnapshot>): Promise<AppSnapshot> {
+    return new Promise((resolve, reject) => { deferred = () => { void complete().then(resolve, reject); }; });
+  }
+  const bridge: UiBridge = {
+    available: true,
+    async request<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope?: RequestScope) {
+      calls.push({ command, args: structuredClone(args), scope });
+      const mode = queued?.command === command ? queued.mode : null;
+      if (mode) queued = null;
+      if (mode === 'command') return hold(() => perform(command, args, scope));
+      const result = await perform(command, args, scope);
+      if (mode === 'response') return hold(async () => result);
+      return result;
     },
     async observe(state, frame) { const listener = { state, frame }; subscriptions.add(listener); return () => { subscriptions.delete(listener); }; },
   };
@@ -149,5 +165,8 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
     emitOldState: () => { if (previous) for (const listener of subscriptions) listener.state(copy(previous)); },
     emitOldFrame: () => { if (oldFrame) for (const listener of subscriptions) listener.frame({ ...oldFrame, sequence: ++sequence }); },
     switchTarget: () => publish({ ...base(++revision), phase: 'discovering', target: { ...target, id: `demo-target-${revision}`, title: '第二个测试目标 — 终端' } }),
+    deferNext: (command, mode) => { if (queued || deferred) throw new Error('测试已有待释放请求。'); queued = { command, mode }; },
+    hasDeferred: () => deferred !== null,
+    releaseDeferred: () => { if (!deferred) throw new Error('没有待释放测试请求。'); const release = deferred; deferred = null; release(); },
   };
 }

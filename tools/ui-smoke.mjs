@@ -68,6 +68,8 @@ try {
   view = await connectWebview();
   const dock = JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','Get-Process -Name arkdock | Where-Object MainWindowHandle -NE 0 | Select-Object -First 1 Id | ConvertTo-Json -Compress'],{encoding:'utf8',windowsHide:true}));
   handle = action('find',0,{ProcessId:dock.Id}).handle;
+  assert.ok(handle,'The actual independent Tauri main window must be found');
+  action('restore',handle); await pause(250);
   original = action('info',handle);
   ({theme:originalTheme,motion:originalMotion}=await appearance());
   await resizeLogical(440,820);
@@ -90,7 +92,7 @@ try {
       await settings(); await clickText(theme); await closePanel();
       for(const [width,height] of [[360,640],[440,820],[520,960]]) {
         await resizeLogical(width,height);
-        const controls=await view.evaluate('({bridge:!!window.__TAURI__,header:!!document.querySelector(".header"),toolbar:!!document.querySelector(".preview-toolbar"),footer:document.querySelector(".footer").getBoundingClientRect().bottom,disabledPage:document.querySelector("select[aria-label=\"页面或组件\"]").disabled,disabledModes:[...document.querySelectorAll("select[aria-label=\"运行方式\"] option")].slice(1).every(item=>item.disabled)})');
+        const controls=await view.evaluate('({bridge:!!window.__TAURI__,header:!!document.querySelector(".header"),toolbar:!!document.querySelector(".preview-toolbar"),footer:document.querySelector(".footer").getBoundingClientRect().bottom,disabledPage:document.querySelector("select[aria-label=页面或组件]").disabled,disabledModes:[...document.querySelectorAll("select[aria-label=运行方式] option")].slice(1).every(item=>item.disabled)})');
         assert.equal(controls.bridge,true); assert.equal(controls.header,true); assert.equal(controls.toolbar,true);
         assert.ok(controls.footer<=height); assert.equal(controls.disabledPage,true); assert.equal(controls.disabledModes,true);
         await capture(`${theme==='深色'?'dark':'light'}-${width}x${height}`);
@@ -109,19 +111,19 @@ try {
     assert.ok((await appearance()).duration.split(',').some(value=>Number.parseFloat(value)>=.12)); await closePanel();
   });
   await check('Chinese project search, modal Tab confinement, Esc and restored trigger focus',async()=>{
-    await click('[aria-label="工程"]'); assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'搜索工程');
+    await click('[aria-label="更多操作"]'); await clickText('选择当前工程'); assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'搜索工程');
     await view.send('Input.insertText',{text:'不存在的工程 中文搜索'});
-    assert.equal(await view.evaluate('document.querySelector("input[aria-label=\"搜索工程\"]").value'),'不存在的工程 中文搜索');
+    assert.equal(await view.evaluate('document.querySelector("input[aria-label=搜索工程]").value'),'不存在的工程 中文搜索');
     assert.equal(await view.evaluate('document.querySelector(".no-results h3").textContent'),'没有匹配的工程');
-    await view.evaluate('document.querySelector("dialog button[aria-label=\"关闭面板\"]").focus()'); await key('Tab',true);
+    await view.evaluate('document.querySelector("dialog button[aria-label=关闭面板]").focus()'); await key('Tab',true);
     assert.equal(await view.evaluate('document.activeElement?.closest("dialog")!==null'),true);
     await key('Escape'); assert.equal(await view.evaluate('!!document.querySelector("dialog")'),false);
-    assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'工程'); assert.equal(action('info',handle).visible,true);
+    assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'更多操作'); assert.equal(action('info',handle).visible,true);
   });
   await check('Diagnostics, SDK and capability panels show actual unavailable reasons',async()=>{
     await click('[aria-label="打开诊断"]'); assert.equal(await view.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志'); await capture('diagnostics'); await closePanel();
     await click('[aria-label="更多操作"]'); await clickText('设备与原生工具链'); assert.equal(await view.evaluate('document.querySelector("dialog h3").textContent'),'连接真实原生运行时');
-    await closePanel(); await click('[aria-label="预览能力"]');
+    await closePanel(); await click('[aria-label="更多操作"]'); await clickText('预览能力');
     const unavailable=await view.evaluate('[...document.querySelectorAll(".capability-list > div")].filter(item=>["拖拽 / 滑动","文字输入 / IME","设备方向","鸿蒙应用主题","页面切换","设备切换","模拟器","真机"].includes(item.querySelector("strong").textContent)).map(item=>({status:item.querySelector(".badge").textContent,reason:item.querySelector("p").textContent}))');
     assert.equal(unavailable.length,8); for(const capability of unavailable) { assert.equal(capability.status,'unsupported'); assert.ok(capability.reason.length>5); } await closePanel();
   });
@@ -130,6 +132,20 @@ try {
     assert.equal(action('info',handle).minimized,true); action('restore',handle); await pause(200);
     const restored=action('info',handle); assert.equal(restored.visible,true); assert.equal(restored.minimized,false); assert.equal(restored.owner,0); assert.equal(before.owner,0);
     await resizeLogical(520,960); await resizeLogical(440,820);
+  });
+  await check('Borderless native pointer edge resize retains usable independently resized WebView',async()=>{
+    await resizeLogical(440,720);
+    const before=action('info',handle);
+    const viewport=await view.evaluate('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})');
+    action('foreground',handle); await pause(150);
+    action('drag',handle,{X:before.right-2,Y:before.bottom-2,EndX:before.right+98,EndY:before.bottom+78});
+    await pause(200);
+    const after=action('info',handle);
+    const resized=await view.evaluate('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})');
+    assert.ok(after.right-before.right>=50,'Actual Win32 window width changes with pointer edge resize');
+    assert.ok(after.bottom-before.bottom>=40,'Actual Win32 window height changes with pointer edge resize');
+    assert.ok(resized.width>viewport.width && resized.height>viewport.height,'Actual WebView receives the native resize');
+    assert.equal(after.owner,0); await resizeLogical(440,820);
   });
 } catch(error) { console.error(error); checks.push({status:'FAIL',name:error.message}); process.exitCode=1; }
 finally {
