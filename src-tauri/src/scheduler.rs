@@ -173,32 +173,69 @@ impl BuildCoordinator {
     }
 
     pub fn accept_frame(&mut self, frame: &NativeFrame) -> Result<(), FrameReject> {
+        self.check_frame_identity(
+            &frame.session_id,
+            &frame.build_id,
+            frame.generation,
+            frame.sequence,
+        )?;
+        validate_frame(frame)?;
+        self.last_frame_sequence = Some(frame.sequence);
+        self.displayed_generation = Some(frame.generation);
+        Ok(())
+    }
+
+    pub fn accept_binary_frame(
+        &mut self,
+        frame: &crate::preview::frames::BinaryFrame,
+    ) -> Result<(), FrameReject> {
         let workspace = self.workspace.as_ref().ok_or(FrameReject::Stopped)?;
-        if frame.session_id != workspace.session_id {
+        if frame.metadata.workspace_id != workspace.workspace_id {
             return Err(FrameReject::WrongSession);
         }
-        if frame.generation != self.generation {
+        let metadata = &frame.metadata;
+        self.check_frame_identity(
+            &metadata.session_id,
+            &metadata.build_id,
+            metadata.generation,
+            metadata.sequence,
+        )?;
+        crate::preview::frames::validate_binary_frame(frame)?;
+        self.last_frame_sequence = Some(metadata.sequence);
+        self.displayed_generation = Some(metadata.generation);
+        Ok(())
+    }
+
+    fn check_frame_identity(
+        &self,
+        session_id: &str,
+        build_id: &str,
+        generation: u64,
+        sequence: u64,
+    ) -> Result<(), FrameReject> {
+        let workspace = self.workspace.as_ref().ok_or(FrameReject::Stopped)?;
+        if session_id != workspace.session_id {
+            return Err(FrameReject::WrongSession);
+        }
+        if generation != self.generation {
             return Err(FrameReject::WrongGeneration);
         }
         let success = self
             .last_success
             .as_ref()
             .ok_or(FrameReject::NoSuccessfulBuild)?;
-        if frame.build_id != success.build_id {
+        if build_id != success.build_id {
             return Err(FrameReject::WrongBuild);
         }
-        if frame.generation != success.generation {
+        if generation != success.generation {
             return Err(FrameReject::WrongGeneration);
         }
         if self
             .last_frame_sequence
-            .is_some_and(|sequence| frame.sequence <= sequence)
+            .is_some_and(|last| sequence <= last)
         {
             return Err(FrameReject::OldSequence);
         }
-        validate_frame(frame)?;
-        self.last_frame_sequence = Some(frame.sequence);
-        self.displayed_generation = Some(frame.generation);
         Ok(())
     }
 
@@ -424,6 +461,63 @@ pub fn is_source_path(root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_surface_requires_exact_successful_generation_and_monotonic_sequence() {
+        use crate::ipc::model::{BinaryFrameMetadata, NativeFrameFormat};
+        use crate::preview::frames::BinaryFrame;
+        let mut coordinator = BuildCoordinator::new(0);
+        coordinator.set_workspace("w", "s", 1);
+        coordinator.request_refresh(1);
+        let task = coordinator.next_task(1).unwrap();
+        let mut frame = BinaryFrame {
+            metadata: BinaryFrameMetadata {
+                protocol_version: 1,
+                workspace_id: "w".into(),
+                session_id: "s".into(),
+                build_id: task.build_id.clone(),
+                generation: 1,
+                sequence: 1,
+                width: 360,
+                height: 640,
+                captured_at: 1,
+                rotation: 0,
+                format: NativeFrameFormat::Jpeg,
+                payload_length: 4,
+            },
+            // Test-only envelope; this test does not exercise ArkUI or JPEG decoding.
+            payload: vec![0xff, 0xd8, 0xff, 0xd9],
+        };
+        assert_eq!(
+            coordinator.accept_binary_frame(&frame),
+            Err(FrameReject::NoSuccessfulBuild)
+        );
+        coordinator.complete(&task, BuildOutcome::Success, 2);
+        coordinator.accept_binary_frame(&frame).unwrap();
+        assert_eq!(coordinator.status().displayed_generation, Some(1));
+        assert_eq!(
+            coordinator.accept_binary_frame(&frame),
+            Err(FrameReject::OldSequence)
+        );
+        frame.metadata.sequence = 2;
+        frame.metadata.workspace_id = "another".into();
+        assert_eq!(
+            coordinator.accept_binary_frame(&frame),
+            Err(FrameReject::WrongSession)
+        );
+        frame.metadata.workspace_id = "w".into();
+        coordinator.request_refresh(3);
+        assert_eq!(
+            coordinator.accept_binary_frame(&frame),
+            Err(FrameReject::WrongGeneration)
+        );
+        assert!(coordinator.status().stale);
+        coordinator.stop();
+        assert_eq!(
+            coordinator.accept_binary_frame(&frame),
+            Err(FrameReject::Stopped)
+        );
+    }
 
     fn coordinator() -> BuildCoordinator {
         let mut coordinator = BuildCoordinator::new(100);

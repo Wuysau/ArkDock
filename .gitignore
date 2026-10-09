@@ -10,6 +10,7 @@ src-tauri/gen/schemas/
 *.tsbuildinfo
 examples/native-counter/.hvigor/
 examples/native-counter/.preview/
+examples/native-counter/entry/.preview/
 examples/native-counter/build/
 examples/native-counter/entry/build/
 examples/native-counter/oh_modules/

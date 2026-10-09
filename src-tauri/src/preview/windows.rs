@@ -1,14 +1,14 @@
 //! Adapter for the exact, locally verified HarmonyOS 26.0.0.105 Windows toolchain.
 //! Public OpenHarmony sources informed experiments; actual commercial binary receipts
 //! are required by the native gate. No unverified version enters this adapter.
-use super::{FrameMailbox, NativePoint};
-use crate::ipc::model::{NativeFrame, ProjectRef};
+use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
+use super::frames::{parse_jpeg40, BinaryFrameMailbox};
+use super::NativePoint;
+use crate::ipc::model::ProjectRef;
 use crate::scheduler::BuildTask;
-use base64::{engine::general_purpose::STANDARD, Engine};
-use image::{ImageFormat, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
@@ -45,7 +45,7 @@ struct VerifiedProfile {
 
 struct WorkerContext<'a> {
     stop: &'a AtomicBool,
-    frames: &'a Mutex<FrameMailbox>,
+    frames: &'a Mutex<BinaryFrameMailbox>,
     inputs: &'a mpsc::Receiver<NativePoint>,
     messages: &'a mpsc::SyncSender<String>,
 }
@@ -112,13 +112,13 @@ pub(super) struct Runtime {
     thread: Option<JoinHandle<()>>,
     inputs: mpsc::SyncSender<NativePoint>,
     pub completed: mpsc::Receiver<Completed>,
-    pub frames: Arc<Mutex<FrameMailbox>>,
+    pub frames: Arc<Mutex<BinaryFrameMailbox>>,
     pub messages: mpsc::Receiver<String>,
 }
 impl Runtime {
     pub fn launch(sdk: PathBuf, project: ProjectRef, task: BuildTask) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let frames = Arc::new(Mutex::new(FrameMailbox::new()));
+        let frames = Arc::new(Mutex::new(BinaryFrameMailbox::new()));
         let (inputs, input_receiver) = mpsc::sync_channel(16);
         let (completed_tx, completed) = mpsc::sync_channel(2);
         let (message_tx, messages) = mpsc::sync_channel(16);
@@ -403,7 +403,8 @@ fn run(
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let build_log = directory.join("build.log");
     let runtime_log = directory.join("previewer.log");
-    let home = std::env::temp_dir().join("ArkDock-hvigor");
+    // Each workspace owns its wrapper cache; parallel worktrees never share its daemon state.
+    let home = root.join(".hvigor/arkdock-home");
     let env = vec![
         (
             "DEVECO_SDK_HOME".into(),
@@ -418,21 +419,12 @@ fn run(
             home.to_string_lossy().into_owned(),
         ),
     ];
+    let mut build_args = vec![sdk.join(HVIGOR).to_string_lossy().into_owned()];
+    build_args.extend(preview_build_args(&project.module)?);
+    let build_started = Instant::now();
     let build = process::Process::spawn(
         &sdk.join("tool/node/node.exe"),
-        &[
-            sdk.join(HVIGOR).to_string_lossy().into_owned(),
-            "--mode".into(),
-            "module".into(),
-            "-p".into(),
-            format!("module={}@default", project.module),
-            "-p".into(),
-            "product=default".into(),
-            "-p".into(),
-            "buildMode=debug".into(),
-            "assembleHap".into(),
-            "--no-daemon".into(),
-        ],
+        &build_args,
         &root,
         &env,
         &build_log,
@@ -445,12 +437,13 @@ fn run(
         if build.log_size() > LOG_LIMIT {
             return Err("BUILD_LOG_LIMIT".into());
         }
-        if let Some(code) = build.exit_code()? {
-            if code != 0 {
+        let log = process::bounded_log(&build_log);
+        match build_receipt(&project.module, &log) {
+            BuildReceipt::Succeeded => break,
+            BuildReceipt::Failed => {
                 return Err(format!(
-                    "BUILD_FAILED: exit {code}; {}",
-                    process::bounded_log(&build_log)
-                        .chars()
+                    "BUILD_FAILED: PreviewBuild; {}",
+                    log.chars()
                         .rev()
                         .take(4096)
                         .collect::<String>()
@@ -459,6 +452,12 @@ fn run(
                         .collect::<String>()
                 ));
             }
+            BuildReceipt::Pending => {}
+        }
+        if let Some(code) = build.exit_code()? {
+            // Cached PreviewArkTS may exit naturally. The graph can finish between
+            // our previous log read and this exit observation; re-read after the barrier.
+            build_exit_result(&project.module, code, &process::bounded_log(&build_log))?;
             break;
         }
         if Instant::now() > deadline {
@@ -466,8 +465,12 @@ fn run(
         }
         thread::sleep(Duration::from_millis(50));
     }
+    // The verified PreviewArkTS task retains an idle watch worker. Its completed graph
+    // receipt is the build result; closing only this Job is a separate cleanup action.
+    let build_pid = build.pid;
     drop(build);
-    let intermediates = module.join("build/default/intermediates");
+    let build_ms = build_started.elapsed().as_millis();
+    let intermediates = module.join(".preview/default/intermediates");
     let assets = intermediates.join("loader_out/default/ets");
     if fs::metadata(assets.join("modules.abc"))
         .map(|m| m.len())
@@ -477,8 +480,12 @@ fn run(
         return Err("BUILD_ARTIFACT_MISSING: modules.abc".into());
     }
     let _ = messages.try_send(format!(
-        "BUILD_COMPLETED: actual assembleHap exited 0; logs {}",
+        "BUILD_COMPLETED: actual PreviewBuild graph succeeded; owned watch Job closed; logs {}",
         directory.display()
+    ));
+    let _ = messages.try_send(format!(
+        "BUILD_METRICS: buildMs={build_ms}; buildPid={build_pid}; abcSha256={}",
+        file_hash(&assets.join("modules.abc")).ok_or("BUILD_ARTIFACT_HASH")?
     ));
     let name = format!("ArkDock_{nonce}");
     let mut command = Pipe::create(&format!("{name}_commandPipe"))?;
@@ -524,6 +531,7 @@ fn run(
         "-sd".into(),
         "160".into(),
     ];
+    let previewer_started = Instant::now();
     let previewer = process::Process::spawn(
         &sdk.join(PREVIEWER),
         &args,
@@ -589,11 +597,7 @@ fn run(
     let Some(mut socket) = websocket else {
         return Ok(());
     };
-    frames.lock().map_err(|_| "FRAME_MAILBOX")?.set_stream(
-        &task.session_id,
-        &task.build_id,
-        task.generation,
-    );
+    frames.lock().map_err(|_| "FRAME_MAILBOX")?.set_stream(task);
     let mut first = true;
     let mut sequence = 0;
     let mut release = None;
@@ -624,7 +628,7 @@ fn run(
         match socket.read() {
             Ok(Message::Binary(data)) => {
                 sequence += 1;
-                let frame = decode_frame(&data, task, sequence)?;
+                let frame = parse_jpeg40(&data, task, sequence, super::now_ms())?;
                 frames
                     .lock()
                     .map_err(|_| "FRAME_MAILBOX")?
@@ -632,6 +636,12 @@ fn run(
                     .map_err(|e| format!("FRAME_REJECTED: {e:?}"))?;
                 if first {
                     first = false;
+                    let _ = messages.try_send(format!(
+                        "PREVIEW_METRICS: previewerPid={}; launchToFirstFrameMs={}; jpegBytes={}",
+                        previewer.pid,
+                        previewer_started.elapsed().as_millis(),
+                        data.len().saturating_sub(40)
+                    ));
                     success();
                 }
             }
@@ -649,49 +659,6 @@ fn run(
     Ok(())
 }
 
-fn decode_frame(data: &[u8], task: &BuildTask, sequence: u64) -> Result<NativeFrame, String> {
-    if data.len() < 44 || data.len() > FRAME_LIMIT || data[..4] != [0x12, 0x34, 0x56, 0x78] {
-        return Err("FRAME_HEADER".into());
-    }
-    let width = u32::from_be_bytes(data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?);
-    let height = u32::from_be_bytes(data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?);
-    if width != 360
-        || height != 640
-        || data[12..20] != data[4..12]
-        || data[20..40].iter().any(|&byte| byte != 0)
-    {
-        return Err("FRAME_PROFILE_MISMATCH".into());
-    }
-    let mut reader = ImageReader::with_format(Cursor::new(&data[40..]), ImageFormat::Jpeg);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(360);
-    limits.max_image_height = Some(640);
-    limits.max_alloc = Some(4 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|e| format!("FRAME_DECODE: {e}"))?;
-    if image.width() != width || image.height() != height {
-        return Err("FRAME_DIMENSIONS_MISMATCH".into());
-    }
-    let mut png = Cursor::new(Vec::new());
-    image
-        .write_to(&mut png, ImageFormat::Png)
-        .map_err(|e| format!("FRAME_ENCODE: {e}"))?;
-    if png.get_ref().len() > FRAME_LIMIT {
-        return Err("FRAME_PNG_LIMIT".into());
-    }
-    Ok(NativeFrame {
-        session_id: task.session_id.clone(),
-        build_id: task.build_id.clone(),
-        generation: task.generation,
-        sequence,
-        width,
-        height,
-        captured_at: super::now_ms(),
-        rotation: 0,
-        png_base64: STANDARD.encode(png.into_inner()),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,11 +672,11 @@ mod tests {
             build_id: "b".into(),
             started_at: 0,
         };
-        assert!(decode_frame(&[], &task, 1).is_err());
+        assert!(parse_jpeg40(&[], &task, 1, 0).is_err());
         let mut packet = vec![0u8; 44];
         packet[..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
         assert_eq!(
-            decode_frame(&packet, &task, 1).unwrap_err(),
+            parse_jpeg40(&packet, &task, 1, 0).unwrap_err(),
             "FRAME_PROFILE_MISMATCH"
         );
         assert!(verified_root(Path::new("C:/missing"), "26.0.0.999").is_none());
