@@ -1,0 +1,49 @@
+# ArkDock 窄窗界面
+
+用户已确认的参考：[桌面右侧窗口](references/desktop-reference.png)、[分支交互](references/interaction-reference.png)。
+只实现独立 ArkDock 工具窗。左侧 Agent、桌面、宣传标注和示例记账业务不属于产品。
+
+## 布局与 token
+
+默认 440×820 DIP，宽度 360–560 DIP。标题/拖动区、工程身份条、两行工具栏、
+占剩余空间的等比画面、紧凑底栏。候选/信任/设置为窗口内部底部面板；诊断独立滚动。
+不采用侧边导航和纵向堆叠控制卡挤占预览。360×640、440×820、520×960 验证深浅外壳。
+
+宣传图需与实际效果一致：未绑定/拖动候选时收起工程条与开发工具栏，突出蓝色玻璃插画、
+拖动指引和三条实际能力说明；真实识别任务显示文件夹扫描环，不展示伪造路径或进度。
+标题与窗口动作由 ArkDock 外壳提供，不重复系统标题栏；原生无边框窗口仍需验证边缘缩放。
+
+主背景 #0B1220、面板 #111C2D、浮层 #17243A、蓝 #4B82FF、高亮 #78B8FF、
+文字 #EAF1FB / #A5B4C9、成功 #39CF84、警告 #F5B84B、错误 #FF687A。
+间距 4/8/12/16/24，圆角 8/12/16，系统中文字体、等宽路径，统一现有 SVG 图标。
+浅色外壳提供独立对比度 token；应用深浅色不能用外壳主题冒充。材质有不透明降级。
+
+## 状态与能力
+
+UI 适配后端快照，独立推导 binding/workspace/preview 维度，不改变 Rust Phase 契约。
+revision 拒绝旧快照；session/build/generation/sequence 拒绝旧帧。running 无有效帧仍等首帧。
+未信任不执行；唯一可靠候选由后端决定，单弱候选显示确认，完整候选列表支持搜索。
+默认 UIA 来源尚不能证明活动工程，不能为实现自动关联伪造证据。
+
+现有接口：begin_drag、rediscover、select_candidate、select_directory、detach、set_trust、
+configure_sdk、refresh_preview、stop_preview、arrange_side_by_side、snapshot、click_preview。
+状态与原生帧经 arkdock:state/frame。点击仅当前运行有效帧；失败保留旧画面并关闭输入。
+滑动/文本/旋转、设备/页面切换、应用主题、模拟器/真机无接入时显示能力原因并禁用。
+最小化/关闭经受控新 IPC；识别取消遵循后端会话失效约定，不能靠关闭面板假装取消。
+
+最新共同布局要求：两侧可见边界零间距、共同外边界缩放、Windows 最大化共同占满工作区，
+ArkDock 保留 360–560 DIP 右侧宽度，Agent 占剩余空间。仍为两个独立顶层窗口。
+pairLayout 为独立确认状态（unbound/paired/maximizing/maximized/restoring/blocked），
+maximize_pair / restore_pair 受同一窗口、目标、会话校验；按钮不依赖 SDK 或工程执行信任。
+布局 pending 时禁用重复操作，只有 Windows 确认后才显示“共同最大化”和恢复按钮。
+
+帧放置在独立存储和 PreviewStage 内，至多每浏览器帧通知一次，避免全窗重渲染。
+等比 fit 使用实际可用空间；点击按画面矩形映射，外框和黑边不接受输入。
+模态焦点约束、Esc 关闭与焦点恢复；IME 输入不被拖动区捕获。复制诊断默认脱敏路径。
+
+## 验收
+
+V1 布局/主题/固定尺寸截图；V2 候选/信任/取消/旧结果；V3 首帧/旧帧/失败/能力真实性；
+V4 状态触发动效/减少动画/键盘/焦点；V5 Windows 与实际 SDK 单独原生验证。
+开发入口通过独立 Vite 配置及 tests fixtures；显著标识“UI 演示 · 非原生渲染”。
+正式 build 不导入 fixture、演示路径或自动回退。截图与 SDK 证据分目录存放。

@@ -9,7 +9,9 @@ else {
   if (!['dev', 'build'].includes(action)) { console.error('FAIL：仅允许 dev/build。'); process.exitCode = 1; }
   else {
     // The pinned official CLI is project-local; no global cargo installation or PATH mutation.
-    const result = spawnSync(process.execPath, [require.resolve('@tauri-apps/cli/tauri.js'), action, '--features', 'desktop'], { stdio: 'inherit', shell: false });
+    const args = [require.resolve('@tauri-apps/cli/tauri.js'), action, '--features', 'desktop'];
+    if (action === 'build') args.push('--', '--locked');
+    const result = spawnSync(process.execPath, args, { stdio: 'inherit', shell: false });
     process.exitCode = result.error ? 2 : result.status ?? 1;
   }
 }

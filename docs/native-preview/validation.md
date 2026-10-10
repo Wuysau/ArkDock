@@ -1,5 +1,11 @@
 # 原生后端验证记录
 
+2026-10-10 集成增量：前后端历史已正常合并，基础 verify 和 desktop lib 测试通过。
+独立后端本次 T1–T7 PASS，证据为集成工作树 artifacts/native-preview/integration-20261010/report.json。
+实际桌面 UI/native gate 在真实拖动前置失败，不能将独立后端 PASS 扩展为 React 首帧/输入通过。
+用户暂不提供可用鼠标验收桌面，先交付未签名测试包；本轮详情见
+[集成交付记录](../evidence/integration-delivery-2026-10-10.md)。下文保留 2026-10-09 独立分支的历史记录。
+
 2026-10-09，Windows 本地隔离工作树，基线 `aab0f5e`。本页记录实际执行，
 不引用另一工作树的历史 PASS 作为本次验收。最终独立后端验收为
 `artifacts/native-preview/run-20261009-6/report.json`，退出 0。

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { connectWebview } from './webview-driver.mjs';
 
-const checks = [], dimensions = [];
+const checks = [], dimensions = [], pointerResizes = [];
 const evidence = process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/ui-2026-10-09/native';
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 function action(kind, handle, values = {}) {
@@ -137,11 +137,16 @@ try {
     await resizeLogical(440,720);
     const before=action('info',handle);
     const viewport=await view.evaluate('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})');
-    action('foreground',handle); await pause(150);
-    action('drag',handle,{X:before.right-2,Y:before.bottom-2,EndX:before.right+98,EndY:before.bottom+78});
+    const pointer={X:before.right-2,Y:before.bottom-2,EndX:before.right+98,EndY:before.bottom+78};
+    const clientPoint={x:(pointer.X-before.clientX)/viewport.ratio,y:(pointer.Y-before.clientY)/viewport.ratio};
+    const hit=await view.evaluate(`(() => { const element=document.elementFromPoint(${clientPoint.x},${clientPoint.y}); return {element:element?{tag:element.tagName,className:element.className}:null,resizeHandlePresent:!!document.querySelector('.resize-handle'),focused:document.hasFocus()}; })()`);
+    const foreground=action('foreground',handle); await pause(150);
+    const dragged=action('drag',handle,pointer);
     await pause(200);
     const after=action('info',handle);
     const resized=await view.evaluate('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})');
+    pointerResizes.push({handle,before,viewport,pointer,clientPoint,hit,foreground,dragged,after,resized,
+      delta:{right:after.right-before.right,bottom:after.bottom-before.bottom,width:resized.width-viewport.width,height:resized.height-viewport.height}});
     assert.ok(after.right-before.right>=50,'Actual Win32 window width changes with pointer edge resize');
     assert.ok(after.bottom-before.bottom>=40,'Actual Win32 window height changes with pointer edge resize');
     assert.ok(resized.width>viewport.width && resized.height>viewport.height,'Actual WebView receives the native resize');
@@ -154,7 +159,7 @@ finally {
     view.close();
   }
   if(handle && original) action('move',handle,{X:original.left,Y:original.top,Width:original.right-original.left,Height:original.bottom-original.top});
-  const report={capturedAt:new Date().toISOString(),scope:'Actual Windows WebView2 UI/theme/motion/keyboard/window assertions; no HarmonyOS frame fixtures',status:checks.some(item=>item.status==='FAIL')?'FAIL':'PASS',dimensions,checks};
+  const report={capturedAt:new Date().toISOString(),scope:'Actual Windows WebView2 UI/theme/motion/keyboard/window assertions; no HarmonyOS frame fixtures',status:checks.some(item=>item.status==='FAIL')?'FAIL':'PASS',dimensions,pointerResizes,checks};
   mkdirSync(evidence,{recursive:true});
   writeFileSync('artifacts/ui-smoke.json',`${JSON.stringify(report,null,2)}\n`);
   writeFileSync(`${evidence}/ui-smoke.json`,`${JSON.stringify(report,null,2)}\n`);
