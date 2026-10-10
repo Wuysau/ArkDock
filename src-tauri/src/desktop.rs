@@ -9,6 +9,7 @@ use crate::discovery::{
 };
 use crate::ipc::model::*;
 use crate::ipc::validate_scope;
+use crate::preview::frames::{BinaryFrame, BINARY_FRAME_PROTOCOL_VERSION};
 use crate::preview::{NativePoint, NativePreviewer, PreviewBackend, PreviewInput};
 use crate::scheduler::{
     watch_project, BuildCoordinator, BuildOutcome, CompletionDisposition, WatchEvent, WatchGuard,
@@ -32,6 +33,8 @@ enum Action {
     Sdk(PathBuf),
     Refresh,
     Stop,
+    BinaryFrames(u32),
+    LegacyFrames(u32),
     Arrange(bool),
     MaximizePair,
     RestorePair,
@@ -66,6 +69,62 @@ struct Service {
     sender: mpsc::SyncSender<Message>,
     state: Arc<Mutex<AppSnapshot>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    frames: Arc<Mutex<FrameDelivery>>,
+}
+
+#[derive(Default)]
+struct FrameDelivery {
+    binary_enabled: bool,
+    binary_session: Option<String>,
+    latest: Option<BinaryFrame>,
+}
+impl FrameDelivery {
+    fn enable(&mut self, protocol_version: u32, session_id: &str) -> Result<(), String> {
+        if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
+            return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
+        }
+        if session_id.is_empty() || session_id.len() > 256 {
+            return Err("PREVIEW_SESSION_REQUIRED".into());
+        }
+        self.binary_enabled = true;
+        self.binary_session = Some(session_id.to_owned());
+        Ok(())
+    }
+    fn push(&mut self, frame: BinaryFrame) {
+        self.latest = Some(frame);
+    }
+    fn clear(&mut self) {
+        self.latest = None;
+        self.binary_enabled = false;
+        self.binary_session = None;
+    }
+    fn take_current(&mut self, state: &AppSnapshot) -> Result<Vec<u8>, String> {
+        if !self.binary_enabled {
+            return Err("BINARY_TRANSPORT_NOT_ENABLED".into());
+        }
+        if self.binary_session.as_deref() != state.session_id.as_deref() {
+            self.clear();
+            return Err("STALE_SESSION".into());
+        }
+        let Some(frame) = self.latest.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let metadata = &frame.metadata;
+        if !state.trusted
+            || state.phase != Phase::Running
+            || state.build.stale
+            || state.session_id.as_deref() != Some(&metadata.session_id)
+            || state.project.as_ref().map(|project| project.id.as_str())
+                != Some(metadata.workspace_id.as_str())
+            || state.build.build_id.as_deref() != Some(&metadata.build_id)
+            || state.build.generation != metadata.generation
+            || state.build.displayed_generation != Some(metadata.generation)
+        {
+            self.latest = None;
+            return Err("STALE_FRAME".into());
+        }
+        self.latest.take().ok_or("FRAME_UNAVAILABLE")?.packet()
+    }
 }
 impl Service {
     fn snapshot(&self) -> Result<AppSnapshot, String> {
@@ -98,6 +157,7 @@ struct Engine {
     watch_pending: Arc<Mutex<PendingWatch>>,
     serial: u64,
     detaching: bool,
+    frames: Arc<Mutex<FrameDelivery>>,
 }
 
 fn now() -> u64 {
@@ -134,6 +194,35 @@ fn frame_changes_state(snapshot: &AppSnapshot, build: &BuildStatus) -> bool {
     snapshot.phase != Phase::Running || snapshot.build != *build
 }
 
+/// Close execution at the gate itself: tick must never inherit an untrusted live Job.
+struct ExecutionGate {
+    phase: Phase,
+    trusted: bool,
+}
+
+fn execution_gate(
+    trusted: bool,
+    available: bool,
+    reason: &str,
+    suspend: impl FnOnce(),
+) -> ExecutionGate {
+    let phase = if !trusted {
+        suspend();
+        Phase::Untrusted
+    } else if !available {
+        suspend();
+        if reason.starts_with("SDK_MISSING") {
+            Phase::SdkMissing
+        } else {
+            Phase::ProtocolBlocked
+        }
+    } else {
+        Phase::Building
+    };
+    // Resource teardown does not change the independently verified project permission.
+    ExecutionGate { phase, trusted }
+}
+
 impl Engine {
     fn publish(&mut self) {
         self.snapshot.revision += 1;
@@ -159,6 +248,9 @@ impl Engine {
         });
     }
     fn suspend_execution(&mut self) {
+        if let Ok(mut frames) = self.frames.lock() {
+            frames.clear();
+        }
         self.watcher.take();
         self.backend.stop();
         self.scheduler.stop();
@@ -372,15 +464,15 @@ impl Engine {
             .store
             .as_ref()
             .is_some_and(|store| store.is_trusted(project));
-        self.snapshot.phase = if !self.snapshot.trusted {
-            Phase::Untrusted
-        } else if self.snapshot.backend.reason.starts_with("SDK_MISSING") {
-            Phase::SdkMissing
-        } else if !self.snapshot.backend.available {
-            Phase::ProtocolBlocked
-        } else {
-            Phase::Building
-        };
+        let reason = self.snapshot.backend.reason.clone();
+        let decision = execution_gate(
+            self.snapshot.trusted,
+            self.snapshot.backend.available,
+            &reason,
+            || self.suspend_execution(),
+        );
+        self.snapshot.phase = decision.phase;
+        self.snapshot.trusted = decision.trusted;
     }
     fn handle(&mut self, scope: RequestScope, action: Action) -> Result<AppSnapshot, String> {
         validate_scope(&self.snapshot, &scope)?;
@@ -491,6 +583,9 @@ impl Engine {
                 self.scheduler.request_refresh(now());
             }
             Action::Stop => {
+                if let Ok(mut frames) = self.frames.lock() {
+                    frames.clear();
+                }
                 self.watcher.take();
                 self.watch_pending = Arc::new(Mutex::new(PendingWatch::default()));
                 self.backend.stop();
@@ -498,6 +593,26 @@ impl Engine {
                 self.snapshot.session_id = None;
                 self.snapshot.session_ref = None;
                 self.snapshot.phase = Phase::Stopped;
+            }
+            Action::BinaryFrames(version) => {
+                if !self.snapshot.trusted {
+                    return Err("TRUST_REQUIRED".into());
+                }
+                let session = self
+                    .snapshot
+                    .session_id
+                    .as_deref()
+                    .ok_or("PREVIEW_SESSION_REQUIRED")?;
+                self.frames
+                    .lock()
+                    .map_err(|_| "FRAME_UNAVAILABLE")?
+                    .enable(version, session)?;
+            }
+            Action::LegacyFrames(version) => {
+                if version != BINARY_FRAME_PROTOCOL_VERSION {
+                    return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
+                }
+                self.frames.lock().map_err(|_| "FRAME_UNAVAILABLE")?.clear();
             }
             Action::Arrange(consent) => {
                 self.current_target()?;
@@ -654,16 +769,38 @@ impl Engine {
             }
             self.publish();
         }
-        if let Some(frame) = self.backend.frame() {
+        if let Some(frame) = self.backend.binary_frame() {
             self.drain_events();
-            if self.scheduler.accept_frame(&frame).is_ok() {
+            if self.scheduler.accept_binary_frame(&frame).is_ok() {
                 let changed = frame_changes_state(&self.snapshot, &self.scheduler.status());
                 self.snapshot.phase = Phase::Running;
                 // Pixels travel separately. Later frames must not re-render the whole tool.
                 if changed {
                     self.publish();
                 }
-                let _ = self.app.emit("arkdock:frame", frame);
+                let legacy = self
+                    .frames
+                    .lock()
+                    .map(|frames| {
+                        !frames.binary_enabled
+                            || frames.binary_session.as_deref()
+                                != Some(frame.metadata.session_id.as_str())
+                    })
+                    .unwrap_or(false);
+                if legacy {
+                    #[cfg(windows)]
+                    match frame.legacy_png() {
+                        Ok(legacy_frame) => {
+                            let _ = self.app.emit("arkdock:frame", legacy_frame);
+                        }
+                        Err(error) => {
+                            self.diagnostic("FRAME_COMPATIBILITY_FAILED", error, CheckStatus::Fail)
+                        }
+                    }
+                }
+                if let Ok(mut frames) = self.frames.lock() {
+                    frames.push(frame);
+                }
             }
         }
     }
@@ -863,6 +1000,79 @@ async fn stop_preview(
 ) -> Result<AppSnapshot, String> {
     request(window, service, scope, Action::Stop).await
 }
+
+fn protocol_error(message: String, received_protocol_version: u32) -> PreviewProtocolError {
+    PreviewProtocolError {
+        code: message
+            .split(':')
+            .next()
+            .unwrap_or("PREVIEW_ERROR")
+            .to_owned(),
+        message,
+        expected_protocol_version: BINARY_FRAME_PROTOCOL_VERSION,
+        received_protocol_version,
+    }
+}
+
+#[tauri::command]
+async fn enable_binary_preview_frames(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    protocol_version: u32,
+) -> Result<AppSnapshot, PreviewProtocolError> {
+    request(
+        window,
+        service,
+        scope,
+        Action::BinaryFrames(protocol_version),
+    )
+    .await
+    .map_err(|error| protocol_error(error, protocol_version))
+}
+
+#[tauri::command]
+async fn disable_binary_preview_frames(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    protocol_version: u32,
+) -> Result<AppSnapshot, PreviewProtocolError> {
+    request(
+        window,
+        service,
+        scope,
+        Action::LegacyFrames(protocol_version),
+    )
+    .await
+    .map_err(|error| protocol_error(error, protocol_version))
+}
+
+#[tauri::command]
+async fn read_preview_frame(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    protocol_version: u32,
+) -> Result<tauri::ipc::Response, PreviewProtocolError> {
+    let result = (|| {
+        check_window(&window)?;
+        if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
+            return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
+        }
+        // Keep state and the one unread frame locked in this order for the scoped read.
+        let snapshot = service.state.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        validate_scope(&snapshot, &scope)?;
+        service
+            .frames
+            .lock()
+            .map_err(|_| "FRAME_UNAVAILABLE")?
+            .take_current(&snapshot)
+    })();
+    result
+        .map(tauri::ipc::Response::new)
+        .map_err(|error| protocol_error(error, protocol_version))
+}
 #[tauri::command]
 async fn arrange_side_by_side(
     window: tauri::WebviewWindow,
@@ -917,8 +1127,22 @@ pub fn run() {
             refresh_preview,
             stop_preview,
             arrange_side_by_side,
-            click_preview
+            click_preview,
+            enable_binary_preview_frames,
+            disable_binary_preview_frames,
+            read_preview_frame
         ])
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                if let Some(service) = webview.app_handle().try_state::<Service>() {
+                    if let Ok(mut frames) = service.frames.lock() {
+                        frames.clear();
+                    }
+                }
+            }
+        })
         .setup(|app| {
             let (sender, receiver) = mpsc::sync_channel(256);
             let store_result = app
@@ -930,10 +1154,12 @@ pub fn run() {
                 .as_ref()
                 .ok()
                 .and_then(WorkspaceStore::sdk_path)
-                .or_else(|| std::env::var_os("ARKDOCK_SDK").map(PathBuf::from));
+                .or_else(crate::preview::environment::auto_detect_sdk);
             let backend = NativePreviewer::new(sdk);
             let state = Arc::new(Mutex::new(initial(backend.capabilities())));
             let service_state = state.clone();
+            let frames = Arc::new(Mutex::new(FrameDelivery::default()));
+            let service_frames = frames.clone();
             let handle = app.handle().clone();
             let window_pending = Arc::new(Mutex::new(None));
             let main = app
@@ -960,6 +1186,7 @@ pub fn run() {
                     watch_pending: Arc::new(Mutex::new(PendingWatch::default())),
                     serial: 0,
                     detaching: false,
+                    frames,
                 };
                 match store_result {
                     Ok(store) => engine.store = Some(store),
@@ -1006,6 +1233,7 @@ pub fn run() {
                 sender,
                 state: service_state,
                 worker: Mutex::new(Some(worker)),
+                frames: service_frames,
             });
             Ok(())
         })
@@ -1021,6 +1249,133 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_teardown_releases_pixels_and_restores_legacy_delivery() {
+        let mut delivery = FrameDelivery::default();
+        delivery.enable(1, "s").unwrap();
+        delivery.clear();
+        assert!(!delivery.binary_enabled);
+    }
+
+    #[test]
+    fn binary_delivery_is_bounded_versioned_and_rejects_a_replaced_session() {
+        use crate::preview::frames::BinaryFrame;
+        let mut state = initial(crate::preview::probe(None));
+        state.session_id = Some("s".into());
+        state.trusted = true;
+        state.phase = Phase::Running;
+        state.build.build_id = Some("b".into());
+        state.build.generation = 1;
+        state.build.displayed_generation = Some(1);
+        state.project = Some(ProjectRef {
+            id: "w".into(),
+            name: "test".into(),
+            environment: Environment::WindowsLocal,
+            workspace_root: "test".into(),
+            app_root: "test".into(),
+            module: "entry".into(),
+            variant: "default".into(),
+            sdk_id: None,
+        });
+        let frame = |sequence| BinaryFrame {
+            metadata: BinaryFrameMetadata {
+                protocol_version: 1,
+                workspace_id: "w".into(),
+                session_id: "s".into(),
+                build_id: "b".into(),
+                generation: 1,
+                sequence,
+                width: 360,
+                height: 640,
+                captured_at: 1,
+                rotation: 0,
+                format: NativeFrameFormat::Jpeg,
+                payload_length: 4,
+            },
+            payload: vec![0xff, 0xd8, 0xff, 0xd9],
+        };
+        let mut delivery = FrameDelivery::default();
+        assert_eq!(
+            delivery.enable(2, "s").unwrap_err(),
+            "PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert_eq!(
+            delivery.enable(1, "").unwrap_err(),
+            "PREVIEW_SESSION_REQUIRED"
+        );
+        delivery.enable(1, "s").unwrap();
+        delivery.push(frame(1));
+        delivery.push(frame(2));
+        let packet = delivery.take_current(&state).unwrap();
+        let length = u32::from_le_bytes(packet[..4].try_into().unwrap()) as usize;
+        let metadata: BinaryFrameMetadata = serde_json::from_slice(&packet[4..4 + length]).unwrap();
+        assert_eq!(metadata.sequence, 2);
+        assert_eq!(packet[4 + length..], [0xff, 0xd8, 0xff, 0xd9]);
+        assert!(delivery.take_current(&state).unwrap().is_empty());
+        delivery.push(frame(3));
+        state.session_id = Some("new".into());
+        assert_eq!(delivery.take_current(&state).unwrap_err(), "STALE_SESSION");
+        delivery.clear();
+        assert_eq!(
+            delivery.take_current(&state).unwrap_err(),
+            "BINARY_TRANSPORT_NOT_ENABLED"
+        );
+    }
+
+    #[test]
+    fn fingerprint_change_closes_active_execution_before_entering_untrusted() {
+        let mut scheduler = BuildCoordinator::new(0);
+        scheduler.set_workspace("workspace", "session", 1);
+        scheduler.request_refresh(1);
+        let old = scheduler.next_task(1).unwrap();
+        let mut closed = false;
+        let phase = execution_gate(false, true, "verified", || {
+            scheduler.stop();
+            closed = true;
+        });
+        assert!(closed);
+        assert_eq!(phase.phase, Phase::Untrusted);
+        assert!(!phase.trusted);
+        assert!(!scheduler.is_building());
+        assert_eq!(
+            scheduler.complete(&old, BuildOutcome::Success, 2),
+            CompletionDisposition::RejectedStopped
+        );
+    }
+
+    #[test]
+    fn source_only_change_keeps_the_trusted_execution_open() {
+        let mut closed = false;
+        assert_eq!(
+            execution_gate(true, true, "verified", || closed = true).phase,
+            Phase::Building
+        );
+        assert!(!closed);
+    }
+
+    #[test]
+    fn sdk_block_does_not_revoke_valid_project_trust() {
+        for (reason, expected) in [
+            ("SDK_MISSING: not configured", Phase::SdkMissing),
+            ("PROTOCOL_UNVERIFIED", Phase::ProtocolBlocked),
+        ] {
+            let mut closed = false;
+            let decision = execution_gate(true, false, reason, || closed = true);
+            assert!(closed, "Blocked SDK must close execution resources");
+            assert_eq!(decision.phase, expected);
+            assert!(
+                decision.trusted,
+                "Toolchain state cannot revoke project trust"
+            );
+        }
+        let decision = execution_gate(false, false, "SDK_MISSING", || {});
+        assert_eq!(decision.phase, Phase::Untrusted);
+        assert!(
+            !decision.trusted,
+            "Revoked or changed-config trust stays revoked"
+        );
+    }
 
     #[test]
     fn only_first_frame_or_changed_build_publishes_a_snapshot() {

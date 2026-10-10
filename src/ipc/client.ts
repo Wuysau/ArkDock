@@ -1,4 +1,4 @@
-import type { AppSnapshot, CommandArgs, NativeFrame, RequestScope } from './model.ts';
+import type { AppSnapshot, CommandArgs, CommandResults, NativeFrame, RequestScope } from './model.ts';
 
 interface DesktopBridge {
   core: { invoke<T>(command: string, args?: object): Promise<T> };
@@ -24,7 +24,17 @@ export async function request<K extends keyof CommandArgs>(command: K, args: Omi
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。请在 Windows 11 使用 pnpm dev 启动 ArkDock 独立应用。');
   if (command !== 'snapshot' && !scope) throw new Error('缺少当前目标/预览会话，请等待后端状态同步。');
+  if (command === 'read_preview_frame') throw new Error('二进制帧需要使用 readPreviewFrame；不能按状态快照读取。');
   return desktop.core.invoke<AppSnapshot>(command, command === 'snapshot' ? args : { ...args, scope });
+}
+
+export async function readPreviewFrame(scope: RequestScope, protocolVersion: number): Promise<CommandResults['read_preview_frame']> {
+  const desktop = window.__TAURI__;
+  if (!desktop) throw new Error('缺少桌面桥接。');
+  const args: CommandArgs['read_preview_frame'] = { scope, protocolVersion };
+  const bytes = await desktop.core.invoke<CommandResults['read_preview_frame']>('read_preview_frame', args);
+  if (!(bytes instanceof ArrayBuffer)) throw new Error('二进制帧响应类型错误。');
+  return bytes;
 }
 
 export async function observe(state: (value: AppSnapshot) => void, frame: (value: NativeFrame) => void): Promise<() => void> {

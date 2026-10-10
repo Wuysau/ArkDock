@@ -28,6 +28,9 @@
       "title",
       "manual"
     ],
+    "NativeFrameFormat": [
+      "jpeg"
+    ],
     "CheckStatus": [
       "PASS",
       "FAIL",
@@ -146,6 +149,26 @@
       "rotation": "u32",
       "pngBase64": "string"
     },
+    "BinaryFrameMetadata": {
+      "protocolVersion": "u32",
+      "workspaceId": "string",
+      "sessionId": "string",
+      "buildId": "string",
+      "generation": "u64",
+      "sequence": "u64",
+      "width": "u32",
+      "height": "u32",
+      "capturedAt": "u64",
+      "rotation": "u32",
+      "format": "NativeFrameFormat",
+      "payloadLength": "u32"
+    },
+    "PreviewProtocolError": {
+      "code": "string",
+      "message": "string",
+      "expectedProtocolVersion": "u32",
+      "receivedProtocolVersion": "u32"
+    },
     "RequestScope": {
       "targetId": "string?",
       "sessionId": "string?"
@@ -158,7 +181,36 @@
       "sdkId": "string?"
     }
   },
+  "commandResponses": {
+    "disable_binary_preview_frames": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "PreviewProtocolError"
+    },
+    "enable_binary_preview_frames": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "PreviewProtocolError"
+    },
+    "read_preview_frame": {
+      "rust": "tauri::ipc::Response",
+      "typescript": "ArrayBuffer",
+      "error": "PreviewProtocolError"
+    }
+  },
   "commands": {
+    "disable_binary_preview_frames": {
+      "scope": "RequestScope",
+      "protocolVersion": "u32"
+    },
+    "enable_binary_preview_frames": {
+      "scope": "RequestScope",
+      "protocolVersion": "u32"
+    },
+    "read_preview_frame": {
+      "scope": "RequestScope",
+      "protocolVersion": "u32"
+    },
     "click_preview": {
       "scope": "RequestScope",
       "buildId": "string",

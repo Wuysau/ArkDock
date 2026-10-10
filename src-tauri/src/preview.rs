@@ -1,4 +1,7 @@
 //! Bounded SDK discovery and the exact locally verified Windows Previewer profile.
+pub mod build;
+pub mod environment;
+pub mod frames;
 #[cfg(windows)]
 mod windows;
 use crate::ipc::model::{
@@ -48,6 +51,7 @@ pub trait PreviewBackend: Send {
     ) -> Result<(), String>;
     fn refresh(&mut self, task: &BuildTask) -> Result<(), String>;
     fn frame(&mut self) -> Option<NativeFrame>;
+    fn binary_frame(&mut self) -> Option<frames::BinaryFrame>;
     fn completion(&mut self) -> Option<(BuildTask, Result<(), String>)>;
     fn input(&mut self, input: PreviewInput) -> Result<(), String>;
     fn stop(&mut self);
@@ -185,6 +189,16 @@ impl PreviewBackend for NativePreviewer {
 
     fn frame(&mut self) -> Option<NativeFrame> {
         #[cfg(windows)]
+        if self.runtime.is_some() {
+            return self
+                .binary_frame()
+                .and_then(|frame| frame.legacy_png().ok());
+        }
+        self.mailbox.take()
+    }
+
+    fn binary_frame(&mut self) -> Option<frames::BinaryFrame> {
+        #[cfg(windows)]
         if let Some(runtime) = &self.runtime {
             return runtime
                 .frames
@@ -192,7 +206,7 @@ impl PreviewBackend for NativePreviewer {
                 .ok()
                 .and_then(|mut frames| frames.take());
         }
-        self.mailbox.take()
+        None
     }
 
     fn completion(&mut self) -> Option<(BuildTask, Result<(), String>)> {
@@ -234,6 +248,13 @@ impl PreviewBackend for NativePreviewer {
 }
 
 impl NativePreviewer {
+    pub fn frame_metrics(&self) -> Option<frames::BinaryFrameMetrics> {
+        #[cfg(windows)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.frames.lock().ok().map(|frames| frames.metrics());
+        }
+        None
+    }
     pub fn runtime_messages(&mut self) -> Vec<String> {
         #[cfg(windows)]
         if let Some(runtime) = &self.runtime {
@@ -267,8 +288,21 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         }
     };
     #[cfg(windows)]
-    let available = windows
-        && detected.is_some_and(|sdk| windows::verified_root(&sdk.root, &sdk.version).is_some());
+    let verified_root = detected.and_then(|sdk| windows::verified_root(&sdk.root, &sdk.version));
+    #[cfg(windows)]
+    let dependency_error = verified_root.as_ref().and_then(|root| {
+        let report = environment::inspect_environment(Some(root));
+        report.execution_blocker().map(|check| {
+            format!(
+                "SDK_DEPENDENCY_UNAVAILABLE: {}: {}",
+                check.dependency, check.detail
+            )
+        })
+    });
+    #[cfg(windows)]
+    let available = windows && verified_root.is_some() && dependency_error.is_none();
+    #[cfg(windows)]
+    let reason = dependency_error.unwrap_or(reason);
     #[cfg(not(windows))]
     let available = false;
     BackendStatus {
@@ -276,7 +310,7 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         mode: "nativePreviewer".into(),
         available,
         reason: if available {
-            "已核验 HarmonyOS 26.0.0.105：Stage 默认目标、360×640 手机、点击与完整重建刷新；其他能力未支持".into()
+            "HarmonyOS 26.0.0.105：Stage 默认目标、360×640、点击；PreviewBuild 刷新重启运行时，不保留组件状态；其他能力未支持".into()
         } else {
             reason
         },

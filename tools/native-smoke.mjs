@@ -67,6 +67,34 @@ function logFrom(state) {
   assert.ok(directory && directory.includes('ArkDock-native'), 'Owned native runtime log required');
   return join(directory, 'previewer.log');
 }
+const nativeCount = () => Number([...readFileSync(currentLog,'utf8').matchAll(/ARKDOCK_NATIVE_COUNT=(\d+)/g)].at(-1)?.[1] ?? 0);
+const currentScope = (state) => ({ targetId: state.target?.id ?? null, sessionId: state.sessionId });
+async function binaryRequest(command, args, scope) {
+  return view.evaluate(`import('/src/ipc/client.ts').then(({ request }) => request(${JSON.stringify(command)}, ${JSON.stringify(args)}, ${JSON.stringify(scope)}))`);
+}
+async function binaryFrame(scope) {
+  return view.evaluate(`(async () => {
+    const { readPreviewFrame } = await import('/src/ipc/client.ts');
+    const packet = await readPreviewFrame(${JSON.stringify(scope)}, 1);
+    if (!(packet instanceof ArrayBuffer)) throw new Error('Actual binary response must be ArrayBuffer');
+    if (packet.byteLength === 0) return null;
+    if (packet.byteLength < 8 || packet.byteLength > 4 + 4096 + 1024 * 1024 - 40) throw new Error('Binary packet limit');
+    const metadataLength = new DataView(packet).getUint32(0, true);
+    if (metadataLength === 0 || metadataLength > 4096 || 4 + metadataLength > packet.byteLength - 4) throw new Error('Binary metadata limit');
+    const metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(packet, 4, metadataLength)));
+    const jpeg = new Uint8Array(packet, 4 + metadataLength);
+    if (metadata.protocolVersion !== 1 || metadata.format !== 'jpeg' || metadata.payloadLength !== jpeg.byteLength
+      || jpeg.byteLength > 1024 * 1024 - 40 || jpeg[0] !== 255 || jpeg[1] !== 216
+      || jpeg[jpeg.length - 2] !== 255 || jpeg[jpeg.length - 1] !== 217) throw new Error('Binary JPEG envelope');
+    const image = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }));
+    let dimensions;
+    try { dimensions = { width: image.width, height: image.height }; }
+    finally { image.close(); }
+    let encoded = '';
+    for (let start = 0; start < jpeg.length; start += 16384) encoded += String.fromCharCode(...jpeg.subarray(start, start + 16384));
+    return { arrayBuffer: true, metadata, metadataLength, byteLength: packet.byteLength, dimensions, jpegBase64: btoa(encoded) };
+  })()`);
+}
 try {
   if (process.platform !== 'win32' || !process.env.ARKDOCK_SDK) blocked('Windows and explicit ARKDOCK_SDK required');
   const gui = JSON.parse(execFileSync('pwsh', ['-NoProfile','-Command','ConvertTo-Json -InputObject @(Get-Process -Name deveco64,deveco -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)'], { encoding: 'utf8', windowsHide: true }));
@@ -102,12 +130,12 @@ try {
   const candidate = selected.candidates.find((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter'));
   assert.equal(candidate.autoEligible, false);
   await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.querySelector("code")?.textContent === ${JSON.stringify(candidate.project.appRoot)})`,'Actual candidate selection');
-  const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && state.sessionId, 10_000);
+  const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && (state.phase === 'untrusted' || state.sessionId), 10_000);
   projectId = associated.project.id; originalTrust = associated.trusted;
   if (!originalTrust) await trustThroughUi();
   let running;
   await check('D1', 'Actual SDK build, Previewer and PNG delivery into ArkDock', async () => {
-    running = await until('Build and first native frame', (state) => state.phase === 'running' && state.build.displayedGeneration === state.build.generation);
+    running = await until('Build and first native frame', (state) => state.project?.id === projectId && state.sessionId && state.phase === 'running' && state.build.displayedGeneration === state.build.generation);
     assert.equal(running.backend.sdkVersion, '26.0.0.105');
     assert.equal(running.backend.canClick, true);
     currentLog = logFrom(running);
@@ -142,6 +170,69 @@ try {
     assert.notEqual(await frame('after-click'), previous);
     await assert.rejects(invoke('click_preview',{buildId:'old-task',generation:0,x:180,y:360}), /STALE_INPUT/);
   });
+  await check('IPC1', 'Actual WebView2 binary JPEG IPC validates identity/errors and restores PNG delivery', async () => {
+    const expected = await snapshot();
+    const scope = currentScope(expected);
+    assert.equal(expected.phase,'running');
+    let first;
+    let changed;
+    try {
+      await binaryRequest('enable_binary_preview_frames',{protocolVersion:1},scope);
+      const protocolError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({ readPreviewFrame }) => {
+        try { await readPreviewFrame(${JSON.stringify(scope)}, 2); return null; }
+        catch (error) { return error; }
+      })`);
+      assert.equal(protocolError?.code,'PROTOCOL_VERSION_UNSUPPORTED');
+      assert.equal(protocolError.expectedProtocolVersion,1);
+      assert.equal(protocolError.receivedProtocolVersion,2);
+      const staleError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({ readPreviewFrame }) => {
+        try { await readPreviewFrame(${JSON.stringify({...scope,sessionId:`${scope.sessionId}-stale`})}, 1); return null; }
+        catch (error) { return error; }
+      })`);
+      assert.equal(staleError?.code,'STALE_REQUEST');
+      await until('Actual binary JPEG packet', async () => { first = await binaryFrame(scope); return Boolean(first); },10_000);
+      const verifyPacket = (packet) => {
+        assert.equal(packet.arrayBuffer,true);
+        assert.deepEqual(packet.dimensions,{width:360,height:640});
+        for (const [key,value] of Object.entries({protocolVersion:1,workspaceId:expected.project.id,sessionId:expected.sessionId,
+          buildId:expected.build.buildId,generation:expected.build.generation,width:360,height:640,rotation:0,format:'jpeg'})) {
+          assert.equal(packet.metadata[key],value,`Actual binary metadata ${key}`);
+        }
+        assert.ok(Number.isSafeInteger(packet.metadata.sequence) && packet.metadata.sequence > 0);
+        assert.ok(Number.isSafeInteger(packet.metadata.capturedAt) && packet.metadata.capturedAt > 0);
+        const jpeg = Buffer.from(packet.jpegBase64,'base64');
+        assert.equal(jpeg.length,packet.metadata.payloadLength);
+        assert.equal(packet.byteLength,4 + packet.metadataLength + jpeg.length);
+        return jpeg;
+      };
+      writeFileSync('artifacts/native-binary-first.jpg',verifyPacket(first));
+      const count = nativeCount();
+      const legacyBefore = await frame('binary-legacy-before-click');
+      await binaryRequest('click_preview',{buildId:first.metadata.buildId,generation:first.metadata.generation,x:180,y:360},scope);
+      await until('Actual binary-mode native count delta', () => nativeCount() === count + 1,10_000);
+      await until('Actual binary-mode changed JPEG', async () => {
+        const packet = await binaryFrame(scope);
+        if (!packet || packet.metadata.sequence <= first.metadata.sequence || packet.jpegBase64 === first.jpegBase64) return false;
+        changed = packet; return true;
+      },10_000);
+      writeFileSync('artifacts/native-binary-after-click.jpg',verifyPacket(changed));
+      assert.notEqual(hash(Buffer.from(changed.jpegBase64,'base64')),hash(Buffer.from(first.jpegBase64,'base64')));
+      assert.equal(await frame('binary-legacy-paused'),legacyBefore,'Binary mode must pause compatibility frame events');
+    } finally {
+      await binaryRequest('disable_binary_preview_frames',{protocolVersion:1},currentScope(await snapshot()));
+    }
+    const count = nativeCount();
+    const previous = await frame('binary-legacy-before-resumed-click');
+    const point = await view.evaluate('(() => { const image=document.querySelector(".native-frame"); image.scrollIntoView({block:"center"}); const r=image.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height*360/640}; })()');
+    await view.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
+    await view.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+    await until('Actual resumed legacy native count delta', () => nativeCount() === count + 1,10_000);
+    await until('Actual PNG delivery resumes after binary consumer teardown', async () => {
+      const data = await view.evaluate('document.querySelector(".native-frame")?.src.split(",")[1]');
+      return Boolean(data && hash(Buffer.from(data,'base64')) !== previous);
+    },10_000);
+    assert.notEqual(await frame('binary-legacy-restored'),previous);
+  }).catch((error) => { checks.push({id:'IPC1',status:'FAIL',name:error.message}); throw error; });
   await check('D2', 'Editing real .ets triggers watcher, serial rebuild and new native generation', async () => {
     const previousGeneration = running.build.generation;
     const previous = await frame('after-click');

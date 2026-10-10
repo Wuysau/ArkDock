@@ -36,6 +36,11 @@ for (const [name, fields] of Object.entries(spec.commands)) {
   ts += `  ${name}: { ${Object.entries(fields).map(([f, t]) => `${f}: ${type(t, false)}`).join('; ')} };\n`;
 }
 ts += '}\n';
+ts += '\nexport interface CommandResults {\n';
+for (const name of Object.keys(spec.commands)) {
+  ts += `  ${name}: ${spec.commandResponses?.[name]?.typescript ?? 'AppSnapshot'};\n`;
+}
+ts += '}\n';
 const outputs = { 'src/ipc/model.ts': ts, 'src-tauri/src/ipc/model.rs': rs };
 let mismatch = false;
 for (const [path, data] of Object.entries(outputs)) {
