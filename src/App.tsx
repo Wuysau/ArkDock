@@ -11,11 +11,15 @@ import { Icon } from './Icon.tsx';
 import { Sheet } from './Sheet.tsx';
 import { applyTheme, readTheme } from './theme.ts';
 import type { Theme } from './theme.ts';
-import { applyMotion, cancelMotion, readMotion } from './motion.ts';
+import { applyMotion, createMotionPreferenceSync, motionSettings, readMotion, readMotionIntensity } from './motion.ts';
 import type { MotionPreference } from './motion.ts';
 import { diagnosticText } from './diagnostics.ts';
 import { hasDockCandidate, responseStillCurrent, sameTarget } from './request-state.ts';
 import { pairControl } from './pair-layout.ts';
+import { DockRipple } from './DockRipple.tsx';
+import { targetLifecycleKey } from './dock-ripple.ts';
+import { displayTransitioning, nextDisplayRequestId } from './display-state.ts';
+import { createOrbAutoHidePreferenceSync, nativeOrbPreferenceChanged, readOrbAutoHide, saveOrbAutoHide, settledOrbChoice } from './orb-preferences.ts';
 
 type Panel = 'projects' | 'sdk' | 'trust' | 'path' | 'settings' | 'menu' | 'controls' | 'diagnostics' | 'help' | null;
 const environments = { windowsLocal: 'Windows 本地', wsl: 'WSL · 预览未支持', remote: '远程 · 预览未支持' };
@@ -74,38 +78,116 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const [zoom, setZoom] = useState<number | 'fit'>('fit');
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [motion, setMotion] = useState<MotionPreference>(readMotion);
+  const [intensity, setIntensity] = useState(readMotionIntensity);
+  const [systemReduced, setSystemReduced] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const [nativeReady, setNativeReady] = useState(false);
+  const [orbAutoHide, setOrbAutoHide] = useState(readOrbAutoHide);
+  const orbChoice = useRef(orbAutoHide);
+  const orbBootstrap = useRef(false);
+  const nativeReadyRef = useRef(false);
+  const preferenceSync = useRef<ReturnType<typeof createMotionPreferenceSync<AppSnapshot>> | null>(null);
+  const orbPreferenceSync = useRef<ReturnType<typeof createOrbAutoHidePreferenceSync<AppSnapshot>> | null>(null);
+  const displayRequestId = useRef(0);
   const connected = bridge.available;
+  const effectiveMotion = motionSettings(motion, intensity, systemReduced);
+  const motionTargetKey = targetLifecycleKey(state);
   const ui = deriveUiState(state, null);
   const pair = pairControl(state);
   const receive = useCallback((value: AppSnapshot) => {
     const updated = applySnapshot(stateRef.current, value);
     if (updated === stateRef.current) return;
+    if (nativeReadyRef.current && !orbBootstrap.current && !orbPreferenceSync.current?.pending()
+      && nativeOrbPreferenceChanged(stateRef.current, updated)
+      && orbChoice.current !== updated.display.orbAutoHide) {
+      // Native context-menu changes are user choices too, once queued UI writes have settled.
+      orbChoice.current = updated.display.orbAutoHide;
+      setOrbAutoHide(updated.display.orbAutoHide);
+    }
     if (!sameTarget(stateRef.current?.target, updated.target)) {
       const lost = Boolean(stateRef.current?.target && !updated.target);
       setPanel(null); setSearch(''); setError(null); setFeedback(null); setLayoutConsent(false);
       if (lost && !cancelRequested.current && activeCommand.current !== 'detach') setFeedback('目标窗口不可用，已解除绑定。');
     }
+    if (updated.display.mode !== 'expanded') setPanel(null);
     stateRef.current = updated; store.sync(updated); setState(updated);
   }, [store]);
   useEffect(() => {
     let live = true;
     let unsubscribe: (() => void) | undefined;
+    nativeReadyRef.current = false;
+    setNativeReady(false);
     if (connected) bridge.observe((value) => { if (live) receive(value); }, (frame) => { if (live && stateRef.current) store.push(stateRef.current, frame); }).then(async (off) => {
       if (!live) { off(); return; }
       unsubscribe = off;
       const snapshot = await bridge.request('snapshot', {});
-      if (live) receive(snapshot);
+      if (live) { receive(snapshot); orbBootstrap.current = true; nativeReadyRef.current = true; setNativeReady(true); }
     }).catch((reason: unknown) => { if (live) setError(String(reason)); });
     return () => { live = false; unsubscribe?.(); store.clear(); };
   }, [bridge, connected, store, receive]);
   useEffect(() => { applyTheme(theme); }, [theme]);
-  useEffect(() => { applyMotion(motion); }, [motion]);
+  useEffect(() => { applyMotion(motion, intensity, systemReduced); }, [motion, intensity, systemReduced]);
   useEffect(() => {
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const changed = () => { if (media.matches) cancelMotion(); };
+    const changed = () => setSystemReduced(media.matches);
     media.addEventListener('change', changed);
     return () => media.removeEventListener('change', changed);
   }, []);
+  useEffect(() => {
+    const sync = createMotionPreferenceSync<AppSnapshot>({
+      send: (job) => bridge.request('set_motion_preferences', { preferences: job.preferences }, job.scope),
+      accept: (job, result) => {
+        if (job.targetKey === targetLifecycleKey(stateRef.current) && job.scope.sessionId === (stateRef.current?.sessionId ?? null)) receive(result);
+      },
+      fail: (job, reason) => {
+        if (job.targetKey === targetLifecycleKey(stateRef.current) && job.scope.sessionId === (stateRef.current?.sessionId ?? null)) setError(String(reason));
+      },
+    });
+    preferenceSync.current = sync;
+    return () => { sync.dispose(); if (preferenceSync.current === sync) preferenceSync.current = null; };
+  }, [bridge, receive]);
+  useEffect(() => {
+    if (!connected || !nativeReady) return;
+    preferenceSync.current?.enqueue({
+      scope: { targetId: stateRef.current?.target?.id ?? null, sessionId: stateRef.current?.sessionId ?? null },
+      targetKey: motionTargetKey,
+      preferences: motionSettings(motion, intensity, systemReduced),
+    });
+  }, [connected, nativeReady, motionTargetKey, state?.sessionId, motion, intensity, systemReduced]);
+  useEffect(() => {
+    const sync = createOrbAutoHidePreferenceSync<AppSnapshot>({
+      send: (job) => bridge.request('set_orb_auto_hide', { enabled: job.enabled }, job.scope),
+      accept: (job, result) => {
+        if (job.targetKey !== targetLifecycleKey(stateRef.current) || job.scope.sessionId !== (stateRef.current?.sessionId ?? null)) return;
+        receive(result);
+        const confirmed = settledOrbChoice(job, result, stateRef.current);
+        if (confirmed !== null && orbChoice.current !== confirmed) {
+          // receive may already have accepted a newer native event while this invoke was pending.
+          orbChoice.current = confirmed;
+          setOrbAutoHide(confirmed);
+        }
+      },
+      fail: (job, reason) => {
+        if (job.targetKey === targetLifecycleKey(stateRef.current) && job.scope.sessionId === (stateRef.current?.sessionId ?? null)) setError(String(reason));
+      },
+    });
+    orbPreferenceSync.current = sync;
+    return () => { sync.dispose(); if (orbPreferenceSync.current === sync) orbPreferenceSync.current = null; };
+  }, [bridge, receive]);
+  useEffect(() => {
+    if (orbAutoHide !== null) saveOrbAutoHide(orbAutoHide);
+  }, [orbAutoHide]);
+  useEffect(() => {
+    if (!connected || !nativeReady || !stateRef.current) return;
+    const enabled = orbAutoHide ?? stateRef.current.display.orbAutoHide;
+    orbChoice.current = enabled;
+    if (orbAutoHide === null) setOrbAutoHide(enabled);
+    orbPreferenceSync.current?.enqueue({
+      scope: { targetId: stateRef.current.target?.id ?? null, sessionId: stateRef.current.sessionId },
+      targetKey: motionTargetKey,
+      enabled,
+    });
+    orbBootstrap.current = false;
+  }, [connected, nativeReady, motionTargetKey, state?.sessionId, orbAutoHide]);
   useEffect(() => {
     if (cancelRequested.current) return;
     if (state?.phase === 'selectProject') setPanel('projects');
@@ -154,17 +236,34 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     const target = stateRef.current?.target?.id;
     if (await act('select_candidate', { candidateId: id }) && stateRef.current?.target?.id === target) setPanel(stateRef.current?.phase === 'untrusted' ? 'trust' : null);
   }
+  async function changeDisplay(command: 'collapse_to_orb' | 'expand_from_orb' | 'hide_to_tray' | 'show_from_tray') {
+    try {
+      displayRequestId.current = nextDisplayRequestId(displayRequestId.current, stateRef.current?.display);
+      if (await act(command, { requestId: displayRequestId.current })) navigate(null);
+    } catch (reason) { setError(String(reason)); }
+  }
+  function chooseOrbAutoHide(enabled: boolean) {
+    orbChoice.current = enabled;
+    setOrbAutoHide(enabled);
+    if (!connected || !nativeReady || !stateRef.current) return;
+    orbPreferenceSync.current?.enqueue({
+      scope: { targetId: stateRef.current.target?.id ?? null, sessionId: stateRef.current.sessionId },
+      targetKey: targetLifecycleKey(stateRef.current), enabled,
+    }, true);
+  }
   async function copy(text: string, label: string) {
     try { await navigator.clipboard.writeText(text); setFeedback(`${label}已复制`); }
     catch { setError('当前环境无法访问剪贴板。可在路径或诊断中选中文字复制。'); }
   }
   const candidates = filterCandidates(state?.candidates ?? [], search);
   const busy = pending !== null;
+  const displayBusy = busy || displayTransitioning(state?.display);
+  const trayReason = !connected ? '桌面桥接未连接' : state?.display.reason ?? '系统托盘尚未就绪';
   const working = state?.phase === 'discovering' || state?.phase === 'building';
   const statusText = !connected ? '桌面未连接' : pending === 'begin_drag' ? '正在连接' : ui.bindingLabel;
-  return <main className={`app ${hasDockCandidate(state?.dockHint) ? 'target-near' : ''}`} data-binding={ui.binding} data-workspace={ui.workspace} data-pair-layout={pair.state}>
-    <div className="dock-body" {...(panel ? { inert: '' } : {})}>
-      <header className="header"><button className="drag-zone drag" aria-label="拖动 ArkDock 到目标应用窗口外侧" title="按住顶部，拖到目标窗口右侧" onPointerDown={(event) => { if (event.button === 0 && connected) void act('begin_drag', {}); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setFeedback('键盘移动：Alt+空格打开系统窗口菜单，选择移动。'); } }}><Icon name="grip" size={15} /><span className="mark" aria-hidden="true"><span /><span /></span><strong>ArkDock</strong></button><span className={`header-status ${ui.binding === 'bound' ? 'connected' : ''}`} title={state?.target?.title ?? statusText}><span className="dot" />{statusText}</span><div className="header-actions"><button className="icon-button" aria-label="更多操作" title="更多操作" onClick={() => navigate('menu')}><span className="ellipsis" aria-hidden="true">···</span></button><button className="icon-button minimize" disabled={!connected || busy} aria-label="最小化窗口" title={connected ? '最小化窗口' : '桌面桥接未连接'} onClick={() => void act('minimize_window', {})}><span aria-hidden="true">−</span></button><button className="icon-button maximize" disabled={!connected || busy || !pair.enabled} aria-label={pair.action} title={pair.reason} onClick={() => void act(pair.command, {})}><Icon name={pair.state === 'maximized' ? 'restore' : 'maximize'} size={16} /></button><button className="icon-button close-window" disabled={!connected || busy} aria-label="关闭 ArkDock" title={connected ? '关闭 ArkDock' : '桌面桥接未连接'} onClick={() => void act('close_window', {})}><Icon name="close" size={17} /></button></div></header>
+  return <main className={`app ${hasDockCandidate(state?.dockHint) ? 'target-near' : ''}`} data-binding={ui.binding} data-workspace={ui.workspace} data-pair-layout={pair.state} data-display={state?.display.mode ?? 'expanded'}>
+    <div className="dock-body" {...(panel || state && state.display.mode !== 'expanded' ? { inert: '' } : {})}>
+      <header className="header"><button className="drag-zone drag" aria-label="拖动 ArkDock 到目标应用窗口外侧" title="按住顶部，拖到目标窗口右侧" onPointerDown={(event) => { if (event.button === 0 && connected) void act('begin_drag', {}); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setFeedback('键盘移动：Alt+空格打开系统窗口菜单，选择移动。'); } }}><Icon name="grip" size={15} /><span className="mark" aria-hidden="true"><span /><span /></span><strong>ArkDock</strong></button><span className={`header-status ${ui.binding === 'bound' ? 'connected' : ''}`} title={state?.target?.title ?? statusText}><span className="dot" />{statusText}</span><div className="header-actions"><button className="collapse-orb" disabled={!connected || !nativeReady || displayBusy || state?.display.mode !== 'expanded'} aria-label="收起为悬浮球" title={connected ? '收起为悬浮球' : '桌面桥接未连接'} onClick={() => void changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" /><span className="collapse-label">收起</span></button><button className="icon-button" aria-label="更多操作" title="更多操作" onClick={() => navigate('menu')}><span className="ellipsis" aria-hidden="true">···</span></button><button className="icon-button minimize" disabled={!connected || busy} aria-label="最小化窗口" title={connected ? '最小化窗口' : '桌面桥接未连接'} onClick={() => void act('minimize_window', {})}><span aria-hidden="true">−</span></button><button className="icon-button maximize" disabled={!connected || busy || !pair.enabled} aria-label={pair.action} title={pair.reason} onClick={() => void act(pair.command, {})}><Icon name={pair.state === 'maximized' ? 'restore' : 'maximize'} size={16} /></button><button className="icon-button close-window" disabled={!connected || busy} aria-label="关闭 ArkDock" title={connected ? '关闭 ArkDock' : '桌面桥接未连接'} onClick={() => void act('close_window', {})}><Icon name="close" size={17} /></button></div></header>
       <section className="workspace-strip" aria-label="当前工程"><button className="workspace-main" aria-label="工程" onClick={() => navigate(state?.project ? 'path' : 'projects')} title={state?.project?.appRoot ?? '查看工程候选'}><span className="workspace-icon"><Icon name="folder" size={18} /></span><span><strong>{state?.project?.name ?? '尚未关联工程'}</strong><span className="workspace-path">{state?.project ? `${environments[state.project.environment]} · ${state.project.module}` : '拖动贴边后，只读识别当前工程'}</span></span><Icon name="chevron" size={15} /></button><button className="icon-button" disabled={!state?.target || busy} aria-label="重新识别" title={!state?.target ? '先连接开发窗口' : '重新读取目标工程线索'} onClick={() => void act('rediscover', {})}><Icon name="refresh" size={17} /></button></section>
       <output key={`${state?.phase}-${ui.workspace}-${state?.dockHint ?? ''}`} className={`state-strip ${working ? 'working' : ''}`}><Icon name={state?.trusted ? 'shield' : 'link'} size={14} /><span>{hasDockCandidate(state?.dockHint) ? '松开以连接 · 靠近目标外侧' : state?.dockHint ?? (state?.target ? ui.workspaceLabel : '独立悬浮 · 拖到开发窗口旁开始')}</span>{state?.target && <span className={`pair-badge ${pair.pending ? 'pending' : ''}`} title={pair.reason}>{pair.state === 'maximized' ? '共同最大化' : pair.pending ? '布局调整中' : pair.state === 'blocked' ? '布局受限' : pair.state === 'paired' ? '全贴合' : '等待布局'}</span>}{working && <span className="task-spinner" />}{state?.phase === 'discovering' && <button className="cancel-discovery" disabled={cancelling} title="解除绑定，使当前关联会话失效；正在进行的只读检查等待后端返回" onClick={() => void cancelAssociation()}>{cancelling ? '取消中…' : '取消关联'}</button>}</output>
       <section className="preview-toolbar" aria-label="预览控制"><div className="toolbar-selects"><label><span className="sr-only">运行方式</span><select aria-label="运行方式" value="native" title={state?.backend.reason ?? '等待桌面后端'} onChange={() => {}}><option value="native">原生 Previewer{state?.backend.available ? '' : ' · 待就绪'}</option><option disabled>模拟器 · 未支持</option><option disabled>真机 · 未支持</option></select></label><label><span className="sr-only">页面或组件</span><select aria-label="页面或组件" disabled title="当前适配器仅支持默认 pages/Index；页面切换未接入"><option>Index · 默认页面</option></select></label><button className={`icon-button refresh-button ${pending === 'refresh_preview' ? 'pending' : ''}`} disabled={ui.capabilities.refresh.status !== 'available' || busy} aria-label="手动刷新" title={ui.capabilities.refresh.reason} onClick={() => void act('refresh_preview', {})}><Icon name="refresh" size={18} /></button></div><div className="toolbar-actions"><button className="stop-button" disabled={ui.capabilities.stop.status !== 'available' || busy} title={ui.capabilities.stop.reason} aria-label="停止预览" onClick={() => void act('stop_preview', {})}><Icon name="stop" size={14} /><span>停止</span></button><label className="zoom-control"><select aria-label="画面缩放" value={zoom} onChange={(event) => setZoom(event.target.value === 'fit' ? 'fit' : Number(event.target.value))}><option value="fit">适应窗口</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option></select></label><span className="toolbar-divider" /><span className="mode-caption"><Icon name="device" size={14} />原生画面</span><button className="icon-button" aria-label="预览能力" title="查看方向、应用主题和输入能力" onClick={() => navigate('controls')}><Icon name="settings" size={17} /></button></div></section>
@@ -177,12 +276,18 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       {panel === 'trust' && (state?.project ? <div className="settings-card"><span className="section-icon"><Icon name="shield" size={27} /></span><h3>允许这个工程执行构建？</h3><p>发现和关联只读取工程信息。信任后才允许工程的构建逻辑运行。</p><code className="path">{state.project.appRoot}</code><p className="muted">构建配置改变时将再次确认。可随时撤销信任。</p><div className="panel-actions"><button className="primary-button" disabled={busy} onClick={async () => { if (await act('set_trust', { projectId: state.project!.id, trusted: true })) navigate(null); }}>信任此工程</button><button onClick={() => navigate('projects')}>换一个工程</button></div></div> : <p>当前没有待信任工程。</p>)}
       {panel === 'sdk' && <div className="settings-card"><span className="section-icon"><Icon name="device" size={27} /></span><h3>连接真实原生运行时</h3><p>使用合法安装的 HarmonyOS SDK 与构建工具，无需启动 DevEco GUI。</p><dl className="details-list"><div><dt>SDK 目录</dt><dd className="path">{state?.backend.sdkPath ?? '未配置'}</dd></div><div><dt>工具链版本</dt><dd>{state?.backend.sdkVersion ?? '尚未检测'}</dd></div></dl><p className="info-note">{state?.backend.reason ?? '桌面桥接未连接，浏览器页面无法探测 SDK。'}</p><button className="primary-button" disabled={!connected || busy} onClick={() => void act('configure_sdk', {})}><Icon name="folder" size={16} />指定 SDK 目录</button><p className="muted">当前适配器限定默认 Stage、pages/Index 与 360×640；其他 SDK 版本需要单独核验。</p></div>}
       {panel === 'path' && (state?.project ? <div className="settings-card"><h3>{state.project.name}</h3><dl className="details-list"><div><dt>应用根</dt><dd className="path">{state.project.appRoot}</dd></div><div><dt>工作区根</dt><dd className="path">{state.project.workspaceRoot}</dd></div><div><dt>环境</dt><dd>{environments[state.project.environment]}</dd></div><div><dt>模块 · 变体</dt><dd>{state.project.module} · {state.project.variant}</dd></div><div><dt>执行信任</dt><dd>{state.trusted ? '已信任当前构建配置' : '未信任 · 只读'}</dd></div></dl><div className="panel-actions"><button onClick={() => void copy(state.project!.appRoot, '工程路径')}>复制完整路径</button><button onClick={() => navigate('projects')}>切换工程</button><button disabled={!state.trusted || busy} onClick={() => void act('set_trust', { projectId: state.project!.id, trusted: false })}>撤销工程信任</button></div></div> : <button onClick={() => navigate('projects')}>查看工程候选</button>)}
-      {panel === 'settings' && <><div className="settings-card"><h3>工具外观</h3><p className="muted">仅改变 ArkDock 外壳，不改变鸿蒙应用主题。</p><div className="theme-options" aria-label="外观主题">{(['dark', 'light', 'system'] as const).map((option) => <button key={option} className={theme === option ? 'selected' : ''} aria-pressed={theme === option} onClick={() => setTheme(option)}><Icon name={option === 'light' ? 'sun' : option === 'dark' ? 'moon' : 'monitor'} size={20} />{option === 'light' ? '浅色' : option === 'dark' ? '深色' : '跟随系统'}</button>)}</div></div><div className="settings-card"><h3>动画偏好</h3><p className="muted">减少动画时取消位移与循环装饰，保留状态反馈。</p><div className="motion-options">{(['system', 'reduce'] as const).map((option) => <button key={option} aria-pressed={motion === option} className={motion === option ? 'selected' : ''} onClick={() => setMotion(option)}>{option === 'system' ? '跟随系统动画' : '减少动画'}</button>)}</div></div><div className="settings-card"><h3>窗口与工程</h3><p className="pair-mode-description">{pair.label}{state?.pairLayout?.reason && ` · ${state.pairLayout.reason}`}</p><p className="muted">两个独立窗口全贴合，尺寸联动；共同最大化时 ArkDock 保持右侧。解除绑定会停止自有预览资源。</p><button disabled={!state?.target || busy} onClick={async () => { if (await act('detach', {})) navigate(null); }}>解除当前绑定</button>{state?.project && <button onClick={() => navigate('path')}>管理工程信任</button>}</div></>}
-      {panel === 'menu' && <div className="menu-list"><button onClick={() => navigate('projects')}><Icon name="folder" />选择当前工程<Icon name="chevron" size={16} /></button><button disabled={!state?.target || busy} onClick={async () => { navigate(null); await act('rediscover', {}); }}><Icon name="refresh" />重新识别</button><button disabled={!connected || busy} onClick={async () => { if (await act('select_directory', {})) navigate(stateRef.current?.phase === 'untrusted' ? 'trust' : null); }}><Icon name="folder" />手动选择目录</button><button onClick={() => navigate('controls')}><Icon name="preview" />预览能力</button><button onClick={() => navigate('sdk')}><Icon name="device" />设备与原生工具链</button><button onClick={() => navigate('diagnostics')}><Icon name="log" />运行日志</button><button onClick={() => navigate('settings')}><Icon name="settings" />偏好设置</button><button onClick={() => navigate('help')}><Icon name="link" />使用帮助</button><button disabled={!connected || busy || !pair.enabled} title={pair.reason} onClick={async () => { if (await act(pair.command, {})) navigate(null); }}><Icon name="maximize" />{pair.action}</button><button disabled={!connected || busy} onClick={() => void act('minimize_window', {})}><Icon name="monitor" />最小化窗口</button><button className="danger-button" disabled={!state?.target || busy} onClick={async () => { if (await act('detach', {})) navigate(null); }}><Icon name="close" />解除当前绑定</button></div>}
+      {panel === 'settings' && <>
+        <div className="settings-card"><h3>工具外观</h3><p className="muted">仅改变 ArkDock 外壳，不改变鸿蒙应用主题。</p><div className="theme-options" aria-label="外观主题">{(['dark', 'light', 'system'] as const).map((option) => <button key={option} className={theme === option ? 'selected' : ''} aria-pressed={theme === option} onClick={() => setTheme(option)}><Icon name={option === 'light' ? 'sun' : option === 'dark' ? 'moon' : 'monitor'} size={20} />{option === 'light' ? '浅色' : option === 'dark' ? '深色' : '跟随系统'}</button>)}</div></div>
+        <div className="settings-card"><h3>动画偏好</h3><p className="muted">系统减少动画优先生效；关闭或轻量时不播放贴边涟漪与悬浮球装饰。</p><div className="motion-options" aria-label="减少动画偏好">{(['system', 'reduce'] as const).map((option) => <button key={option} aria-pressed={motion === option} className={motion === option ? 'selected' : ''} onClick={() => setMotion(option)}>{option === 'system' ? '跟随系统动画' : '减少动画'}</button>)}</div><div className="intensity-options" aria-label="动效强度">{(['off', 'light', 'standard', 'enhanced'] as const).map((option) => <button key={option} aria-pressed={intensity === option} className={intensity === option ? 'selected' : ''} onClick={() => setIntensity(option)}>{({ off: '关闭', light: '轻量', standard: '标准', enhanced: '增强' })[option]}</button>)}</div><output className="motion-status">{!connected ? '桌面桥接未连接，原生动效偏好尚未同步。' : state?.motion.reduced ? '原生窗口已减少动画。' : state?.motion.intensity === 'off' ? '原生窗口动效已关闭。' : state?.motion.intensity === 'light' ? '原生窗口使用轻量动效。' : state?.motion.intensity === 'enhanced' ? '原生窗口使用增强动效。' : '原生窗口使用标准动效。'}</output></div>
+        <div className="settings-card"><h3>悬浮球</h3><label className="setting-toggle"><span><strong>贴边自动隐藏</strong><small>悬浮球闲置时沿屏幕边缘收起，靠近后恢复显示。</small></span><input type="checkbox" role="switch" aria-checked={state?.display.orbAutoHide ?? false} aria-label="悬浮球贴边自动隐藏" checked={state?.display.orbAutoHide ?? false} disabled={!connected || !nativeReady || displayBusy} onChange={(event) => chooseOrbAutoHide(event.target.checked)} /></label><button disabled={!connected || !nativeReady || displayBusy || state?.display.mode !== 'expanded'} onClick={() => void changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button></div>
+        <div className="settings-card"><h3>窗口与工程</h3><p className="pair-mode-description">{pair.label}{state?.pairLayout?.reason && ` · ${state.pairLayout.reason}`}</p><p className="muted">两个独立窗口全贴合，尺寸联动；共同最大化时 ArkDock 保持右侧。解除绑定会停止自有预览资源。</p><button disabled={!state?.target || busy} onClick={async () => { if (await act('detach', {})) navigate(null); }}>解除当前绑定</button>{state?.project && <button onClick={() => navigate('path')}>管理工程信任</button>}</div>
+      </>}
+      {panel === 'menu' && <div className="menu-list"><button disabled={!connected || !nativeReady || displayBusy || state?.display.mode !== 'expanded'} onClick={() => void changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button><button disabled={!connected || !nativeReady || displayBusy || !state?.display.trayAvailable} title={state?.display.trayAvailable ? '隐藏窗口，由系统托盘恢复' : trayReason} onClick={() => void changeDisplay('hide_to_tray')}><Icon name="monitor" />隐藏到系统托盘</button>{!state?.display.trayAvailable && <p className="menu-note">{trayReason}</p>}<button onClick={() => navigate('projects')}><Icon name="folder" />选择当前工程<Icon name="chevron" size={16} /></button><button disabled={!state?.target || busy} onClick={async () => { navigate(null); await act('rediscover', {}); }}><Icon name="refresh" />重新识别</button><button disabled={!connected || busy} onClick={async () => { if (await act('select_directory', {})) navigate(stateRef.current?.phase === 'untrusted' ? 'trust' : null); }}><Icon name="folder" />手动选择目录</button><button onClick={() => navigate('controls')}><Icon name="preview" />预览能力</button><button onClick={() => navigate('sdk')}><Icon name="device" />设备与原生工具链</button><button onClick={() => navigate('diagnostics')}><Icon name="log" />运行日志</button><button onClick={() => navigate('settings')}><Icon name="settings" />偏好设置</button><button onClick={() => navigate('help')}><Icon name="link" />使用帮助</button><button disabled={!connected || busy || !pair.enabled} title={pair.reason} onClick={async () => { if (await act(pair.command, {})) navigate(null); }}><Icon name="maximize" />{pair.action}</button><button disabled={!connected || busy} onClick={() => void act('minimize_window', {})}><Icon name="monitor" />最小化窗口</button><button className="danger-button" disabled={!state?.target || busy} onClick={async () => { if (await act('detach', {})) navigate(null); }}><Icon name="close" />解除当前绑定</button></div>}
       {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
       {panel === 'diagnostics' && <><div className="diagnostic-actions"><span className="muted">最近 {state?.diagnostics.length ?? 0} 条记录</span><button onClick={() => void copy(diagnosticText(state), '脱敏诊断')}>复制脱敏诊断</button></div><p className="info-note">{state?.backend.reason ?? '桌面后端未连接。'}</p>{state?.build.error && <p className="build-error">{state.build.error}</p>}{state?.diagnostics.length ? state.diagnostics.map((item, index) => <article key={`${item.observedAt}-${index}`}><div><span className={`log-status ${item.status.toLowerCase()}`}>{item.status}</span><strong>{item.code}</strong><time>{new Date(item.observedAt).toLocaleTimeString('zh-CN')}</time></div><p>{item.message}</p><small>{item.workspaceId ?? '—'} / {item.buildId ?? '—'}</small></article>) : <div className="no-results"><Icon name="log" size={30} /><p>暂无诊断记录，编译错误总数未知。</p></div>}</>}
       {panel === 'help' && <div className="settings-card"><h3>从正在开发的窗口开始</h3><ol className="help-steps"><li>按住顶部标识或拖动区，靠近开发窗口右侧。</li><li>收到目标提示后松开；独立窗口由原生层贴边。</li><li>可靠工程直接关联；线索不足时确认候选，未发现时选择目录。</li><li>确认工程信任，再检查工具链，等待真实原生首帧。</li></ol><p className="muted">可随时重新识别、切换工程或解除绑定。只读识别目前不能中途取消；解除绑定使会话失效。</p></div>}
     </Sheet>}
     {(error || feedback) && <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}><span>{error ?? feedback}</span><button className="icon-button" disabled={Boolean(panel)} aria-label="关闭提示" onClick={() => { setError(null); setFeedback(null); }}><Icon name="close" size={16} /></button></div>}
+    <DockRipple snapshot={state} motion={effectiveMotion} />
   </main>;
 }

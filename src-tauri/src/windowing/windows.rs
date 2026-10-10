@@ -1,8 +1,17 @@
+use super::display::DisplayTransaction;
+use super::effects::{EffectTarget, Effects};
 use super::geometry::{dock_rect, edge_score, edge_visible, side_by_side, Rect};
-use super::lifecycle::{Identity, Layout};
+use super::lifecycle::{
+    preserves_pending_compensation, retained_candidate_token, Identity, Layout,
+};
 use super::outline::Outline;
+use super::surfaces::{Action as SurfaceAction, Surfaces};
 use super::WindowUpdate;
-use crate::ipc::model::{PairLayoutState, PairLayoutStatus, ProcessRef, TargetInfo};
+use crate::ipc::model::{
+    DisplayMode, DockConfirmation, DockSide, MotionMetrics, MotionSettings, PairLayoutState,
+    PairLayoutStatus, ProcessRef, TargetInfo,
+};
+mod display;
 mod joint;
 use joint::{JointCompensation, JointGroup};
 use std::cell::{Cell, RefCell};
@@ -99,6 +108,10 @@ unsafe extern "system" fn on_event(
 }
 
 enum Command {
+    Metrics(mpsc::SyncSender<Result<MotionMetrics, String>>),
+    Display(DisplayMode, u64, mpsc::SyncSender<Result<(), String>>),
+    OrbAutoHide(bool, mpsc::SyncSender<Result<(), String>>),
+    Motion(MotionSettings, mpsc::SyncSender<Result<(), String>>),
     BeginDrag(mpsc::SyncSender<Result<(), String>>),
     Arrange(mpsc::SyncSender<Result<(), String>>),
     MaximizePair(String, mpsc::SyncSender<Result<(), String>>),
@@ -119,6 +132,23 @@ pub(super) struct Controller {
 }
 
 impl Controller {
+    pub fn motion_metrics(&self) -> Result<MotionMetrics, String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.commands
+            .try_send(Command::Metrics(tx))
+            .map_err(|_| "Window controller is busy".to_owned())?;
+        rx.recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Motion metrics request timed out".to_owned())?
+    }
+    pub fn set_display_mode(&self, mode: DisplayMode, request_id: u64) -> Result<(), String> {
+        self.request(|reply| Command::Display(mode, request_id, reply))
+    }
+    pub fn set_orb_auto_hide(&self, enabled: bool) -> Result<(), String> {
+        self.request(|reply| Command::OrbAutoHide(enabled, reply))
+    }
+    pub fn set_motion_preferences(&self, settings: MotionSettings) -> Result<(), String> {
+        self.request(|reply| Command::Motion(settings, reply))
+    }
     #[cfg(feature = "desktop")]
     pub fn discovery_scope(&self, target_id: &str) -> Result<super::DiscoveryScope, String> {
         let (tx, rx) = mpsc::sync_channel(1);
@@ -286,6 +316,19 @@ struct CancelledLayout {
 }
 
 struct Native {
+    effects: Option<Effects>,
+    outline: Option<Outline>,
+    effect_error: Option<String>,
+    fallback_enabled: bool,
+    surfaces: Surfaces,
+    display: DisplayTransaction,
+    display_started: Option<Instant>,
+    display_hide_issued: bool,
+    main_visibility_pending: Option<bool>,
+    user_surface_hidden: bool,
+    expanded_while_target_hidden: bool,
+    dock_confirmation: Option<DockConfirmation>,
+    exit_requested: bool,
     own: TrackedWindow,
     own_pid: u32,
     target: Option<TrackedWindow>,
@@ -306,7 +349,6 @@ struct Native {
     hint: Option<String>,
     layout_required: bool,
     last_sample: Instant,
-    outline: Outline,
     _hooks: Hooks,
     _dpi: DpiContext,
 }
@@ -326,7 +368,20 @@ impl Native {
             ));
         }
         let dpi = DpiContext(previous);
-        let outline = Outline::new()?;
+        let (effects, effect_error) = match Effects::new() {
+            Ok(effects) => (Some(effects), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Magnetic overlay unavailable; native docking remains active: {error}"
+                )),
+            ),
+        };
+        let outline = if effects.is_none() {
+            Outline::new().ok()
+        } else {
+            None
+        };
         let own_pid = unsafe { GetCurrentProcessId() };
         let own_window = track(own, 0)?;
         if own_window.identity.pid != own_pid
@@ -365,7 +420,23 @@ impl Native {
             }
             hooks.0.push(hook);
         }
+        let surfaces = Surfaces::new(own as HWND)?;
+        let mut display = DisplayTransaction::default();
+        display.status.tray_available = surfaces.tray_available;
         Ok(Self {
+            effects,
+            outline,
+            effect_error,
+            fallback_enabled: true,
+            surfaces,
+            display,
+            display_started: None,
+            display_hide_issued: false,
+            main_visibility_pending: None,
+            user_surface_hidden: false,
+            expanded_while_target_hidden: false,
+            dock_confirmation: None,
+            exit_requested: false,
             own: own_window,
             own_pid,
             target: None,
@@ -386,7 +457,6 @@ impl Native {
             hint: None,
             layout_required: false,
             last_sample: Instant::now(),
-            outline,
             _hooks: hooks,
             _dpi: dpi,
         })
@@ -508,6 +578,47 @@ impl Native {
                     break;
                 };
                 match command {
+                    Command::Metrics(reply) => {
+                        let metrics = self.effects.as_ref().map(|effects| effects.metrics());
+                        let _ = reply.send(Ok(metrics.map_or(
+                            MotionMetrics {
+                                frames: 0,
+                                coalesced_updates: 0,
+                                failed_frames: 0,
+                                render_total_us: 0,
+                                active_total_us: 0,
+                                max_frame_us: 0,
+                                wake_count: 0,
+                            },
+                            |metrics| MotionMetrics {
+                                frames: metrics.frames,
+                                coalesced_updates: metrics.coalesced_updates,
+                                failed_frames: metrics.failed_frames,
+                                render_total_us: metrics.render_total_us,
+                                active_total_us: metrics.active_total_us,
+                                max_frame_us: metrics.max_frame_us,
+                                wake_count: metrics.wake_count,
+                            },
+                        )));
+                    }
+                    Command::Display(mode, request_id, reply) => {
+                        let result = self.request_display(mode, request_id);
+                        self.publish();
+                        let _ = reply.send(result);
+                    }
+                    Command::OrbAutoHide(enabled, reply) => {
+                        let result = self.surfaces.set_auto_hide(enabled);
+                        if result.is_ok() {
+                            self.display.status.orb_auto_hide = enabled;
+                        }
+                        self.publish();
+                        let _ = reply.send(result);
+                    }
+                    Command::Motion(settings, reply) => {
+                        self.set_motion(settings);
+                        self.publish();
+                        let _ = reply.send(Ok(()));
+                    }
                     #[cfg(feature = "desktop")]
                     Command::Scope(id, reply) => {
                         let result = self
@@ -521,6 +632,13 @@ impl Native {
                         let _ = reply.send(result);
                     }
                     Command::BeginDrag(reply) => {
+                        if self.user_surface_hidden
+                            || self.display.status.mode != DisplayMode::Expanded
+                        {
+                            let _ = reply
+                                .send(Err("Expand ArkDock before dragging its main window".into()));
+                            continue;
+                        }
                         // Moving the companion is a user layout change. Never
                         // enqueue a restore that could arrive during its drag.
                         self.detach(false);
@@ -562,6 +680,13 @@ impl Native {
                     }
                 }
             }
+            for action in self.surfaces.actions() {
+                self.surface_action(action);
+            }
+            if let Err(error) = self.surfaces.tick() {
+                self.display.status.reason = Some(error);
+            }
+            self.advance_display();
             self.restore_cancelled();
             if self.dragging {
                 if self
@@ -636,9 +761,12 @@ impl Native {
     }
 
     fn detect(&mut self) {
-        self.candidate = None;
+        let previous_candidate = self.candidate.take();
+        let previous_is_live = previous_candidate
+            .as_ref()
+            .is_some_and(|candidate| self.valid(&candidate.window));
         let Some(own) = visible_bounds(self.own.identity.handle as HWND) else {
-            self.outline.hide();
+            self.cancel_effects();
             self.hint = Some("Dock bounds are unavailable".into());
             return;
         };
@@ -646,7 +774,7 @@ impl Native {
         let result =
             unsafe { EnumWindows(Some(enumerate), &mut handles as *mut Vec<isize> as isize) };
         if result == 0 {
-            self.outline.hide();
+            self.cancel_effects();
             self.hint = Some("Desktop enumeration was incomplete; no binding will be made".into());
             return;
         }
@@ -682,11 +810,28 @@ impl Native {
                 if let Some(distance) = proximity {
                     // EnumWindows identifies candidates. Explicit GW_HWNDPREV
                     // checks z order; don't rely on undocumented enum ordering.
-                    if let Some((z_index, higher)) =
-                        higher_windows(hwnd, self.own.identity.handle, &self.outline)
-                    {
+                    if let Some((z_index, higher)) = higher_windows(
+                        hwnd,
+                        self.own.identity.handle,
+                        self.own_pid,
+                        &self.effects,
+                        &self.outline,
+                    ) {
                         if edge_visible(bounds, own, &higher) {
-                            if let Ok(window) = track(handle, self.epoch(handle)) {
+                            if let Ok(mut window) = track(handle, self.epoch(handle)) {
+                                if !self.valid(&window) {
+                                    continue;
+                                }
+                                if let Some(previous) = &previous_candidate {
+                                    if let Some(token) = retained_candidate_token(
+                                        previous.window.identity,
+                                        &previous.window.info.id,
+                                        window.identity,
+                                        previous_is_live,
+                                    ) {
+                                        window.info.id = token.to_owned();
+                                    }
+                                }
                                 let candidate = Candidate {
                                     window,
                                     distance,
@@ -713,24 +858,64 @@ impl Native {
         });
         if let Some(candidate) = &self.candidate {
             if let Some(bounds) = visible_bounds(candidate.window.identity.handle as HWND) {
-                if let Err(error) = self
-                    .outline
-                    .show(bounds, scaled(candidate.window.identity.handle as HWND, 2))
+                let effect_target = EffectTarget {
+                    own,
+                    target: bounds,
+                    target_id: candidate.window.info.id.clone(),
+                    distance: candidate.distance,
+                    threshold: scaled(candidate.window.identity.handle as HWND, 40),
+                    dpi: unsafe { GetDpiForWindow(candidate.window.identity.handle as HWND) },
+                };
+                if self
+                    .effects
+                    .as_ref()
+                    .is_some_and(|effects| effects.metrics().failed_frames > 0)
+                    && self.effect_error.is_none()
                 {
-                    self.hint = Some(error);
+                    if let Some(effects) = &self.effects {
+                        effects.cancel();
+                    }
+                    self.effect_error = Some(
+                        "Magnetic alpha rendering failed; using a static native edge halo".into(),
+                    );
+                    self.outline = Outline::new().ok();
+                }
+                if self.effect_error.is_none() {
+                    if let Some(effects) = &self.effects {
+                        effects.update(Some(effect_target));
+                    }
+                } else if self.fallback_enabled {
+                    if let Some(outline) = &mut self.outline {
+                        if let Err(error) = outline
+                            .show(bounds, scaled(candidate.window.identity.handle as HWND, 2))
+                        {
+                            self.hint = Some(error);
+                        }
+                    }
                 }
             } else {
-                self.outline.hide();
+                self.cancel_effects();
             }
         } else {
-            self.outline.hide();
+            if let Some(effects) = &self.effects {
+                effects.update(None);
+            }
+            if let Some(outline) = &mut self.outline {
+                outline.hide();
+            }
+        }
+        if let Some(reason) = &self.effect_error {
+            self.hint = Some(format!(
+                "{} · {reason}",
+                self.hint.as_deref().unwrap_or("Native docking active")
+            ));
         }
     }
 
     fn release(&mut self) {
         // Re-enumerate at release rather than binding a stale highlighted candidate.
         self.detect();
-        self.outline.hide();
+        self.cancel_effects();
         self.dragging = false;
         self.move_started = false;
         self.armed_at = None;
@@ -751,6 +936,23 @@ impl Native {
     }
 
     fn follow(&mut self) {
+        if self.user_surface_hidden {
+            if self
+                .target
+                .as_ref()
+                .is_some_and(|target| !self.valid(target))
+            {
+                self.invalidate("Target lifecycle changed while ArkDock was collapsed");
+            } else {
+                self.observe_suspended_joint();
+            }
+            return;
+        }
+        // The latest consent transaction owns its queued writes until cancellation
+        // finishes. Older joint follow must not mutate either recorded rectangle.
+        if self.cancelled.is_some() {
+            return;
+        }
         if self.follow_joint() {
             return;
         }
@@ -771,16 +973,19 @@ impl Native {
         if unsafe { IsIconic(target_hwnd) } != 0 || !visible(target_hwnd) {
             self.layout = None;
             self.arrangement = None;
-            if !own_minimized_or_maximized
+            if !self.expanded_while_target_hidden
+                && !own_minimized_or_maximized
                 && !self.hidden_by_us
                 && unsafe { IsWindowVisible(self.own.identity.handle as HWND) } != 0
                 && unsafe { ShowWindowAsync(self.own.identity.handle as HWND, SW_HIDE) } != 0
             {
                 self.hidden_by_us = true;
+                self.main_visibility_pending = Some(false);
             }
             self.hint = Some("Target is minimized or hidden; companion waits for restore".into());
             return;
         }
+        self.expanded_while_target_hidden = false;
         // Keep target liveness checks active while respecting the user's own
         // companion minimize/maximize state; never restore it implicitly.
         if own_minimized_or_maximized {
@@ -912,6 +1117,9 @@ impl Native {
     }
 
     fn arrange(&mut self) -> Result<(), String> {
+        if self.user_surface_hidden {
+            return Err("DISPLAY_SUSPENDED: expand ArkDock before arranging windows".into());
+        }
         if self.dragging {
             return Err("Finish dragging before requesting a layout".into());
         }
@@ -1021,41 +1229,64 @@ impl Native {
     }
 
     fn show_own(&mut self) {
-        if self.hidden_by_us
-            && self.valid(&self.own)
-            && unsafe { ShowWindowAsync(self.own.identity.handle as HWND, SW_SHOWNOACTIVATE) } != 0
-        {
+        if self.user_surface_hidden || !self.hidden_by_us || !self.valid(&self.own) {
+            return;
+        }
+        let visible = unsafe { IsWindowVisible(self.own.identity.handle as HWND) } != 0;
+        if let Some(expected) = self.main_visibility_pending {
+            if visible != expected {
+                return;
+            }
+            self.main_visibility_pending = None;
+        }
+        if visible {
             self.hidden_by_us = false;
+        } else if unsafe { ShowWindowAsync(self.own.identity.handle as HWND, SW_SHOWNOACTIVATE) }
+            != 0
+        {
+            self.main_visibility_pending = Some(true);
         }
     }
 
     fn detach(&mut self, restore_layout: bool) {
-        self.outline.hide();
+        self.cancel_effects();
         if !restore_layout {
             // A new user drag, lifecycle loss or exit must never queue old layout writes.
             self.cancelled = None;
         } else if let Some(target) = self.target.take() {
-            let operation = self
-                .layout
-                .take()
-                .map(CancelledOperation::Layout)
-                .or_else(|| self.arrangement.take().map(CancelledOperation::Arrangement))
-                .or_else(|| {
-                    self.joint
-                        .take()
-                        .map(|group| CancelledOperation::Joint(Box::new(group)))
-                });
-            if let Some(operation) = operation {
-                // An accepted User32 request cannot be recalled. Keep its identity and observe
-                // it after detaching, rather than losing a late request's restoration ownership.
-                self.cancelled = Some(CancelledLayout {
-                    target,
-                    operation,
-                    deadline: Instant::now() + Duration::from_secs(3),
-                });
+            let existing_owns_transaction = preserves_pending_compensation(
+                self.cancelled
+                    .as_ref()
+                    .map(|cancelled| cancelled.target.identity),
+                target.identity,
+                self.cancelled
+                    .as_ref()
+                    .is_some_and(|cancelled| self.valid(&cancelled.target)),
+            );
+            if !existing_owns_transaction {
+                let operation = self
+                    .layout
+                    .take()
+                    .map(CancelledOperation::Layout)
+                    .or_else(|| self.arrangement.take().map(CancelledOperation::Arrangement))
+                    .or_else(|| {
+                        self.joint
+                            .take()
+                            .map(|group| CancelledOperation::Joint(Box::new(group)))
+                    });
+                if let Some(operation) = operation {
+                    // An accepted User32 request cannot be recalled. Keep its identity and observe
+                    // it after detaching, rather than losing a late request's restoration ownership.
+                    self.cancelled = Some(CancelledLayout {
+                        target,
+                        operation,
+                        deadline: Instant::now() + Duration::from_secs(3),
+                    });
+                }
             }
         }
         self.target = None;
+        self.dock_confirmation = None;
         self.joint = None;
         self.pair_status = PairLayoutStatus::default();
         self.candidate = None;
@@ -1071,6 +1302,9 @@ impl Native {
     }
 
     fn restore_cancelled(&mut self) {
+        if self.user_surface_hidden {
+            return;
+        }
         let Some(mut cancelled) = self.cancelled.take() else {
             return;
         };
@@ -1209,6 +1443,9 @@ impl Native {
             dock_hint: self.hint.clone(),
             layout_required: self.layout_required,
             pair_layout: self.pair_status.clone(),
+            display: self.display.status.clone(),
+            dock_confirmation: self.dock_confirmation.clone(),
+            exit_requested: self.exit_requested,
         };
         let changed = if let Ok(mut state) = self.snapshot.lock() {
             let same_target = match (&state.target, &update.target) {
@@ -1219,7 +1456,11 @@ impl Native {
             let changed = !same_target
                 || state.dock_hint != update.dock_hint
                 || state.layout_required != update.layout_required;
-            let changed = changed || state.pair_layout != update.pair_layout;
+            let changed = changed
+                || state.pair_layout != update.pair_layout
+                || state.display != update.display
+                || state.dock_confirmation != update.dock_confirmation
+                || state.exit_requested != update.exit_requested;
             if changed {
                 *state = update.clone();
             }
@@ -1423,7 +1664,13 @@ fn window_title(hwnd: HWND) -> String {
     }
 }
 
-fn higher_windows(target: HWND, own: isize, outline: &Outline) -> Option<(usize, Vec<Rect>)> {
+fn higher_windows(
+    target: HWND,
+    own: isize,
+    own_pid: u32,
+    effects: &Option<Effects>,
+    outline: &Option<Outline>,
+) -> Option<(usize, Vec<Rect>)> {
     let mut cursor = target;
     let mut visited = HashSet::new();
     let mut rectangles = Vec::new();
@@ -1435,7 +1682,20 @@ fn higher_windows(target: HWND, own: isize, outline: &Outline) -> Option<(usize,
         if !visited.insert(cursor as isize) || unsafe { IsWindow(cursor) } == 0 {
             return None;
         }
-        if cursor as isize != own && !outline.contains(cursor) && visible(cursor) {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(cursor, &mut pid);
+        }
+        if cursor as isize != own
+            && pid != own_pid
+            && effects
+                .as_ref()
+                .is_none_or(|effects| !effects.contains(cursor))
+            && outline
+                .as_ref()
+                .is_none_or(|outline| !outline.contains(cursor))
+            && visible(cursor)
+        {
             // A visible higher window with unreadable bounds is an unknown
             // occluder, so reject the candidate rather than assume it is clear.
             rectangles.push(visible_bounds(cursor)?);

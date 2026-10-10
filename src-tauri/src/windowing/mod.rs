@@ -1,14 +1,23 @@
 //! Independent external docking. Native handles stay inside this backend module.
 //! The caller owns the Tauri drag operation and must validate IPC/session provenance.
 
-use crate::ipc::model::{PairLayoutState, PairLayoutStatus, TargetInfo};
+use crate::ipc::model::{
+    DisplayMode, DisplayStatus, DockConfirmation, MotionMetrics, MotionSettings, PairLayoutState,
+    PairLayoutStatus, TargetInfo,
+};
 
+#[cfg(any(windows, test))]
+mod display;
+#[cfg(any(windows, test))]
+mod effects;
 #[cfg(any(windows, test))]
 mod geometry;
 #[cfg(any(windows, test))]
 mod lifecycle;
 #[cfg(windows)]
 mod outline;
+#[cfg(windows)]
+mod surfaces;
 #[cfg(windows)]
 mod windows;
 
@@ -18,6 +27,21 @@ pub struct WindowUpdate {
     pub dock_hint: Option<String>,
     pub layout_required: bool,
     pub pair_layout: PairLayoutStatus,
+    pub display: DisplayStatus,
+    pub dock_confirmation: Option<DockConfirmation>,
+    pub exit_requested: bool,
+}
+
+impl Default for DisplayStatus {
+    fn default() -> Self {
+        Self {
+            mode: DisplayMode::Expanded,
+            request_id: 0,
+            orb_auto_hide: false,
+            tray_available: false,
+            reason: None,
+        }
+    }
 }
 
 impl Default for PairLayoutStatus {
@@ -42,6 +66,52 @@ pub(crate) struct DiscoveryScope {
 }
 
 impl WindowController {
+    pub fn motion_metrics(&self) -> Result<MotionMetrics, String> {
+        #[cfg(windows)]
+        {
+            self.inner.motion_metrics()
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Windows motion surfaces are unsupported on this platform".into())
+        }
+    }
+    pub fn set_display_mode(&self, mode: DisplayMode, request_id: u64) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.set_display_mode(mode, request_id)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (mode, request_id);
+            Err("Windows display surfaces are unsupported on this platform".into())
+        }
+    }
+
+    pub fn set_orb_auto_hide(&self, auto_hide: bool) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.set_orb_auto_hide(auto_hide)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = auto_hide;
+            Err("Windows display surfaces are unsupported on this platform".into())
+        }
+    }
+
+    pub fn set_motion_preferences(&self, settings: MotionSettings) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.set_motion_preferences(settings)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = settings;
+            Err("Windows motion surfaces are unsupported on this platform".into())
+        }
+    }
+
     #[cfg(all(windows, feature = "desktop"))]
     pub(crate) fn discovery_scope(&self, target_id: &str) -> Result<DiscoveryScope, String> {
         self.inner.discovery_scope(target_id)

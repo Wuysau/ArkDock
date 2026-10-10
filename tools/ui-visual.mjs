@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
 const jointLayout = process.argv.includes('--joint-layout');
-const evidence = resolve(jointLayout ? 'artifacts/joint-layout-2026-10-09' : 'artifacts/ui-2026-10-09');
+const evidence = resolve(process.env.ARKDOCK_EVIDENCE_DIR ?? (jointLayout ? 'artifacts/joint-layout-2026-10-09' : 'artifacts/ui-2026-10-09'));
 const sizes = [[360, 640], [440, 820], [520, 960]];
 const scenarios = ['welcome', 'hint', 'discovering', 'reliable', 'multi', 'weak', 'none', 'trust', 'sdkMissing', 'building', 'waiting', 'running', 'stale', 'recovery', 'diagnostics'];
 if (jointLayout) scenarios.push('pairUnconfirmed', 'pairMaximizing', 'pairMaximized', 'pairRestoring', 'pairBlocked');

@@ -36,6 +36,9 @@ pub(super) struct JointGroup {
     native_maximized: bool,
     normalizing_native_max: bool,
     normalizing_own_max: bool,
+    suspended: bool,
+    release_pending: Option<(Rect, Rect)>,
+    resume_pending: bool,
 }
 pub(super) enum JointCompensation {
     Waiting,
@@ -100,7 +103,143 @@ fn fills_workarea(pair: PairRects, work: Rect) -> bool {
         && pair.dock.bottom == work.bottom
 }
 
+fn owns_reserved_area(
+    actual: PairRects,
+    confirmed: PairRects,
+    pending: bool,
+    gesture: bool,
+) -> bool {
+    actual == confirmed && joined(actual) && !pending && !gesture
+}
+
 impl Native {
+    pub(super) fn suspend_joint(&mut self) {
+        if self.joint.as_ref().is_some_and(|group| group.suspended) {
+            return;
+        }
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        if !self.valid(target) || !self.valid(&self.own) {
+            return;
+        }
+        let hwnd = target.identity.handle as HWND;
+        let own = self.own.identity.handle as HWND;
+        let actual = observed_pair(hwnd, own);
+        let release = self.joint.as_ref().and_then(|group| {
+            let actual = actual?;
+            if !owns_reserved_area(
+                actual,
+                group.current,
+                group.pending.is_some(),
+                group.gesture.is_some(),
+            ) || unsafe { IsIconic(hwnd) } != 0
+                || !visible(hwnd)
+            {
+                return None;
+            }
+            Some((
+                actual.target,
+                Rect::new(
+                    actual.target.left,
+                    actual.target.top,
+                    actual.dock.right,
+                    actual.target.bottom,
+                )?,
+            ))
+        });
+        if let Some(group) = &mut self.joint {
+            group.suspended = true;
+            group.resume_pending = false;
+            group.gesture = None;
+            // An unacknowledged layout keeps its recorded ownership. Do not issue a
+            // compensating target write while independent accepted requests may be late.
+            group.user_changed = true;
+        }
+        self.pair_status.reason = Some("悬浮球模式暂停窗口联动；目标的新布局由用户保留".into());
+        if let Some((before, desired)) = release {
+            let requested = outer_bounds(hwnd)
+                .zip(visible_bounds(hwnd))
+                .and_then(|(outer, visible)| outer_for_visible(outer, visible, desired));
+            if let Some(requested) = requested {
+                if self.valid(target) && position(hwnd, requested).is_ok() {
+                    if let Some(group) = &mut self.joint {
+                        group.release_pending = Some((before, desired));
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn observe_suspended_joint(&mut self) {
+        let actual = self.target.as_ref().and_then(|target| {
+            observed_pair(
+                target.identity.handle as HWND,
+                self.own.identity.handle as HWND,
+            )
+        });
+        let current = self
+            .target
+            .as_ref()
+            .and_then(|target| coherent_visible(target.identity.handle as HWND));
+        if let (Some(group), Some(current)) = (&mut self.joint, current) {
+            if let Some((before, expected)) = group.release_pending {
+                if current == expected || current != before {
+                    // Exact release acknowledgment or a new user layout ends our transaction.
+                    group.release_pending = None;
+                }
+            }
+            if let (Some(pending), Some(actual)) = (&group.pending, actual) {
+                let target_known = actual.target == pending.before.target
+                    || actual.target == pending.expected.target;
+                let dock_known =
+                    actual.dock == pending.before.dock || actual.dock == pending.expected.dock;
+                if actual == pending.expected || !pending.issued || !target_known || !dock_known {
+                    group.pending = None;
+                }
+            }
+        }
+    }
+
+    pub(super) fn resume_joint(&mut self) {
+        if let Some(group) = &mut self.joint {
+            group.resume_pending = true;
+        }
+        self.observe_suspended_joint();
+        self.try_resume_joint();
+    }
+
+    fn try_resume_joint(&mut self) {
+        if self.user_surface_hidden {
+            return;
+        }
+        let ready = self.joint.as_ref().is_some_and(|group| {
+            group.suspended
+                && group.resume_pending
+                && group.release_pending.is_none()
+                && group.pending.is_none()
+        });
+        if !ready {
+            return;
+        }
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        let hwnd = target.identity.handle as HWND;
+        if !self.valid(target) || !self.valid(&self.own) {
+            self.invalidate("Target lifecycle changed before joint expansion");
+            return;
+        }
+        if !eligible(hwnd, self.own_pid) || unsafe { IsIconic(hwnd) } != 0 {
+            return;
+        }
+        // Rebuild from the live target geometry / current work area and DPI. No old
+        // pre-collapse rectangle or released reservation is replayed over the user.
+        if let Err(error) = self.establish_joint() {
+            self.pair_status.state = PairLayoutState::Blocked;
+            self.pair_status.reason = Some(error);
+        }
+    }
     fn joint_limits(&self) -> Option<(i32, i32, i32, i32)> {
         let hwnd = self.own.identity.handle as HWND;
         let visible = visible_bounds(hwnd)?;
@@ -221,6 +360,9 @@ impl Native {
             native_maximized: already_maximized,
             normalizing_native_max: false,
             normalizing_own_max: false,
+            suspended: false,
+            release_pending: None,
+            resume_pending: false,
         });
         self.pair_status = PairLayoutStatus {
             state: PairLayoutState::Restoring,
@@ -241,13 +383,20 @@ impl Native {
         self.joint.as_ref().is_some_and(|g| g.gesture.is_some())
     }
     pub(super) fn begin_joint_gesture(&mut self, own: bool) {
+        if self.user_surface_hidden || self.joint.as_ref().is_some_and(|group| group.suspended) {
+            if let Some(group) = &mut self.joint {
+                group.release_pending = None;
+                group.pending = None;
+                group.user_changed = true;
+            }
+            return;
+        }
         let Some(target) = self.target.as_ref() else {
             // A resize without begin_drag never arms detection or chooses a target.
             self.dragging = false;
             self.move_started = false;
             self.armed_at = None;
             self.candidate = None;
-            self.outline.hide();
             return;
         };
         let Some(actual) = observed_pair(
@@ -291,6 +440,9 @@ impl Native {
         }
     }
     pub(super) fn end_joint_gesture(&mut self) {
+        if self.user_surface_hidden {
+            return;
+        }
         self.follow_joint();
         let actual = self.target.as_ref().and_then(|target| {
             observed_pair(
@@ -335,6 +487,14 @@ impl Native {
         }
     }
     pub(super) fn maximize_joint(&mut self) -> Result<(), String> {
+        if self.cancelled.is_some() {
+            return Err(
+                "LAYOUT_CANCELLATION_PENDING: wait for accepted consent requests to settle".into(),
+            );
+        }
+        if self.user_surface_hidden || self.joint.as_ref().is_some_and(|group| group.suspended) {
+            return Err("DISPLAY_SUSPENDED: joint layout waits for expansion".into());
+        }
         if self.dragging {
             return Err("FINISH_DRAG_FIRST".into());
         }
@@ -418,6 +578,14 @@ impl Native {
         Ok(())
     }
     pub(super) fn restore_joint(&mut self) -> Result<(), String> {
+        if self.cancelled.is_some() {
+            return Err(
+                "LAYOUT_CANCELLATION_PENDING: wait for accepted consent requests to settle".into(),
+            );
+        }
+        if self.user_surface_hidden || self.joint.as_ref().is_some_and(|group| group.suspended) {
+            return Err("DISPLAY_SUSPENDED: joint layout waits for expansion".into());
+        }
         let target = self.target.as_ref().ok_or("TARGET_REQUIRED")?;
         if !self.valid(target) {
             return Err("STALE_TARGET".into());
@@ -472,6 +640,13 @@ impl Native {
         if self.joint.is_none() || self.layout.is_some() || self.arrangement.is_some() {
             return false;
         }
+        if self.joint.as_ref().is_some_and(|group| group.suspended) {
+            self.observe_suspended_joint();
+            self.try_resume_joint();
+            if self.joint.as_ref().is_some_and(|group| group.suspended) {
+                return true;
+            }
+        }
         let Some(target) = self.target.as_ref() else {
             self.joint = None;
             return false;
@@ -483,15 +658,18 @@ impl Native {
         let hwnd = target.identity.handle as HWND;
         let own_hwnd = self.own.identity.handle as HWND;
         if unsafe { IsIconic(hwnd) } != 0 || !visible(hwnd) {
-            if !self.hidden_by_us
+            if !self.expanded_while_target_hidden
+                && !self.hidden_by_us
                 && unsafe { IsIconic(own_hwnd) } == 0
                 && unsafe { ShowWindowAsync(own_hwnd, SW_HIDE) } != 0
             {
                 self.hidden_by_us = true;
+                self.main_visibility_pending = Some(false);
             }
             self.hint = Some("Target is minimized or hidden; companion waits for restore".into());
             return true;
         }
+        self.expanded_while_target_hidden = false;
         self.show_own();
         let Some(actual) = observed_pair(hwnd, own_hwnd) else {
             return true;
@@ -609,6 +787,14 @@ impl Native {
                 self.pair_status.reason = None;
                 self.hint = None;
                 self.layout_required = false;
+                if self.dock_confirmation.is_none() {
+                    if let Some(target) = &self.target {
+                        self.dock_confirmation = Some(DockConfirmation {
+                            binding_id: target.info.id.clone(),
+                            side: DockSide::Right,
+                        });
+                    }
+                }
             } else if Instant::now() >= pending.deadline {
                 let work = work_area(hwnd);
                 let owns_unchanged_max = pending.state == PairLayoutState::Maximized
@@ -981,6 +1167,20 @@ mod tests {
             target: Rect::new(100, 100, 1300, 1500).unwrap(),
             dock: Rect::new(1300, 100, 2184, 1500).unwrap(),
         }
+    }
+
+    #[test]
+    fn reserved_area_release_requires_exact_confirmed_pair_and_no_pending_user_gesture() {
+        let pair = normal_pair();
+        assert!(owns_reserved_area(pair, pair, false, false));
+        assert!(!owns_reserved_area(pair, pair, true, false));
+        assert!(!owns_reserved_area(pair, pair, false, true));
+        let mut changed = pair;
+        changed.target.left += 1;
+        assert!(!owns_reserved_area(changed, pair, false, false));
+        changed = pair;
+        changed.dock.top += 1;
+        assert!(!owns_reserved_area(changed, changed, false, false));
     }
 
     #[test]

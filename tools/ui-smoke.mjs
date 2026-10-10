@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { connectWebview } from './webview-driver.mjs';
+import { connectOwnedWebview as connectWebview } from './webview-driver.mjs';
+import { ownedDesktop } from './owned-desktop.mjs';
 
 const checks = [], dimensions = [], pointerResizes = [];
 const evidence = process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/ui-2026-10-09/native';
@@ -66,7 +67,7 @@ async function check(name,execute) { await execute(); checks.push({status:'PASS'
 try {
   mkdirSync(evidence,{recursive:true});
   view = await connectWebview();
-  const dock = JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','Get-Process -Name arkdock | Where-Object MainWindowHandle -NE 0 | Select-Object -First 1 Id | ConvertTo-Json -Compress'],{encoding:'utf8',windowsHide:true}));
+  const dock = ownedDesktop();
   handle = action('find',0,{ProcessId:dock.Id}).handle;
   assert.ok(handle,'The actual independent Tauri main window must be found');
   action('restore',handle); await pause(250);

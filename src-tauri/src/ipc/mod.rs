@@ -28,7 +28,9 @@ mod tests {
                 "canClick":false,"canSwipe":false,"canText":false,"canRotate":false},
             "build":{"generation":0,"displayedGeneration":null,"buildId":null,
                 "durationMs":null,"error":null,"stale":false},
-            "diagnostics":[],"dockHint":null,"layoutRequired":false
+            "diagnostics":[],"dockHint":null,"layoutRequired":false,
+            "display":{"mode":"expanded","requestId":0,"orbAutoHide":false,"trayAvailable":false,"reason":null},
+            "motion":{"reduced":false,"intensity":"standard"},"dockConfirmation":null
         }))
         .unwrap()
     }

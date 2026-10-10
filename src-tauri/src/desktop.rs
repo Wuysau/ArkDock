@@ -38,6 +38,10 @@ enum Action {
     Arrange(bool),
     MaximizePair,
     RestorePair,
+    Display(DisplayMode, u64),
+    OrbAutoHide(bool),
+    Motion(MotionSettings),
+    DisplaySnapshot,
     Click {
         build_id: String,
         generation: u64,
@@ -45,6 +49,7 @@ enum Action {
     },
 }
 enum Message {
+    Metrics(RequestScope, mpsc::Sender<Result<MotionMetrics, String>>),
     Action(
         RequestScope,
         Action,
@@ -187,6 +192,18 @@ fn initial(backend: BackendStatus) -> AppSnapshot {
         dock_hint: None,
         layout_required: false,
         pair_layout: Some(PairLayoutStatus::default()),
+        display: DisplayStatus {
+            mode: DisplayMode::Expanded,
+            request_id: 0,
+            orb_auto_hide: false,
+            tray_available: false,
+            reason: Some("Native display controller has not confirmed availability".into()),
+        },
+        motion: MotionSettings {
+            reduced: false,
+            intensity: MotionIntensity::Standard,
+        },
+        dock_confirmation: None,
     }
 }
 
@@ -264,6 +281,13 @@ impl Engine {
         self.snapshot.project = None;
     }
     fn apply_window(&mut self, update: WindowUpdate) {
+        // Display surfaces are independent of project execution and preview delivery.
+        self.snapshot.display = update.display;
+        self.snapshot.dock_confirmation = update.dock_confirmation;
+        if update.exit_requested {
+            self.app.exit(0);
+            return;
+        }
         if self.detaching {
             if update.target.is_some() {
                 return;
@@ -477,6 +501,32 @@ impl Engine {
     fn handle(&mut self, scope: RequestScope, action: Action) -> Result<AppSnapshot, String> {
         validate_scope(&self.snapshot, &scope)?;
         match action {
+            Action::Display(mode, request_id) => {
+                if request_id == 0 || request_id > 9_007_199_254_740_991 {
+                    return Err("INVALID_DISPLAY_REQUEST_ID".into());
+                }
+                self.controller
+                    .as_ref()
+                    .ok_or("WINDOWING_UNAVAILABLE")?
+                    .set_display_mode(mode, request_id)?;
+                self.drain_events();
+            }
+            Action::OrbAutoHide(enabled) => {
+                self.controller
+                    .as_ref()
+                    .ok_or("WINDOWING_UNAVAILABLE")?
+                    .set_orb_auto_hide(enabled)?;
+                self.drain_events();
+            }
+            Action::Motion(preferences) => {
+                self.controller
+                    .as_ref()
+                    .ok_or("WINDOWING_UNAVAILABLE")?
+                    .set_motion_preferences(preferences.clone())?;
+                self.snapshot.motion = preferences;
+                self.drain_events();
+            }
+            Action::DisplaySnapshot => self.drain_events(),
             Action::BeginDrag => self
                 .controller
                 .as_ref()
@@ -533,6 +583,7 @@ impl Engine {
                 self.snapshot.candidates.clear();
                 self.snapshot.phase = Phase::Idle;
                 self.snapshot.layout_required = false;
+                self.snapshot.dock_confirmation = None;
             }
             Action::Trust(id, trusted) => {
                 self.current_target()?;
@@ -816,7 +867,17 @@ fn check_window(window: &tauri::WebviewWindow) -> Result<(), String> {
     let development = cfg!(debug_assertions)
         && url.scheme() == "http"
         && url.host_str() == Some("127.0.0.1")
-        && url.port() == Some(1420);
+        && window
+            .app_handle()
+            .config()
+            .build
+            .dev_url
+            .as_ref()
+            .is_some_and(|configured| {
+                configured.scheme() == "http"
+                    && configured.host_str() == Some("127.0.0.1")
+                    && configured.origin() == url.origin()
+            });
     if !local_asset && !development {
         return Err("UNAUTHORIZED_ORIGIN".into());
     }
@@ -861,6 +922,112 @@ async fn minimize_window(
     validate_scope(&snapshot, &scope)?;
     window.minimize().map_err(|error| error.to_string())?;
     Ok(snapshot)
+}
+#[tauri::command]
+async fn collapse_to_orb(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: u64,
+) -> Result<AppSnapshot, String> {
+    request(
+        window,
+        service,
+        scope,
+        Action::Display(DisplayMode::Orb, request_id),
+    )
+    .await
+}
+#[tauri::command]
+async fn expand_from_orb(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: u64,
+) -> Result<AppSnapshot, String> {
+    request(
+        window,
+        service,
+        scope,
+        Action::Display(DisplayMode::Expanded, request_id),
+    )
+    .await
+}
+#[tauri::command]
+async fn hide_to_tray(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: u64,
+) -> Result<AppSnapshot, String> {
+    request(
+        window,
+        service,
+        scope,
+        Action::Display(DisplayMode::Hidden, request_id),
+    )
+    .await
+}
+#[tauri::command]
+async fn show_from_tray(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: u64,
+) -> Result<AppSnapshot, String> {
+    request(
+        window,
+        service,
+        scope,
+        Action::Display(DisplayMode::Expanded, request_id),
+    )
+    .await
+}
+#[tauri::command]
+async fn set_orb_auto_hide(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    enabled: bool,
+) -> Result<AppSnapshot, String> {
+    request(window, service, scope, Action::OrbAutoHide(enabled)).await
+}
+#[tauri::command]
+async fn set_motion_preferences(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    preferences: MotionSettings,
+) -> Result<AppSnapshot, String> {
+    request(window, service, scope, Action::Motion(preferences)).await
+}
+#[tauri::command]
+async fn get_display_mode(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<AppSnapshot, String> {
+    request(window, service, scope, Action::DisplaySnapshot).await
+}
+#[tauri::command]
+async fn get_motion_metrics(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<MotionMetrics, String> {
+    check_window(&window)?;
+    let sender = service.sender.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (send, receive) = mpsc::channel();
+        sender
+            .try_send(Message::Metrics(scope, send))
+            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "REQUEST_TIMEOUT".to_owned())?
+    })
+    .await
+    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
 }
 #[tauri::command]
 async fn close_window(
@@ -1113,6 +1280,14 @@ pub fn run() {
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            collapse_to_orb,
+            expand_from_orb,
+            hide_to_tray,
+            show_from_tray,
+            set_orb_auto_hide,
+            set_motion_preferences,
+            get_display_mode,
+            get_motion_metrics,
             minimize_window,
             close_window,
             maximize_pair,
@@ -1207,6 +1382,17 @@ pub fn run() {
                 engine.publish();
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(16)) {
+                        Ok(Message::Metrics(scope, reply)) => {
+                            engine.drain_events();
+                            let result = validate_scope(&engine.snapshot, &scope).and_then(|()| {
+                                engine
+                                    .controller
+                                    .as_ref()
+                                    .ok_or_else(|| "WINDOWING_UNAVAILABLE".to_owned())?
+                                    .motion_metrics()
+                            });
+                            let _ = reply.send(result);
+                        }
                         Ok(Message::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Ok(Message::Action(scope, action, reply)) => {
                             engine.drain_events();

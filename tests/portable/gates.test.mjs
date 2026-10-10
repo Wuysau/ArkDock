@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { nativeChecks } from '../../tools/native-gate.mjs';
 import { inspectSdk, nodeVersionCheck } from '../../tools/doctor.mjs';
@@ -25,12 +25,15 @@ test('无 Windows 或未验证协议不能让原生门禁绿灯', () => {
 });
 
 test('原生检查进程缺环境返回非成功状态', () => {
-  const result = spawnSync(process.execPath, ['tools/native-gate.mjs'], { stdio: 'inherit', env: { ...process.env, ARKDOCK_SDK: '' } });
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 2);
-  const report = JSON.parse(readFileSync('artifacts/native-gate.json', 'utf8'));
-  assert.equal(report.status, 'BLOCKED');
-  assert.ok(report.checks.some((c) => c.code === 'SDK_NOT_CONFIGURED'));
+  const directory = mkdtempSync(join(tmpdir(), 'arkdock-gate-fixture-'));
+  try {
+    const result = spawnSync(process.execPath, [resolve('tools/native-gate.mjs')], { cwd: directory, stdio: 'inherit', env: { ...process.env, ARKDOCK_SDK: '' } });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 2);
+    const report = JSON.parse(readFileSync(join(directory, 'artifacts/native-gate.json'), 'utf8'));
+    assert.equal(report.status, 'BLOCKED');
+    assert.ok(report.checks.some((c) => c.code === 'SDK_NOT_CONFIGURED'));
+  } finally { rmSync(directory, { recursive: true }); }
 });
 
 test('doctor 仅探测指定 SDK；不执行目录中的可执行文件', () => {

@@ -1,6 +1,7 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('find','info','move','minimize','restore','maximize','close','click','drag','foreground','pause')][string]$Action,
-  [long]$Handle, [int]$ProcessId, [int]$OutlinePid, [int]$X, [int]$Y, [int]$Width, [int]$Height, [int]$EndX, [int]$EndY
+  [Parameter(Mandatory)][ValidateSet('find','info','move','minimize','restore','maximize','close','click','drag','foreground','pause','cursor')][string]$Action,
+  [long]$Handle, [int]$ProcessId, [int]$OutlinePid, [int]$X, [int]$Y, [int]$Width, [int]$Height, [int]$EndX, [int]$EndY,
+  [ValidateRange(0,2000)][int]$HoldMs=150, [string]$CaptureDir, [int]$CaptureX, [int]$CaptureY
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -21,7 +22,7 @@ public static class ArkDockWindowTest {
   public static long[] Outlines(uint pid) {
     var list=new List<long>();
     EnumWindows((h,p) => { uint observed; GetWindowThreadProcessId(h,out observed); var name=new StringBuilder(256); GetClassName(h,name,256);
-      if(observed==pid && IsWindowVisible(h) && name.ToString().StartsWith("ArkDockCandidateOutline-")) list.Add(h.ToInt64()); return true;
+      if(observed==pid && IsWindowVisible(h) && (name.ToString().StartsWith("ArkDockCandidateOutline-") || name.ToString().StartsWith("ArkDockMagneticParticles-"))) list.Add(h.ToInt64()); return true;
     },IntPtr.Zero); return list.ToArray();
   }
   public static long Find(uint pid) {
@@ -56,12 +57,19 @@ public static class ArkDockWindowTest {
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h,uint flag);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
+  [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h,IntPtr dc);
+  [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr destination,int x,int y,int width,int height,IntPtr source,int sourceX,int sourceY,uint raster);
 }
 '@
 $previousDpi = [ArkDockWindowTest]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 try {
   $windowHandle = [IntPtr]::new($Handle)
   $outlineDuringDrag = @()
+  $dragSamples = @()
+  $captureFrames = @()
   switch ($Action) {
     'find' { @{ handle=[ArkDockWindowTest]::Find($ProcessId) } | ConvertTo-Json -Compress; return }
     'move' { if (-not [ArkDockWindowTest]::SetWindowPos($windowHandle,[IntPtr]::Zero,$X,$Y,$Width,$Height,0x14)) { throw 'SetWindowPos failed' } }
@@ -76,18 +84,58 @@ try {
       [ArkDockWindowTest]::SetForegroundWindow($windowHandle) | Out-Null
     }
     'pause' { [ArkDockWindowTest]::PostMessage($windowHandle,0x8001,[IntPtr]::new(2000),[IntPtr]::Zero) | Out-Null; @{queued=$true} | ConvertTo-Json -Compress; return }
+    'cursor' { [ArkDockWindowTest]::SetCursorPos($X,$Y) | Out-Null; @{moved=$true} | ConvertTo-Json -Compress; return }
     { $_ -in 'click','drag' } {
       [ArkDockWindowTest]::SetCursorPos($X,$Y) | Out-Null
       Start-Sleep -Milliseconds 100
+      $inputPoint=[ArkDockWindowTest+Point]::new()
+      $inputPoint.x=$X;$inputPoint.y=$Y
+      $inputWindow=[ArkDockWindowTest]::WindowFromPoint($inputPoint)
+      if([ArkDockWindowTest]::GetAncestor($inputWindow,2) -ne $windowHandle){throw 'BLOCKED: Input point is covered by another window; no mouse button was pressed'}
       [ArkDockWindowTest]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
       try {
         Start-Sleep -Milliseconds 250
         if ($Action -eq 'drag') {
+          $dragClock=[System.Diagnostics.Stopwatch]::StartNew()
+          $dragOrigin=[ArkDockWindowTest+Rect]::new()
+          [ArkDockWindowTest]::GetWindowRect($windowHandle,[ref]$dragOrigin) | Out-Null
           for ($step = 1; $step -le 24; $step++) {
             [ArkDockWindowTest]::SetCursorPos(($X + ($EndX-$X)*$step/24),($Y + ($EndY-$Y)*$step/24)) | Out-Null
             Start-Sleep -Milliseconds 25
+            $observedDrag=[ArkDockWindowTest+Rect]::new()
+            [ArkDockWindowTest]::GetWindowRect($windowHandle,[ref]$observedDrag) | Out-Null
+            $dragSamples+=@{step=$step;timeMs=$dragClock.Elapsed.TotalMilliseconds;left=$observedDrag.left;top=$observedDrag.top;expectedLeft=$dragOrigin.left+($EndX-$X)*$step/24;expectedTop=$dragOrigin.top+($EndY-$Y)*$step/24}
           }
-          Start-Sleep -Milliseconds 150
+          if ($CaptureDir) {
+            $captureRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../artifacts'))+[IO.Path]::DirectorySeparatorChar
+            $captureTarget=[IO.Path]::GetFullPath($CaptureDir)
+            if(-not $captureTarget.StartsWith($captureRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Capture directory must stay inside this worktree artifacts'}
+            New-Item -ItemType Directory -Path $captureTarget -Force | Out-Null
+            Add-Type -AssemblyName System.Drawing
+            for($frame=0;$frame -lt 8;$frame++) {
+              $bitmap=[Drawing.Bitmap]::new(180,420)
+              $graphics=[Drawing.Graphics]::FromImage($bitmap)
+              $framePath=Join-Path $captureTarget ('frame-'+$frame.ToString('D2')+'.png')
+              try {
+                $sourceDc=[ArkDockWindowTest]::GetDC([IntPtr]::Zero)
+                $captureDc=$graphics.GetHdc()
+                try {
+                  # CAPTUREBLT includes the real native layered particle HWND, including click-through helpers.
+                  if(-not [ArkDockWindowTest]::BitBlt($captureDc,0,0,180,420,$sourceDc,$CaptureX,$CaptureY,0x40CC0020)){throw 'Layered desktop capture failed'}
+                } finally {$graphics.ReleaseHdc($captureDc);[ArkDockWindowTest]::ReleaseDC([IntPtr]::Zero,$sourceDc) | Out-Null}
+                $bitmap.Save($framePath,[Drawing.Imaging.ImageFormat]::Png)
+                $layers=@([ArkDockWindowTest]::Outlines($OutlinePid) | ForEach-Object {
+                  $layerBounds=[ArkDockWindowTest+Rect]::new()
+                  $layerClass=[Text.StringBuilder]::new(256)
+                  [ArkDockWindowTest]::GetWindowRect([IntPtr]::new($_),[ref]$layerBounds) | Out-Null
+                  [ArkDockWindowTest]::GetClassName([IntPtr]::new($_),$layerClass,256) | Out-Null
+                  @{handle=$_;class=$layerClass.ToString();left=$layerBounds.left;top=$layerBounds.top;right=$layerBounds.right;bottom=$layerBounds.bottom;higher=[ArkDockWindowTest]::Higher([IntPtr]::new($_))}
+                })
+                $captureFrames+=@{path=$framePath;timeMs=$dragClock.Elapsed.TotalMilliseconds;layers=$layers;captureOperation='SRCCOPY|CAPTUREBLT'}
+              } finally {$graphics.Dispose();$bitmap.Dispose()}
+              Start-Sleep -Milliseconds ([Math]::Max(1,[int]($HoldMs/8)))
+            }
+          } else { Start-Sleep -Milliseconds $HoldMs }
           $outlineDuringDrag = @([ArkDockWindowTest]::Outlines($OutlinePid) | ForEach-Object { @{ handle=$_;extended=[ArkDockWindowTest]::GetWindowLong([IntPtr]::new($_),-20) } })
         }
       } finally { [ArkDockWindowTest]::mouse_event(4,0,0,0,[UIntPtr]::Zero) }
@@ -115,7 +163,7 @@ try {
     @{handle=$_;left=$higherRect.left;top=$higherRect.top;right=$higherRect.right;bottom=$higherRect.bottom}
   })
   @{ processId=$observedProcessId; left=$rect.left; top=$rect.top; right=$rect.right; bottom=$rect.bottom;
-     outlineDuringDrag=$outlineDuringDrag;outlineVisible=@([ArkDockWindowTest]::Outlines($OutlinePid)).Count;
+     outlineDuringDrag=$outlineDuringDrag;outlineVisible=@([ArkDockWindowTest]::Outlines($OutlinePid)).Count;dragSamples=$dragSamples;captureFrames=$captureFrames;
      frameLeft=$frame.left;frameTop=$frame.top;frameRight=$frame.right;frameBottom=$frame.bottom;
      owner=[ArkDockWindowTest]::GetWindow($windowHandle,4).ToInt64();style=[ArkDockWindowTest]::GetWindowLong($windowHandle,-16);extended=[ArkDockWindowTest]::GetWindowLong($windowHandle,-20);higher=$higher;
      clientX=$origin.x; clientY=$origin.y; dpi=[ArkDockWindowTest]::GetDpiForWindow($windowHandle);
@@ -123,5 +171,5 @@ try {
      workLeft=$monitor.work.left;workTop=$monitor.work.top;workRight=$monitor.work.right;workBottom=$monitor.work.bottom;
      normalLeft=$placement.normal.left;normalTop=$placement.normal.top;normalRight=$placement.normal.right;normalBottom=$placement.normal.bottom;showCmd=$placement.showCmd;
      visible=[ArkDockWindowTest]::IsWindowVisible($windowHandle); minimized=[ArkDockWindowTest]::IsIconic($windowHandle);
-     maximized=[ArkDockWindowTest]::IsZoomed($windowHandle); foreground=[ArkDockWindowTest]::GetForegroundWindow().ToInt64() } | ConvertTo-Json -Compress
+     maximized=[ArkDockWindowTest]::IsZoomed($windowHandle); foreground=[ArkDockWindowTest]::GetForegroundWindow().ToInt64() } | ConvertTo-Json -Depth 8 -Compress
 } finally { [ArkDockWindowTest]::SetThreadDpiAwarenessContext($previousDpi) | Out-Null }

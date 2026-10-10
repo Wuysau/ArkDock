@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "enums": {
     "Environment": [
       "windowsLocal",
@@ -37,6 +37,9 @@
       "BLOCKED",
       "SKIPPED"
     ],
+    "DisplayMode": ["expanded", "collapsing", "orb", "expanding", "hidden"],
+    "MotionIntensity": ["off", "light", "standard", "enhanced"],
+    "DockSide": ["left", "right"],
     "PairLayoutState": [
       "unbound",
       "paired",
@@ -47,6 +50,30 @@
     ]
   },
   "structs": {
+    "MotionMetrics": {
+      "frames": "u64",
+      "coalescedUpdates": "u64",
+      "failedFrames": "u64",
+      "renderTotalUs": "u64",
+      "activeTotalUs": "u64",
+      "maxFrameUs": "u64",
+      "wakeCount": "u64"
+    },
+    "DisplayStatus": {
+      "mode": "DisplayMode",
+      "requestId": "u64",
+      "orbAutoHide": "bool",
+      "trayAvailable": "bool",
+      "reason": "string?"
+    },
+    "MotionSettings": {
+      "reduced": "bool",
+      "intensity": "MotionIntensity"
+    },
+    "DockConfirmation": {
+      "bindingId": "string",
+      "side": "DockSide"
+    },
     "ProcessRef": {
       "pid": "u32",
       "startedAt": "string"
@@ -136,7 +163,10 @@
       "dockHint": "string?",
       "layoutRequired": "bool",
       "sessionRef": "SessionRef?",
-      "pairLayout": "PairLayoutStatus?"
+      "pairLayout": "PairLayoutStatus?",
+      "display": "DisplayStatus",
+      "motion": "MotionSettings",
+      "dockConfirmation": "DockConfirmation?"
     },
     "NativeFrame": {
       "sessionId": "string",
@@ -182,6 +212,7 @@
     }
   },
   "commandResponses": {
+    "get_motion_metrics": { "rust": "MotionMetrics", "typescript": "MotionMetrics", "error": "String" },
     "disable_binary_preview_frames": {
       "rust": "AppSnapshot",
       "typescript": "AppSnapshot",
@@ -199,6 +230,14 @@
     }
   },
   "commands": {
+    "get_motion_metrics": { "scope": "RequestScope" },
+    "collapse_to_orb": { "scope": "RequestScope", "requestId": "u64" },
+    "expand_from_orb": { "scope": "RequestScope", "requestId": "u64" },
+    "hide_to_tray": { "scope": "RequestScope", "requestId": "u64" },
+    "show_from_tray": { "scope": "RequestScope", "requestId": "u64" },
+    "set_orb_auto_hide": { "scope": "RequestScope", "enabled": "bool" },
+    "set_motion_preferences": { "scope": "RequestScope", "preferences": "MotionSettings" },
+    "get_display_mode": { "scope": "RequestScope" },
     "disable_binary_preview_frames": {
       "scope": "RequestScope",
       "protocolVersion": "u32"
