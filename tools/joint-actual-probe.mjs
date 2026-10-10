@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {connectWebview} from './webview-driver.mjs';
+import {connectOwnedWebview as connectWebview} from './webview-driver.mjs';
+import {ownedDesktop} from './owned-desktop.mjs';
 const arg=name=>Number(process.argv[process.argv.indexOf(name)+1]);
 const targetHandle=arg('--target-handle'),targetPid=arg('--target-pid');
 assert.ok(Number.isSafeInteger(targetHandle)&&targetHandle>0);
@@ -34,7 +35,7 @@ try{
   const ready=Date.now()+45000;
   while(!view&&Date.now()<ready){try{view=await connectWebview();}catch{await pause(250);}}
   assert.ok(view,'Current actual development app must be running');
-  actualPid=JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','Get-Process -Name arkdock | Select-Object -First 1 Id | ConvertTo-Json -Compress'],{encoding:'utf8',windowsHide:true})).Id;
+  actualPid=ownedDesktop().Id;
   ownHandle=action('find',0,{ProcessId:actualPid}).handle;
   beforeTarget=action('info',targetHandle);
   assert.equal(beforeTarget.processId,targetPid,'Handle belongs to the explicitly named target before any action');

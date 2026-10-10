@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {connectWebview} from './webview-driver.mjs';
+import {connectOwnedWebview as connectWebview} from './webview-driver.mjs';
+import {ownedDesktop} from './owned-desktop.mjs';
+import {activateOwnedHeader} from './window-input.mjs';
 const evidence=process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/joint-layout-2026-10-09';
 const checks=[],measurements=[];
 const pause=ms=>new Promise(done=>setTimeout(done,ms));
@@ -56,6 +58,7 @@ async function bind(alreadyMaximized=false) {
   action('move',target.second,{X:60,Y:500,Width:400,Height:400});
   action('move',dockHandle,{X:1800,Y:100,Width:906,Height:1320});
   action('foreground',target.first);action('foreground',dockHandle);await pause(200);
+  await activateOwnedHeader(view,dockHandle,action);
   const own=action('info',dockHandle),destination=action('info',target.first);
   const button=await view.evaluate('(()=>{const r=document.querySelector(".drag").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio}})()');
   const x=Math.round(own.clientX+button.x*button.ratio),y=Math.round(own.clientY+button.y*button.ratio);
@@ -65,9 +68,9 @@ async function bind(alreadyMaximized=false) {
 try {
   mkdirSync(evidence,{recursive:true});
   view=await connectWebview();
-  const dock=JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','Get-Process -Name arkdock | Select-Object -First 1 Id | ConvertTo-Json -Compress'],{encoding:'utf8',windowsHide:true}));
+  const dock=ownedDesktop();
   dockPid=dock.Id;dockHandle=action('find',0,{ProcessId:dockPid}).handle;assert.ok(dockHandle);
-  host=spawn('pwsh',['-NoProfile','-File',resolve('tests/native/window-host.ps1')],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+  host=spawn('pwsh',['-NoProfile','-STA','-File',resolve('tests/native/window-host.ps1')],{windowsHide:true,stdio:['ignore','pipe','pipe']});
   target=await new Promise((done,reject)=>{
     let output='',errors='';const timer=setTimeout(()=>reject(new Error(`Fixture startup ${errors}`)),10000);
     host.stderr.on('data',data=>{errors+=data;});host.stdout.on('data',data=>{output+=data;if(output.includes('\n')){clearTimeout(timer);done(JSON.parse(output.split('\n')[0]));}});

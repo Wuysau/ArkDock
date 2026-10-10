@@ -33,6 +33,8 @@ function base(revision: number): AppSnapshot {
     backend: { id: 'ui-fixture', mode: 'UI 演示 · 非原生渲染', available: false, reason: 'UI 演示数据，不能证明 Windows 贴边或 HarmonyOS 原生预览。', sdkPath: null, sdkVersion: null, canClick: false, canSwipe: false, canText: false, canRotate: false },
     build: { generation: 0, displayedGeneration: null, buildId: null, durationMs: null, error: null, stale: false },
     diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null, pairLayout: { state: 'unbound', preferredWidthDip: 440, reason: null },
+    display: { mode: 'expanded', requestId: 0, orbAutoHide: false, trayAvailable: false, reason: 'UI 演示不创建悬浮球或系统托盘。' },
+    motion: { reduced: false, intensity: 'standard' }, dockConfirmation: null,
   };
 }
 function snapshot(scenario: Scenario, revision: number): AppSnapshot {
@@ -102,6 +104,7 @@ export interface FixtureDriver {
   releaseDeferred(): void;
   hasDeferred(): boolean;
   emitPairLayout(state: PairLayoutState | null, reason?: string): void;
+  emitDockConfirmation(bindingId: string | null, side?: 'left' | 'right'): void;
 }
 export function createFixtureDriver(initial: Scenario): FixtureDriver {
   let revision = 1; let current = snapshot(initial, revision); let previous: AppSnapshot | null = null; let oldFrame: NativeFrame | null = null; let initialPending = true;
@@ -130,6 +133,16 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       }
       if (scope?.targetId !== (current.target?.id ?? null) || scope?.sessionId !== current.sessionId) throw new Error('STALE_REQUEST: UI 测试请求属于已失效的绑定会话。');
       const name: string = command;
+      if (command === 'set_motion_preferences') {
+        publish({ ...current, revision: ++revision, motion: (args as Omit<CommandArgs['set_motion_preferences'], 'scope'>).preferences });
+        return copy(current);
+      }
+      if (command === 'get_display_mode') return copy(current);
+      if (command === 'set_orb_auto_hide') {
+        publish({ ...current, revision: ++revision, display: { ...current.display, orbAutoHide: (args as Omit<CommandArgs['set_orb_auto_hide'], 'scope'>).enabled } });
+        return copy(current);
+      }
+      if (['collapse_to_orb', 'expand_from_orb', 'hide_to_tray', 'show_from_tray'].includes(command)) throw new Error('UI 演示不能创建悬浮球或托盘；请在 Windows 桌面验证。');
       if (name === 'minimize_window' || name === 'close_window') throw new Error('UI 演示不能操作系统窗口；请使用 Windows 桌面运行验证。');
       if (name === 'click_preview') {
         if (current.phase !== 'running' || current.build.stale) throw new Error('UI 测试：过期画面禁止输入。');
@@ -180,5 +193,6 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
     hasDeferred: () => deferred !== null,
     releaseDeferred: () => { if (!deferred) throw new Error('没有待释放测试请求。'); const release = deferred; deferred = null; release(); },
     emitPairLayout: (state, reason = 'UI 演示布局事件；不操作系统窗口。') => publish({ ...current, revision: ++revision, pairLayout: state === null ? null : { state, preferredWidthDip: 440, reason } }),
+    emitDockConfirmation: (bindingId, side = 'right') => publish({ ...current, revision: ++revision, dockConfirmation: bindingId ? { bindingId, side } : null }),
   };
 }

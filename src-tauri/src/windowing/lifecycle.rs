@@ -15,6 +15,27 @@ impl Identity {
     }
 }
 
+/// Animation continuity uses the existing opaque candidate token only while its
+/// complete lifecycle is live. A handle/PID alone never retains a candidate ID.
+pub(super) fn retained_candidate_token(
+    previous: Identity,
+    previous_token: &str,
+    observed: Identity,
+    previous_is_live: bool,
+) -> Option<&str> {
+    (previous_is_live && previous.matches(observed)).then_some(previous_token)
+}
+
+/// A consent transaction that already owns accepted asynchronous requests keeps
+/// its restoration baseline across detach. The older binding baseline cannot replace it.
+pub(super) fn preserves_pending_compensation(
+    pending_identity: Option<Identity>,
+    binding_identity: Identity,
+    pending_is_live: bool,
+) -> bool {
+    pending_is_live && pending_identity.is_some_and(|identity| identity.matches(binding_identity))
+}
+
 pub(super) type Bounds = (i32, i32, i32, i32);
 
 #[derive(Clone, Debug)]
@@ -87,6 +108,84 @@ mod tests {
             thread_id: 12,
             destruction_epoch: 3,
         }
+    }
+
+    #[test]
+    fn continuous_candidate_samples_keep_the_same_opaque_animation_token() {
+        let live = identity();
+        let initial = "window-41";
+        let mut displayed_token = initial.to_owned();
+        for _ in 0..30 {
+            displayed_token = retained_candidate_token(live, &displayed_token, live, true)
+                .unwrap_or("window-new")
+                .to_owned();
+        }
+        assert_eq!(displayed_token, initial);
+    }
+
+    #[test]
+    fn candidate_token_changes_for_another_window_restart_reuse_or_unverified_previous_window() {
+        let previous = identity();
+        for observed in [
+            Identity {
+                handle: previous.handle + 1,
+                ..previous
+            },
+            Identity {
+                pid: previous.pid + 1,
+                ..previous
+            },
+            Identity {
+                started_at: previous.started_at + 1,
+                ..previous
+            },
+            Identity {
+                thread_id: previous.thread_id + 1,
+                ..previous
+            },
+            Identity {
+                destruction_epoch: previous.destruction_epoch + 1,
+                ..previous
+            },
+        ] {
+            assert_eq!(
+                retained_candidate_token(previous, "window-41", observed, true),
+                None
+            );
+        }
+        assert_eq!(
+            retained_candidate_token(previous, "window-41", previous, false),
+            None
+        );
+    }
+
+    #[test]
+    fn delayed_detach_keeps_latest_consent_maximum_instead_of_old_normal_binding_baseline() {
+        let binding = identity();
+        // The 750ms consent timeout transfers an accepted MAX->normal restore
+        // into cancellation; a detach at1100ms must retain its pre-consent MAX.
+        let original_binding_normal = false;
+        let pre_consent_maximum = true;
+        let restored_maximum = if preserves_pending_compensation(Some(binding), binding, true) {
+            pre_consent_maximum
+        } else {
+            original_binding_normal
+        };
+        assert!(restored_maximum);
+        assert!(!preserves_pending_compensation(None, binding, true));
+        assert!(!preserves_pending_compensation(
+            Some(binding),
+            binding,
+            false
+        ));
+        assert!(!preserves_pending_compensation(
+            Some(Identity {
+                destruction_epoch: binding.destruction_epoch + 1,
+                ..binding
+            }),
+            binding,
+            true
+        ));
     }
 
     #[test]

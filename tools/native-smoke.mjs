@@ -4,7 +4,9 @@ import { spawn, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { connectWebview } from './webview-driver.mjs';
+import { connectOwnedWebview as connectWebview } from './webview-driver.mjs';
+import { ownedDesktop } from './owned-desktop.mjs';
+import { activateOwnedHeader } from './window-input.mjs';
 
 const checks = [];
 const driverDeadline = Date.now() + 15 * 60_000;
@@ -54,7 +56,11 @@ async function clickUiControl(expression, name) {
 }
 const trustThroughUi = () => clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual execution trust confirmation');
 async function frame(name) {
-  const data = await view.evaluate('document.querySelector(".native-frame")?.src.split(",")[1]');
+  let data;
+  await until('Actual native frame rendered in React', async () => {
+    data = await view.evaluate('(() => { const image = document.querySelector(".native-frame"); return image?.complete && image.naturalWidth > 0 ? image.src.split(",")[1] : null; })()');
+    return Boolean(data);
+  }, 10_000);
   assert.ok(data, 'Actual native frame must be delivered to the UI');
   const bytes = Buffer.from(data, 'base64');
   writeFileSync(`artifacts/native-${name}.png`, bytes);
@@ -103,8 +109,8 @@ try {
   try { view = await connectWebview(); } catch { blocked('Start pnpm dev with ARKDOCK_SDK and WebView2 development debug port 9223 (see runbook)'); }
   const initial = await snapshot();
   if (!initial.backend.available) blocked(initial.backend.reason);
-  const dock = JSON.parse(execFileSync('pwsh', ['-NoProfile','-Command','Get-Process -Name arkdock | Where-Object MainWindowHandle -NE 0 | Select-Object -First 1 Id | ConvertTo-Json -Compress'], { encoding: 'utf8', windowsHide: true }));
-  host = spawn('pwsh', ['-NoProfile','-File',resolve('tests/native/window-host.ps1'),'-ProjectPath',project], { windowsHide: true, stdio: ['ignore','pipe','pipe'] });
+  const dock = ownedDesktop();
+  host = spawn('pwsh', ['-NoProfile','-STA','-File',resolve('tests/native/window-host.ps1'),'-ProjectPath',project], { windowsHide: true, stdio: ['ignore','pipe','pipe'] });
   const target = await new Promise((done, reject) => {
     let output = ''; let errors = '';
     const timer = setTimeout(() => reject(new Error(`Fixture startup timeout: ${errors}`)), 10_000);
@@ -115,19 +121,21 @@ try {
   const dockHandle = action('find', 0, { ProcessId: dock.Id }).handle;
   await invoke('detach');
   action('restore', dockHandle); await pause(200);
-  action('move', target.first, { X:40,Y:400,Width:700,Height:700 });
+  action('move', target.first, { X:500,Y:100,Width:1000,Height:1320 });
   action('move', target.second, { X:50,Y:520,Width:400,Height:420 });
-  action('move', dockHandle, { X:1000,Y:400,Width:1000,Height:1250 });
+  action('move', dockHandle, { X:2000,Y:100,Width:906,Height:1320 });
   // Bring our target above unrelated desktop windows before placing ArkDock above it.
   action('foreground', target.first); await pause(200);
   action('foreground', dockHandle); await pause(250);
+  await activateOwnedHeader(view, dockHandle, action);
   const before = action('info', dockHandle); const destination = action('info', target.first);
   const button = await view.evaluate('(() => { const r=document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio }; })()');
   const x = Math.round(before.clientX + button.x*button.ratio); const y = Math.round(before.clientY + button.y*button.ratio);
-  const dragged = action('drag', dockHandle, { X:x,Y:y,EndX:x+destination.right-before.left,EndY:y+destination.top-before.top,OutlinePid:dock.Id });
-  writeFileSync('artifacts/native-drag.json',JSON.stringify({before,destination,button,dragged},null,2));
-  const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter')), 15_000);
-  const candidate = selected.candidates.find((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter'));
+  const dragged = action('drag', dockHandle, { X:x,Y:y,EndX:x+destination.frameRight-before.frameLeft,EndY:y+destination.frameTop-before.frameTop,OutlinePid:dock.Id });
+  writeFileSync('artifacts/native-drag.json',JSON.stringify({target,project,before,destination,button,dragged},null,2));
+  const normalized = value => value.replace(/^\\\\\?\\/, '').replaceAll('\\', '/').toLowerCase();
+  const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => normalized(c.project.appRoot) === normalized(project)), 15_000);
+  const candidate = selected.candidates.find((c) => normalized(c.project.appRoot) === normalized(project));
   assert.equal(candidate.autoEligible, false);
   await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.querySelector("code")?.textContent === ${JSON.stringify(candidate.project.appRoot)})`,'Actual candidate selection');
   const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && (state.phase === 'untrusted' || state.sessionId), 10_000);
@@ -169,6 +177,19 @@ try {
     await pause(400);
     assert.notEqual(await frame('after-click'), previous);
     await assert.rejects(invoke('click_preview',{buildId:'old-task',generation:0,x:180,y:360}), /STALE_INPUT/);
+  });
+  await check('O1', 'Orb collapse/expand retains the actual Previewer session, build and runtime counter', async () => {
+    const before = await snapshot();
+    const count = nativeCount();
+    await invoke('collapse_to_orb', { requestId: before.display.requestId + 1 });
+    const collapsed = await until('Actual native Orb confirmed', state => state.display.mode === 'orb', 8000);
+    for (const key of ['sessionId', 'project', 'sessionRef', 'trusted', 'build']) assert.deepEqual(collapsed[key], before[key]);
+    assert.equal(collapsed.phase, 'running');
+    await invoke('expand_from_orb', { requestId: collapsed.display.requestId + 1 });
+    const restored = await until('Actual main surface confirmed', state => state.display.mode === 'expanded', 8000);
+    for (const key of ['sessionId', 'project', 'sessionRef', 'trusted', 'build']) assert.deepEqual(restored[key], before[key]);
+    assert.equal(restored.phase, 'running'); assert.equal(nativeCount(), count);
+    await frame('after-orb');
   });
   await check('IPC1', 'Actual WebView2 binary JPEG IPC validates identity/errors and restores PNG delivery', async () => {
     const expected = await snapshot();
@@ -255,6 +276,7 @@ try {
     writeFileSync(sourcePath, valid.replace('struct Index {','struct Index ??? {'));
     const failed = await until('Real ArkTS compiler failure', (state) => state.phase === 'stale' && state.build.generation > previousGeneration && state.build.error);
     assert.match(failed.build.error,/BUILD_FAILED/);
+    assert.match(failed.build.error,/Index\.ets/, 'Intentional failure must come from the real ArkTS source compiler');
     assert.equal(failed.build.stale,true);
     assert.equal(await frame('compile-failed-old-picture'),previous);
     const staleScreenshot = await view.send('Page.captureScreenshot',{format:'png'});

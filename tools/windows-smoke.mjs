@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { connectWebview } from './webview-driver.mjs';
+import { connectOwnedWebview as connectWebview } from './webview-driver.mjs';
+import { ownedDesktop } from './owned-desktop.mjs';
+import { activateOwnedHeader } from './window-input.mjs';
 
 const checks = [];
 const evidence = process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts';
@@ -43,8 +45,8 @@ async function check(id, name, execute) {
 try {
   if (process.platform !== 'win32') throw new Error('Windows desktop required');
   view = await connectWebview();
-  const dock = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-Command', 'Get-Process -Name arkdock | Where-Object MainWindowHandle -NE 0 | Select-Object -First 1 Id,@{Name="MainWindowHandle";Expression={$_.MainWindowHandle.ToInt64()}} | ConvertTo-Json -Compress'], { encoding: 'utf8', windowsHide: true }));
-  host = spawn('pwsh', ['-NoProfile', '-File', resolve('tests/native/window-host.ps1')], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const dock = ownedDesktop();
+  host = spawn('pwsh', ['-NoProfile', '-STA', '-File', resolve('tests/native/window-host.ps1')], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const target = await new Promise((done, reject) => {
     let output = ''; let errors = '';
     const timer = setTimeout(() => reject(new Error(`Fixture startup timeout: ${errors}`)), 10_000);
@@ -63,15 +65,18 @@ try {
   action('foreground', target.first);
   action('foreground', dockHandle);
   await pause(300);
+  await activateOwnedHeader(view, dockHandle, action);
   const before = action('info', dockHandle);
   const button = await view.evaluate('(() => { const r = document.querySelector(".drag").getBoundingClientRect(); return { x: r.x+r.width/2, y: r.y+r.height/2, ratio: devicePixelRatio }; })()');
   const startX = Math.round(before.clientX + button.x * button.ratio);
   const startY = Math.round(before.clientY + button.y * button.ratio);
   const targetBefore = action('info', target.first);
   await view.evaluate('window.__arkdockPointer = []; document.addEventListener("pointerdown", e => window.__arkdockPointer.push({kind:e.type,x:e.clientX,y:e.clientY,target:e.target.className}), {once:true});');
-  const dragged = action('drag', dockHandle, { X: startX, Y: startY, EndX: startX + targetBefore.frameRight - before.frameLeft, EndY: startY + targetBefore.frameTop - before.frameTop, OutlinePid: dock.Id });
+  const motionBefore = await invoke('get_motion_metrics');
+  const dragged = action('drag', dockHandle, { X: startX, Y: startY, EndX: startX + targetBefore.frameRight - before.frameLeft, EndY: startY + targetBefore.frameTop - before.frameTop, OutlinePid: dock.Id, HoldMs: 1500, CaptureDir: resolve(evidence, 'particle-frames'), CaptureX: targetBefore.frameRight - 70, CaptureY: targetBefore.frameTop + 140 });
+  const motionAfter = await invoke('get_motion_metrics');
   mkdirSync(evidence, { recursive: true });
-  writeFileSync(`${evidence}/windows-drag.json`, `${JSON.stringify({before,targetBefore,dragged,targetAtRelease:action('info',target.first)},null,2)}\n`);
+  writeFileSync(`${evidence}/windows-drag.json`, `${JSON.stringify({before,targetBefore,dragged,motionBefore,motionAfter,targetAtRelease:action('info',target.first)},null,2)}\n`);
   console.log(JSON.stringify({ dockPid: dock.Id, targetPid: target.pid, dpi: before.dpi, pointer: await view.evaluate('window.__arkdockPointer') }));
   await check('A1', '实际鼠标拖动并释放绑定；同进程两个窗口按实际候选选择', async () => {
     const state = await until('binding and discovery', (value) => value.target?.process.pid === target.pid && value.phase === 'selectProject');
@@ -102,10 +107,13 @@ try {
     assert.ok(candidates[0].evidence.some((evidence) => evidence.verifiable && !evidence.activeScope));
     assert.equal(state.phase, 'selectProject'); assert.equal(state.trusted, false);
   });
-  await check('A1', '候选四边轮廓真实可见、无激活/点击穿透、无全局置顶，释放后隐藏', async () => {
-    assert.equal(dragged.outlineDuringDrag.length, 4);
-    for (const outline of dragged.outlineDuringDrag) { assert.ok(outline.extended & 0x08000000); assert.ok(outline.extended & 0x20); assert.equal(outline.extended & 0x8, 0); }
+  await check('A1', '原生磁吸层仅候选期间临时置顶、无激活/点击穿透，释放后隐藏并撤销置顶', async () => {
+    // One native alpha surface replaces four static strips; unsupported renderers retain the exact four-strip fallback.
+    assert.equal(dragged.outlineDuringDrag.length, motionAfter.frames > motionBefore.frames ? 1 : 4);
+    for (const outline of dragged.outlineDuringDrag) { assert.ok(outline.extended & 0x08000000); assert.ok(outline.extended & 0x20); assert.equal(outline.extended & 0x8, dragged.outlineDuringDrag.length === 1 ? 8 : 0); }
     assert.equal(action('info', dockHandle, { OutlinePid: dock.Id }).outlineVisible, 0);
+    const layers = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-File', resolve('tests/native/surface-actions.ps1'), '-Action', 'list', '-ProcessId', String(dock.Id)], { encoding: 'utf8', windowsHide: true })).filter(item => item.class.startsWith('ArkDockMagneticParticles-'));
+    assert.equal(layers.length, 1); assert.equal(layers[0].visible, false); assert.equal(layers[0].extended & 8, 0);
   });
   await check('A3', '点击实际 ArkDock 后保持可见与自身焦点', async () => {
     const identity = (await snapshot()).target.id;
@@ -120,10 +128,41 @@ try {
   await check('A2', '目标最小化隐藏伴侣；恢复不夺走目标焦点', async () => {
     action('minimize', target.first); await pause(500);
     assert.equal(action('info', dockHandle).visible, false);
-    action('restore', target.first); action('foreground', target.first); await pause(500);
+    action('restore', target.first); action('foreground', target.first);
+    const activated = action('info', target.first);
+    if (activated.foreground !== target.first) action('click', target.first, { X: activated.clientX + 40, Y: activated.clientY + 40 });
+    assert.equal(action('info', target.first).foreground, target.first, 'Owned target activation is a real precondition');
+    await pause(500);
     const restored = action('info', dockHandle);
+    if (restored.foreground !== target.first && restored.foreground !== dockHandle) throw new Error('BLOCKED: an unrelated foreground application interrupted the focus-preservation test');
     assert.equal(restored.visible, true); assert.equal(restored.foreground, target.first);
     assert.equal((await snapshot()).target.process.pid, target.pid);
+  });
+  await check('C-bound', '收起保留真实关联与信任状态，目标最小化不隐藏 Orb，展开尊重新的目标几何', async () => {
+    const candidate = (await snapshot()).candidates.find(item => item.valid && item.evidence.some(e => e.source === 'uia'));
+    assert.ok(candidate);
+    await invoke('select_candidate', { candidateId: candidate.id });
+    const before = await snapshot();
+    assert.equal(before.trusted, false); assert.equal(before.phase, 'untrusted');
+    await invoke('collapse_to_orb', { requestId: before.display.requestId + 1 });
+    await until('bound Orb', state => state.display.mode === 'orb');
+    const orbSurface = () => JSON.parse(execFileSync('pwsh', ['-NoProfile', '-File', resolve('tests/native/surface-actions.ps1'), '-Action', 'list', '-ProcessId', String(dock.Id)], { encoding: 'utf8', windowsHide: true })).find(item => item.title === 'ArkDock Orb');
+    assert.equal(action('info', dockHandle).visible, false); assert.equal(orbSurface().visible, true);
+    action('minimize', target.first); await pause(300);
+    assert.equal(orbSurface().visible, true); assert.equal(action('info', dockHandle).visible, false);
+    action('restore', target.first); await pause(250);
+    action('move', target.first, { X: 180, Y: 140, Width: 920, Height: 1320 }); await pause(250);
+    const userGeometry = action('info', target.first);
+    const collapsed = await snapshot();
+    for (const key of ['project', 'sessionId', 'sessionRef', 'trusted']) assert.deepEqual(collapsed[key], before[key]);
+    assert.equal(collapsed.target.id, before.target.id);
+    await invoke('expand_from_orb', { requestId: collapsed.display.requestId + 1 });
+    await until('bound expanded', state => state.display.mode === 'expanded' && state.pairLayout.state === 'paired'); await pause(200);
+    const resumed = action('info', target.first);
+    for (const key of ['frameLeft', 'frameTop', 'frameRight', 'frameBottom']) assert.equal(resumed[key], userGeometry[key], `Latest user target ${key}`);
+    assertContact(resumed, action('info', dockHandle)); assert.equal(orbSurface().visible, false);
+    const expanded = await snapshot();
+    for (const key of ['project', 'sessionId', 'sessionRef', 'trusted']) assert.deepEqual(expanded[key], before[key]);
   });
   await check('A4', '并排布局须明确同意；解除恢复未改动的矩形', async () => {
     const oldTarget = action('info', target.first); const oldDock = action('info', dockHandle);
@@ -142,6 +181,7 @@ try {
     action('move', dockHandle, { X: 1800, Y: 100, Width: 906, Height: 1320 });
     action('foreground', target.first);
     action('foreground', dockHandle); await pause(200);
+    await activateOwnedHeader(view, dockHandle, action);
     const own = action('info', dockHandle); const destination = action('info', target.first);
     const grab = await view.evaluate('(() => { const r = document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2, y:r.y+r.height/2, ratio:devicePixelRatio }; })()');
     const x = Math.round(own.clientX + grab.x*grab.ratio); const y = Math.round(own.clientY + grab.y*grab.ratio);
@@ -172,6 +212,7 @@ try {
   for (const maximized of [true, false]) for (const detachDelay of [0, 1100]) await check('A4', `${maximized ? '最大化' : '普通'}目标队列延迟时 ${detachDelay} ms 后解除，迟到布局得到安全补偿`, async () => {
     await rebind(); if (maximized) action('maximize', target.first); await pause(350);
     const originalTarget = action('info', target.first); const originalDock = action('info', dockHandle);
+    writeFileSync(`${evidence}/delay-${maximized}-${detachDelay}-baseline.json`, JSON.stringify({ originalTarget, originalDock, state: await snapshot() }, null, 2));
     const paused = new Promise((done, reject) => {
       const timer = setTimeout(() => reject(new Error('Target pause acknowledgement timed out')), 3000);
       const listener = (chunk) => { if (chunk.toString().includes('pauseReady')) { clearTimeout(timer); host.stdout.off('data', listener); done(); } };
@@ -184,6 +225,7 @@ try {
     await until('pending arrangement detached', (state) => state.target === null);
     await pause(2400);
     const restoredTarget = action('info', target.first); const restoredDock = action('info', dockHandle);
+    writeFileSync(`${evidence}/delay-${maximized}-${detachDelay}-restored.json`, JSON.stringify({ restoredTarget, restoredDock, state: await snapshot() }, null, 2));
     assert.equal(restoredTarget.maximized, maximized);
     if (!maximized) for (const key of ['left','top','right','bottom']) {
       assert.equal(restoredTarget[key], originalTarget[key], `target ${key}`);
@@ -203,8 +245,9 @@ try {
   checks.push({ id: 'A3', status: 'BLOCKED', name: '跨 DPI 双屏、负坐标：本机只有单块显示器' });
   checks.push({ id: 'A2', status: 'SKIPPED', name: '高权限差异、快速 HWND 复用压力：本驱动未执行' });
 } catch (error) {
-  checks.push({ status: 'FAIL', name: error.message }); console.error(error);
-  process.exitCode = 1;
+  const blocked = error.message.includes('BLOCKED:');
+  checks.push({ status: blocked ? 'BLOCKED' : 'FAIL', name: error.message }); console.error(error);
+  process.exitCode = blocked ? 2 : 1;
 } finally {
   if (view) { try { await invoke('detach'); } catch { /* App may have exited. */ } view.close(); }
   // Only the child process created by this driver is owned; never terminate by name.

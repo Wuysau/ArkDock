@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::SetHighDpiMode([System.Windows.Forms.HighDpiMode]::PerMonitorV2) | Out-Null
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
 Add-Type -ReferencedAssemblies @('System.Windows.Forms','System.Windows.Forms.Primitives','System.ComponentModel.Primitives','System.Runtime','System.Console','System.Threading.Thread') @'
 using System;
 using System.Threading;

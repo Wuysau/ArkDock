@@ -36,6 +36,55 @@ const PREVIEWER: &str = "sdk/default/openharmony/previewer/common/bin/Previewer.
 const HVIGOR: &str = "hvigor/bin/hvigorw.js";
 pub(super) type Completed = (BuildTask, Result<(), String>);
 
+fn build_environment(sdk: &Path, root: &Path, run_directory: &Path) -> Vec<(String, String)> {
+    // Pinned Hvigor supports BUILD_CACHE_DIR, but its wrapper's env.config takes
+    // precedence. build_arguments() supplies the matching --config override.
+    // A completed graph receipt precedes its final metadata writes. Job cleanup
+    // or cancellation therefore may damage only this build's disposable cache,
+    // never the project's pre-existing/default .hvigor/cache or the next build.
+    vec![
+        (
+            "DEVECO_SDK_HOME".into(),
+            sdk.join("sdk").to_string_lossy().into_owned(),
+        ),
+        (
+            "DEVECO_NODE_HOME".into(),
+            sdk.join("tool/node").to_string_lossy().into_owned(),
+        ),
+        (
+            "HVIGOR_USER_HOME".into(),
+            root.join(".hvigor/arkdock-home")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "BUILD_CACHE_DIR".into(),
+            run_directory
+                .join("hvigor-cache")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]
+}
+
+fn build_arguments(sdk: &Path, module: &str, run_directory: &Path) -> Result<Vec<String>, String> {
+    let cache = run_directory
+        .join("hvigor-cache")
+        .to_string_lossy()
+        .into_owned();
+    // The pinned wrapper parses a config property using split('='); reject an
+    // unrepresentable path rather than silently falling back to a user's cache.
+    if !run_directory.is_absolute() || cache.contains(['=', '\0']) {
+        return Err("OWNED_BUILD_CACHE_PATH_UNSUPPORTED".into());
+    }
+    let mut arguments = vec![sdk.join(HVIGOR).to_string_lossy().into_owned()];
+    arguments.extend(preview_build_args(module)?);
+    // hvigorw.js serializes --config into env.config before loading the engine.
+    // This authoritative setting prevents its {} config from masking the env override.
+    arguments.extend(["--config".into(), format!("build-cache-dir={cache}")]);
+    Ok(arguments)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VerifiedProfile {
@@ -403,24 +452,11 @@ fn run(
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let build_log = directory.join("build.log");
     let runtime_log = directory.join("previewer.log");
-    // Each workspace owns its wrapper cache; parallel worktrees never share its daemon state.
-    let home = root.join(".hvigor/arkdock-home");
-    let env = vec![
-        (
-            "DEVECO_SDK_HOME".into(),
-            sdk.join("sdk").to_string_lossy().into_owned(),
-        ),
-        (
-            "DEVECO_NODE_HOME".into(),
-            sdk.join("tool/node").to_string_lossy().into_owned(),
-        ),
-        (
-            "HVIGOR_USER_HOME".into(),
-            home.to_string_lossy().into_owned(),
-        ),
-    ];
-    let mut build_args = vec![sdk.join(HVIGOR).to_string_lossy().into_owned()];
-    build_args.extend(preview_build_args(&project.module)?);
+    // Wrapper dependencies retain the existing per-workspace home. Task metadata
+    // uses a fresh app-owned parent for every build; no user-cache repair/deletion.
+    fs::create_dir_all(directory.join("hvigor-cache")).map_err(|e| e.to_string())?;
+    let env = build_environment(sdk, &root, &directory);
+    let build_args = build_arguments(sdk, &project.module, &directory)?;
     let build_started = Instant::now();
     let build = process::Process::spawn(
         &sdk.join("tool/node/node.exe"),
@@ -662,6 +698,149 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn each_build_has_private_structured_cache_environment_without_project_cache_repair() {
+        let sdk = Path::new("C:/SDK space & literal");
+        let root = Path::new("D:/user project & literal");
+        let first_run = Path::new("C:/Temp/ArkDock-native/first-owned-run");
+        let next_run = Path::new("C:/Temp/ArkDock-native/next-owned-run");
+        let first = build_environment(sdk, root, first_run);
+        let next = build_environment(sdk, root, next_run);
+        let cache = |environment: &[(String, String)]| {
+            PathBuf::from(
+                &environment
+                    .iter()
+                    .find(|(name, _)| name == "BUILD_CACHE_DIR")
+                    .unwrap()
+                    .1,
+            )
+        };
+        assert!(cache(&first).starts_with(first_run));
+        assert!(cache(&next).starts_with(next_run));
+        assert_ne!(cache(&first), cache(&next));
+        assert!(!cache(&first).starts_with(root));
+        assert_eq!(
+            first
+                .iter()
+                .find(|(name, _)| name == "HVIGOR_USER_HOME")
+                .unwrap()
+                .1,
+            root.join(".hvigor/arkdock-home").to_string_lossy()
+        );
+        // SDK/root paths with shell metacharacters are literal environment values;
+        // they are neither shell fragments nor additional executable arguments.
+        assert_eq!(
+            first
+                .iter()
+                .find(|(name, _)| name == "DEVECO_SDK_HOME")
+                .unwrap()
+                .1,
+            sdk.join("sdk").to_string_lossy()
+        );
+        assert_eq!(first.len(), 4);
+        let arguments = build_arguments(sdk, "entry", first_run).unwrap();
+        assert_eq!(
+            &arguments[arguments.len() - 2..],
+            &[
+                "--config".to_owned(),
+                format!("build-cache-dir={}", cache(&first).display())
+            ]
+        );
+        assert!(build_arguments(sdk, "entry", Path::new("C:/Temp/unsupported=path")).is_err());
+        assert!(build_arguments(sdk, "entry", Path::new("relative-run")).is_err());
+    }
+
+    #[test]
+    #[ignore = "Requires the explicitly supplied licensed pinned Windows SDK and owned native-counter fixture"]
+    fn real_sdk_build_uses_own_cache_while_malformed_default_metadata_is_untouched() {
+        let sdk_input = std::env::var("ARKDOCK_SDK").expect("Set ARKDOCK_SDK explicitly");
+        let sdk = verified_root(Path::new(&sdk_input), "26.0.0.105")
+            .expect("Pinned SDK fingerprint required");
+        let sdk = local_path(&sdk).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/native-counter")
+            .canonicalize()
+            .unwrap();
+        let root = local_path(&root).unwrap();
+        let default_meta = root.join(".hvigor/cache/meta.json");
+        let previous_default = fs::read(&default_meta).ok();
+        let previous_written = fs::metadata(&default_meta)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        let directory = tempfile::Builder::new()
+            .prefix("ArkDock-sdk-cache-proof-")
+            .tempdir()
+            .unwrap()
+            .keep();
+        fs::create_dir_all(directory.join("hvigor-cache")).unwrap();
+        let log = directory.join("build.log");
+        let build = process::Process::spawn(
+            &sdk.join("tool/node/node.exe"),
+            &build_arguments(&sdk, "entry", &directory).unwrap(),
+            &root,
+            &build_environment(&sdk, &root, &directory),
+            &log,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let receipt = build_receipt("entry", &process::bounded_log(&log));
+            assert_ne!(
+                receipt,
+                BuildReceipt::Failed,
+                "Real SDK failed: {}",
+                process::bounded_log(&log)
+            );
+            if receipt == BuildReceipt::Succeeded {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Real SDK build timed out: {}",
+                process::bounded_log(&log)
+            );
+            if let Some(code) = build.exit_code().unwrap() {
+                build_exit_result("entry", code, &process::bounded_log(&log)).unwrap();
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let owned_meta = directory
+            .join("hvigor-cache")
+            .join(root.file_name().unwrap())
+            .join(".hvigor/cache/meta.json");
+        let metadata_deadline = Instant::now() + Duration::from_secs(3);
+        let owned_json = loop {
+            if let Ok(bytes) = fs::read(&owned_meta) {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    break json;
+                }
+            }
+            assert!(
+                Instant::now() < metadata_deadline,
+                "SDK did not write valid metadata in own cache {}",
+                owned_meta.display()
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(
+            owned_json
+                .get("hvigorVersion")
+                .and_then(|value| value.as_str()),
+            Some("6.26.8")
+        );
+        assert_eq!(fs::read(&default_meta).ok(), previous_default);
+        assert_eq!(
+            fs::metadata(&default_meta)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+            previous_written
+        );
+        println!("SDK_CACHE_PROOF: receipt=Succeeded; ownedMetadata={}; defaultMetadataUnchanged=true; log={}", owned_meta.display(), log.display());
+        drop(build);
+    }
     #[test]
     fn malformed_or_unverified_native_frames_fail_closed() {
         let task = BuildTask {

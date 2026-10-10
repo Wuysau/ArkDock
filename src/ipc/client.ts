@@ -25,7 +25,14 @@ export async function request<K extends keyof CommandArgs>(command: K, args: Omi
   if (!desktop) throw new Error('缺少桌面桥接。请在 Windows 11 使用 pnpm dev 启动 ArkDock 独立应用。');
   if (command !== 'snapshot' && !scope) throw new Error('缺少当前目标/预览会话，请等待后端状态同步。');
   if (command === 'read_preview_frame') throw new Error('二进制帧需要使用 readPreviewFrame；不能按状态快照读取。');
+  if (command === 'get_motion_metrics') throw new Error('动效计数需要使用 readMotionMetrics；不能按业务快照读取。');
   return desktop.core.invoke<AppSnapshot>(command, command === 'snapshot' ? args : { ...args, scope });
+}
+
+export async function readMotionMetrics(scope: RequestScope): Promise<CommandResults['get_motion_metrics']> {
+  const desktop = window.__TAURI__;
+  if (!desktop) throw new Error('缺少桌面桥接。');
+  return desktop.core.invoke<CommandResults['get_motion_metrics']>('get_motion_metrics', { scope });
 }
 
 export async function readPreviewFrame(scope: RequestScope, protocolVersion: number): Promise<CommandResults['read_preview_frame']> {
