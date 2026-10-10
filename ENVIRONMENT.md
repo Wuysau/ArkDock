@@ -33,7 +33,7 @@ pnpm build
 
 独立开发测试入口：pnpm dev:demo、pnpm build:demo、pnpm test:ui。
 测试画面标识为“UI 演示 · 非原生渲染”，正式 pnpm build 不包含 fixtures。
-Windows 桌面检查：pnpm verify:ui、pnpm verify:windows；需要运行中的开发 ArkDock。
+Windows 桌面检查：pnpm verify:ui、pnpm verify:joint、pnpm verify:windows；需要运行中的开发 ArkDock。
 自动驱动只在本次开发进程设置 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223。
 不应将该调试设置写入全局环境或正式应用配置。
 
@@ -48,9 +48,15 @@ SDK 商业工具不纳入仓库；缺 SDK 或协议不能以测试画面通过�
 
 ## 本次代码检查点
 
-基础 pnpm verify、Rust desktop 71 项、便携回归 31 项均退出 0。
-真实 verify:ui（含无边框鼠标缩放）与 verify:native（SDK 帧/点击/更新/失败恢复）退出 0。
-verify:windows 压力回归退出 1：最大化目标并排布局/迟到恢复仍需定位。
+2026-10-10：基础 pnpm verify、最终 desktop lib 75 项、便携回归 33 项退出 0。
+真实 verify:ui 八组、verify:joint 十一组、verify:native 七组退出 0。
+实际 ChatGPT 的零接缝、双向联动缩放、共同最大化已实测，关联保留供继续使用。
+verify:windows 旧压力驱动本轮退出 1：测试目标边缘被遮挡，后续恢复压力仍未重新完成。
+运行桌面 exe 时 cargo test 的 --all-targets 可能因 Windows 文件锁失败；本轮已用 --lib
+完成最终 desktop 测试。停止桌面进程后才能完整重新链接该 exe。
 单屏基础联动通过不能覆盖该失败或不同 DPI 双屏。原生吸附目前即时定位，尚无缓动。
+
+窗口保持独立。共同最大化使用真实工作区几何且不抢焦点；某些自定义窗口会先安全恢复
+为普通窗口，再分配左侧区域，因此个体系统最大化标记与共同布局状态可以不同。
 本次提交仅保存源码、配置、测试/工具与环境说明；设计、参考图片和 Harness 文档保留本地。
 全量 verify 含文档引用检查，需要未提交的本地文档；代码检查可单独使用上面的命令。

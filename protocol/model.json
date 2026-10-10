@@ -33,6 +33,14 @@
       "FAIL",
       "BLOCKED",
       "SKIPPED"
+    ],
+    "PairLayoutState": [
+      "unbound",
+      "paired",
+      "maximizing",
+      "maximized",
+      "restoring",
+      "blocked"
     ]
   },
   "structs": {
@@ -106,6 +114,11 @@
       "error": "string?",
       "stale": "bool"
     },
+    "PairLayoutStatus": {
+      "state": "PairLayoutState",
+      "preferredWidthDip": "u32",
+      "reason": "string?"
+    },
     "AppSnapshot": {
       "revision": "u64",
       "phase": "Phase",
@@ -119,7 +132,8 @@
       "diagnostics": "Diagnostic[]",
       "dockHint": "string?",
       "layoutRequired": "bool",
-      "sessionRef": "SessionRef?"
+      "sessionRef": "SessionRef?",
+      "pairLayout": "PairLayoutStatus?"
     },
     "NativeFrame": {
       "sessionId": "string",
@@ -157,6 +171,12 @@
       "scope": "RequestScope"
     },
     "close_window": {
+      "scope": "RequestScope"
+    },
+    "maximize_pair": {
+      "scope": "RequestScope"
+    },
+    "restore_pair": {
       "scope": "RequestScope"
     },
     "begin_drag": {

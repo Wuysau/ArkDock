@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { connectWebview } from './webview-driver.mjs';
 
 const checks = [], dimensions = [];
-const evidence = 'artifacts/ui-2026-10-09/native';
+const evidence = process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/ui-2026-10-09/native';
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 function action(kind, handle, values = {}) {
   const args = ['-NoProfile', '-File', resolve('tests/native/window-actions.ps1'), '-Action', kind, '-Handle', String(handle)];

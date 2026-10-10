@@ -80,6 +80,8 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .state-strip > svg { color: var(--highlight); flex-shrink: 0; }
 .state-strip.working { color: var(--highlight); border-color: var(--accent); background: var(--selected); border-radius: 5px; }
 .cancel-discovery { padding: 1px 5px; min-height: 24px; font-size: 10px; background: transparent; flex-shrink: 0; }
+.pair-badge { color: var(--highlight); border: 1px solid var(--line); border-radius: 5px; padding: 2px 5px; font-size: 10px; white-space: nowrap; flex-shrink: 0; }
+.pair-badge.pending { color: var(--warning); }
 .target-near { box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 22px rgb(75 130 255 / 14%); transition: box-shadow var(--motion-hint) var(--ease); }
 .target-near .state-strip { color: var(--highlight); border-color: var(--accent); }
 .preview-toolbar { margin: 0 12px; padding: 10px 0 12px; border-block: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
@@ -250,7 +252,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   .header-status { font-size: 10px; }
   .drag-zone { gap: 6px; }
   .drag-zone strong { font-size: 16px; }
-  .header-actions .minimize { display: none; }
+  .header-actions .minimize, .header-actions .maximize { display: none; }
   .workspace-strip, .preview-toolbar, .preview { margin-inline: 10px; }
   .toolbar-selects select { font-size: 10px; }
   .mode-caption { font-size: 10px; }

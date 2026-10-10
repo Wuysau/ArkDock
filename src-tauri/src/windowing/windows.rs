@@ -2,7 +2,9 @@ use super::geometry::{dock_rect, edge_score, edge_visible, side_by_side, Rect};
 use super::lifecycle::{Identity, Layout};
 use super::outline::Outline;
 use super::WindowUpdate;
-use crate::ipc::model::{ProcessRef, TargetInfo};
+use crate::ipc::model::{PairLayoutState, PairLayoutStatus, ProcessRef, TargetInfo};
+mod joint;
+use joint::{JointCompensation, JointGroup};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::{size_of, zeroed};
@@ -99,6 +101,8 @@ unsafe extern "system" fn on_event(
 enum Command {
     BeginDrag(mpsc::SyncSender<Result<(), String>>),
     Arrange(mpsc::SyncSender<Result<(), String>>),
+    MaximizePair(String, mpsc::SyncSender<Result<(), String>>),
+    RestorePair(String, mpsc::SyncSender<Result<(), String>>),
     #[cfg(feature = "desktop")]
     Scope(
         String,
@@ -190,6 +194,12 @@ impl Controller {
     pub fn arrange_side_by_side(&self) -> Result<(), String> {
         self.request(Command::Arrange)
     }
+    pub fn maximize_pair(&self, target_id: &str) -> Result<(), String> {
+        self.request(|reply| Command::MaximizePair(target_id.to_owned(), reply))
+    }
+    pub fn restore_pair(&self, target_id: &str) -> Result<(), String> {
+        self.request(|reply| Command::RestorePair(target_id.to_owned(), reply))
+    }
     pub fn detach(&self) {
         self.detach_requested.store(true, Ordering::Release);
     }
@@ -267,6 +277,7 @@ struct PendingArrangement {
 enum CancelledOperation {
     Layout(PendingLayout),
     Arrangement(PendingArrangement),
+    Joint(Box<JointGroup>),
 }
 struct CancelledLayout {
     target: TrackedWindow,
@@ -286,6 +297,8 @@ struct Native {
     layout: Option<PendingLayout>,
     arrangement: Option<PendingArrangement>,
     cancelled: Option<CancelledLayout>,
+    joint: Option<JointGroup>,
+    pair_status: PairLayoutStatus,
     epochs: HashMap<isize, u64>,
     destruction_sequence: u64,
     emit: Arc<dyn Fn(WindowUpdate) + Send + Sync>,
@@ -364,6 +377,8 @@ impl Native {
             layout: None,
             arrangement: None,
             cancelled: None,
+            joint: None,
+            pair_status: PairLayoutStatus::default(),
             epochs: HashMap::new(),
             destruction_sequence: 0,
             emit,
@@ -407,11 +422,10 @@ impl Native {
                     event.kind,
                     EVENT_SYSTEM_MOVESIZESTART | EVENT_SYSTEM_MINIMIZESTART
                 ) {
-                    if self
-                        .cancelled
-                        .as_ref()
-                        .is_some_and(|cancelled| cancelled.target.identity.handle == event.handle)
-                    {
+                    if self.cancelled.as_ref().is_some_and(|cancelled| {
+                        cancelled.target.identity.handle == event.handle
+                            || self.own.identity.handle == event.handle
+                    }) {
                         // The user's gesture wins even before its first changed rectangle is observable.
                         self.cancelled = None;
                     }
@@ -455,14 +469,29 @@ impl Native {
                     if event.kind == EVENT_SYSTEM_MOVESIZESTART {
                         if self.dragging {
                             self.move_started = true;
+                            self.armed_at = None;
                         } else {
-                            self.detach(false);
-                            self.hint = Some("Manual movement detached the companion; use the drag control to bind again".into());
+                            self.begin_joint_gesture(true);
                         }
                     }
                     if event.kind == EVENT_SYSTEM_MOVESIZEEND && self.dragging && self.move_started
                     {
                         released = true;
+                    }
+                    if event.kind == EVENT_SYSTEM_MOVESIZEEND && !self.dragging {
+                        self.end_joint_gesture();
+                    }
+                }
+                if self
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.identity.handle == event.handle)
+                {
+                    if event.kind == EVENT_SYSTEM_MOVESIZESTART {
+                        self.begin_joint_gesture(false);
+                    }
+                    if event.kind == EVENT_SYSTEM_MOVESIZEEND {
+                        self.end_joint_gesture();
                     }
                 }
             }
@@ -505,6 +534,32 @@ impl Native {
                         let result = self.arrange();
                         let _ = reply.send(result);
                     }
+                    Command::MaximizePair(id, reply) => {
+                        let result = if self
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.info.id == id && self.valid(target))
+                        {
+                            self.maximize_joint()
+                        } else {
+                            Err("STALE_TARGET: joint command belongs to a different window".into())
+                        };
+                        self.publish();
+                        let _ = reply.send(result);
+                    }
+                    Command::RestorePair(id, reply) => {
+                        let result = if self
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.info.id == id && self.valid(target))
+                        {
+                            self.restore_joint()
+                        } else {
+                            Err("STALE_TARGET: joint command belongs to a different window".into())
+                        };
+                        self.publish();
+                        let _ = reply.send(result);
+                    }
                 }
             }
             self.restore_cancelled();
@@ -517,13 +572,13 @@ impl Native {
                     self.dragging = false;
                     self.armed_at = None;
                     self.hint = Some("Native drag did not start; binding remains detached".into());
-                } else if released {
+                } else if released || self.move_started && !self.own_move_loop_active() {
                     self.release();
                 } else if self.move_started && self.last_sample.elapsed() >= SAMPLE_INTERVAL {
                     self.detect();
                     self.last_sample = Instant::now();
                 }
-            } else if self.last_sample.elapsed() >= SAMPLE_INTERVAL {
+            } else if self.last_sample.elapsed() >= SAMPLE_INTERVAL || self.joint_gesture_active() {
                 self.follow();
                 self.last_sample = Instant::now();
             }
@@ -537,6 +592,13 @@ impl Native {
 
     fn epoch(&self, handle: isize) -> u64 {
         self.epochs.get(&handle).copied().unwrap_or(0)
+    }
+
+    fn own_move_loop_active(&self) -> bool {
+        let mut info: GUITHREADINFO = unsafe { zeroed() };
+        info.cbSize = size_of::<GUITHREADINFO>() as u32;
+        (unsafe { GetGUIThreadInfo(self.own.identity.thread_id, &mut info) }) != 0
+            && info.flags & GUI_INMOVESIZE != 0
     }
 
     fn valid(&self, window: &TrackedWindow) -> bool {
@@ -600,7 +662,24 @@ impl Native {
                 continue;
             };
             if eligible(hwnd, self.own_pid) {
-                if let Some(distance) = edge_score(own, bounds, scaled(hwnd, 40)) {
+                let threshold = scaled(hwnd, 40);
+                let proximity = edge_score(own, bounds, threshold).or_else(|| {
+                    // At a full-width maximized edge Windows clamps the cursor; the grabbed
+                    // Dock edge cannot cross it. Use the actual drag pointer at that edge.
+                    if unsafe { IsZoomed(hwnd) } == 0 {
+                        return None;
+                    }
+                    let mut pointer = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                    if unsafe { GetCursorPos(&mut pointer) } == 0 {
+                        return None;
+                    }
+                    let distance = (i64::from(pointer.x) - i64::from(bounds.right)).abs();
+                    (distance <= i64::from(threshold)
+                        && pointer.y >= bounds.top
+                        && pointer.y < bounds.bottom)
+                        .then_some(distance as i32)
+                });
+                if let Some(distance) = proximity {
                     // EnumWindows identifies candidates. Explicit GW_HWNDPREV
                     // checks z order; don't rely on undocumented enum ordering.
                     if let Some((z_index, higher)) =
@@ -661,6 +740,9 @@ impl Native {
             {
                 self.target = Some(candidate.window);
                 self.hint = None;
+                if let Err(error) = self.establish_joint() {
+                    self.hint = Some(error);
+                }
                 self.follow();
                 return;
             }
@@ -669,6 +751,9 @@ impl Native {
     }
 
     fn follow(&mut self) {
+        if self.follow_joint() {
+            return;
+        }
         let Some(target) = self.target.as_ref() else {
             return;
         };
@@ -783,7 +868,7 @@ impl Native {
             self.hint = Some("Monitor work area is unavailable".into());
             return;
         };
-        let gap = scaled(target_hwnd, 8);
+        let gap = 0;
         let Some(desired) = dock_rect(
             target_visible,
             (own_visible.width(), own_visible.height()),
@@ -889,7 +974,7 @@ impl Native {
             own_visible.width(),
             scaled(hwnd, 320),
             scaled(hwnd, 280),
-            scaled(hwnd, 8),
+            0,
         )
         .ok_or("Monitor is too narrow for both minimum window widths")?;
         let target_expected = outer_for_visible(target_outer, target_visible, target_slot)
@@ -954,7 +1039,12 @@ impl Native {
                 .layout
                 .take()
                 .map(CancelledOperation::Layout)
-                .or_else(|| self.arrangement.take().map(CancelledOperation::Arrangement));
+                .or_else(|| self.arrangement.take().map(CancelledOperation::Arrangement))
+                .or_else(|| {
+                    self.joint
+                        .take()
+                        .map(|group| CancelledOperation::Joint(Box::new(group)))
+                });
             if let Some(operation) = operation {
                 // An accepted User32 request cannot be recalled. Keep its identity and observe
                 // it after detaching, rather than losing a late request's restoration ownership.
@@ -966,6 +1056,8 @@ impl Native {
             }
         }
         self.target = None;
+        self.joint = None;
+        self.pair_status = PairLayoutStatus::default();
         self.candidate = None;
         self.layout = None;
         self.arrangement = None;
@@ -1002,6 +1094,37 @@ impl Native {
             return;
         };
         let originals = match &mut cancelled.operation {
+            CancelledOperation::Joint(group) => match self.joint_compensation(group, target) {
+                JointCompensation::Waiting => {
+                    self.cancelled = Some(cancelled);
+                    return;
+                }
+                JointCompensation::Finished => return,
+                JointCompensation::Restore(target, own, original) => {
+                    if self.valid(&cancelled.target) {
+                        if target.showCmd == SW_SHOWMAXIMIZED as u32 {
+                            if let (Some(outer), Some(visible)) =
+                                (outer_bounds(target_hwnd), visible_bounds(target_hwnd))
+                            {
+                                if let Some(desired) =
+                                    outer_for_visible(outer, visible, original.target)
+                                {
+                                    if self.valid(&cancelled.target) {
+                                        let _ = position(target_hwnd, desired);
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = restore_placement(target_hwnd, target);
+                        }
+                    }
+                    if self.valid(&self.own) {
+                        let _ = restore_placement(own_hwnd, own);
+                    }
+                    self.cancelled = Some(cancelled);
+                    return;
+                }
+            },
             CancelledOperation::Arrangement(pending) => {
                 if current_own != pending.own_bounds
                     || !placement(target_hwnd).is_some_and(|current| {
@@ -1085,6 +1208,7 @@ impl Native {
             target: self.target.as_ref().map(|target| target.info.clone()),
             dock_hint: self.hint.clone(),
             layout_required: self.layout_required,
+            pair_layout: self.pair_status.clone(),
         };
         let changed = if let Ok(mut state) = self.snapshot.lock() {
             let same_target = match (&state.target, &update.target) {
@@ -1095,6 +1219,7 @@ impl Native {
             let changed = !same_target
                 || state.dock_hint != update.dock_hint
                 || state.layout_required != update.layout_required;
+            let changed = changed || state.pair_layout != update.pair_layout;
             if changed {
                 *state = update.clone();
             }
@@ -1343,7 +1468,32 @@ fn visible_bounds(hwnd: HWND) -> Option<Rect> {
     {
         return None;
     }
-    from_native(rect)
+    let frame = from_native(rect)?;
+    if unsafe { IsZoomed(hwnd) } != 0 {
+        let outer = outer_bounds(hwnd)?;
+        // Some custom-frame apps return the maximized invisible sizing border as
+        // DWMWA_EXTENDED_FRAME_BOUNDS. Derive that border from real client geometry.
+        if frame.left == outer.left && frame.right == outer.right {
+            let mut client: RECT = unsafe { zeroed() };
+            let mut origin = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+            if unsafe { GetClientRect(hwnd, &mut client) } != 0
+                && unsafe { windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin) }
+                    != 0
+            {
+                let left = (origin.x - frame.left).max(0);
+                let right = (frame.right - origin.x - client.right).max(0);
+                let top = (origin.y - frame.top).max(0).min(left.max(right));
+                let bottom = (frame.bottom - origin.y - client.bottom).max(0);
+                return Rect::new(
+                    frame.left + left,
+                    frame.top + top,
+                    frame.right - right,
+                    frame.bottom - bottom,
+                );
+            }
+        }
+    }
+    Some(frame)
 }
 
 fn work_area(hwnd: HWND) -> Option<Rect> {

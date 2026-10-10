@@ -29,6 +29,7 @@
     "verify": "node tools/verify.mjs",
     "verify:native": "node tools/native-gate.mjs",
     "verify:windows": "node tools/windows-smoke.mjs",
+    "verify:joint": "node tools/joint-smoke.mjs",
     "verify:ui": "node tools/ui-smoke.mjs",
     "verify:release": "node tools/verify.mjs --release",
     "doctor": "node tools/doctor.mjs"

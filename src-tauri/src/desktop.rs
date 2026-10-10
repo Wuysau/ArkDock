@@ -33,6 +33,8 @@ enum Action {
     Refresh,
     Stop,
     Arrange(bool),
+    MaximizePair,
+    RestorePair,
     Click {
         build_id: String,
         generation: u64,
@@ -124,6 +126,7 @@ fn initial(backend: BackendStatus) -> AppSnapshot {
         diagnostics: Vec::new(),
         dock_hint: None,
         layout_required: false,
+        pair_layout: Some(PairLayoutStatus::default()),
     }
 }
 
@@ -180,6 +183,7 @@ impl Engine {
         self.snapshot.target = update.target;
         self.snapshot.dock_hint = update.dock_hint;
         self.snapshot.layout_required = update.layout_required;
+        self.snapshot.pair_layout = Some(update.pair_layout);
         if changed {
             self.close_session();
             self.snapshot.candidates.clear();
@@ -502,6 +506,22 @@ impl Engine {
                     .ok_or("UNSUPPORTED_PLATFORM")?
                     .arrange_side_by_side(consent)?;
             }
+            Action::MaximizePair => {
+                let target = self.current_target()?;
+                self.controller
+                    .as_ref()
+                    .ok_or("UNSUPPORTED_PLATFORM")?
+                    .maximize_pair(&target.id)?;
+                self.drain_events();
+            }
+            Action::RestorePair => {
+                let target = self.current_target()?;
+                self.controller
+                    .as_ref()
+                    .ok_or("UNSUPPORTED_PLATFORM")?
+                    .restore_pair(&target.id)?;
+                self.drain_events();
+            }
             Action::Click {
                 build_id,
                 generation,
@@ -729,6 +749,22 @@ async fn begin_drag(
     Ok(snapshot)
 }
 #[tauri::command]
+async fn maximize_pair(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<AppSnapshot, String> {
+    request(window, service, scope, Action::MaximizePair).await
+}
+#[tauri::command]
+async fn restore_pair(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<AppSnapshot, String> {
+    request(window, service, scope, Action::RestorePair).await
+}
+#[tauri::command]
 async fn rediscover(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
@@ -869,6 +905,8 @@ pub fn run() {
             snapshot,
             minimize_window,
             close_window,
+            maximize_pair,
+            restore_pair,
             begin_drag,
             rediscover,
             select_candidate,

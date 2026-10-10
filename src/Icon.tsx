@@ -1,4 +1,4 @@
-type IconName = 'preview' | 'device' | 'folder' | 'log' | 'settings' | 'link' | 'refresh' | 'rotate' | 'spark' | 'shield' | 'close' | 'chevron' | 'search' | 'moon' | 'sun' | 'monitor' | 'grip' | 'stop' | 'arrow';
+type IconName = 'preview' | 'device' | 'folder' | 'log' | 'settings' | 'link' | 'refresh' | 'rotate' | 'spark' | 'shield' | 'close' | 'chevron' | 'search' | 'moon' | 'sun' | 'monitor' | 'grip' | 'stop' | 'arrow' | 'maximize' | 'restore';
 
 const paths: Record<IconName, string> = {
   preview: 'M8 2.5h8a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2ZM10 6h4M11 18h2',
@@ -20,6 +20,8 @@ const paths: Record<IconName, string> = {
   grip: 'M8 5h.01M16 5h.01M8 12h.01M16 12h.01M8 19h.01M16 19h.01',
   stop: 'M6 6h12v12H6Z',
   arrow: 'M4 12h16m-6-6 6 6-6 6',
+  maximize: 'M5 5h14v14H5Z',
+  restore: 'M8 8h11v11H8ZM5 16H3V3h13v2',
 };
 
 export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
