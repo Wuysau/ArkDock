@@ -28,6 +28,11 @@ pnpm dev
 ```
 
 项目内 @tauri-apps/cli 2.12.1，desktop 包装使用其官方 JS 入口，不需要全局 cargo tauri。
+原生测试驱动要求 `ARKDOCK_TEST_PID`（或 `ARKDOCK_PROBE_PID`）为本次明确创建的
+ArkDock PID，`ARKDOCK_TEST_PORT`（或 `ARKDOCK_PROBE_PORT`）指定开发调试端口。
+驱动核验该端口监听进程为指定 ArkDock 的 WebView2 后代；不会选取机器上第一个同名实例。
+SDK 和调试变量仅设在测试进程，不改全局配置。运行中的 Windows exe 会被系统锁定；
+需执行 all-targets 测试或重建时，先关闭本次自有实例，或从工作树私有目录的副本启动。
 Rust MSVC、Windows C++/SDK、WebView2 按
 [Tauri 官方前置](https://v2.tauri.app/start/prerequisites/)。
 Cargo.lock 已交付；verify 对 Rust 操作使用 --locked。没有测试 rust-version 的 MSRV 兼容。

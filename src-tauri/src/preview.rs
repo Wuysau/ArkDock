@@ -72,6 +72,27 @@ pub struct NativePreviewer {
 }
 
 impl NativePreviewer {
+    pub fn request_inspection(
+        &self,
+        command: crate::inspector::InspectorCommand,
+    ) -> Result<
+        std::sync::mpsc::Receiver<Result<crate::inspector::RawInspectionResponse, String>>,
+        String,
+    > {
+        #[cfg(windows)]
+        {
+            self.runtime
+                .as_ref()
+                .ok_or("PREVIEW_SESSION_REQUIRED")?
+                .request_inspection(command)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = command;
+            Err("UNSUPPORTED_PLATFORM".into())
+        }
+    }
+
     pub fn new(sdk: Option<PathBuf>) -> Self {
         let status = probe(sdk.as_deref());
         Self {

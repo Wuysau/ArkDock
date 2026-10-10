@@ -14,8 +14,8 @@
     "withGlobalTauri": true,
     "windows": [{ "label": "main", "title": "ArkDock", "width": 440, "height": 820, "minWidth": 360, "maxWidth": 560, "minHeight": 640, "decorations": false, "resizable": true, "alwaysOnTop": false }],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'",
-      "devCsp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'",
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'",
       "capabilities": ["main"]
     }
   },

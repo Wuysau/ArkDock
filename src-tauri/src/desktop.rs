@@ -17,6 +17,10 @@ use crate::scheduler::{
 use crate::windowing::{WindowController, WindowUpdate};
 use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
+mod inspection;
+mod visibility;
+use inspection::{DataAction, DataResult, PendingInspection};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -33,8 +37,8 @@ enum Action {
     Sdk(PathBuf),
     Refresh,
     Stop,
-    BinaryFrames(u32),
-    LegacyFrames(u32),
+    BinaryFrames(u32, String),
+    LegacyFrames(u32, String),
     Arrange(bool),
     MaximizePair,
     RestorePair,
@@ -49,6 +53,11 @@ enum Message {
         RequestScope,
         Action,
         mpsc::Sender<Result<AppSnapshot, String>>,
+    ),
+    Data(
+        RequestScope,
+        DataAction,
+        mpsc::Sender<Result<DataResult, String>>,
     ),
     Shutdown,
 }
@@ -76,31 +85,67 @@ struct Service {
 struct FrameDelivery {
     binary_enabled: bool,
     binary_session: Option<String>,
+    consumer_id: Option<String>,
     latest: Option<BinaryFrame>,
+    retained: VecDeque<BinaryFrame>,
 }
 impl FrameDelivery {
-    fn enable(&mut self, protocol_version: u32, session_id: &str) -> Result<(), String> {
+    fn enable(
+        &mut self,
+        protocol_version: u32,
+        session_id: &str,
+        consumer_id: &str,
+    ) -> Result<(), String> {
         if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
             return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
         }
         if session_id.is_empty() || session_id.len() > 256 {
             return Err("PREVIEW_SESSION_REQUIRED".into());
         }
+        if consumer_id.is_empty() || consumer_id.len() > 128 {
+            return Err("INVALID_FRAME_CONSUMER".into());
+        }
         self.binary_enabled = true;
         self.binary_session = Some(session_id.to_owned());
+        self.consumer_id = Some(consumer_id.to_owned());
         Ok(())
     }
     fn push(&mut self, frame: BinaryFrame) {
+        if self.retained.len() >= 8 {
+            self.retained.pop_front();
+        }
+        while !self.retained.is_empty()
+            && self.retained.iter().map(|f| f.payload.len()).sum::<usize>() + frame.payload.len()
+                > 4 * 1024 * 1024
+        {
+            self.retained.pop_front();
+        }
+        self.retained.push_back(frame.clone());
         self.latest = Some(frame);
     }
     fn clear(&mut self) {
         self.latest = None;
         self.binary_enabled = false;
         self.binary_session = None;
+        self.consumer_id = None;
+        self.retained.clear();
     }
-    fn take_current(&mut self, state: &AppSnapshot) -> Result<Vec<u8>, String> {
+    fn disable(&mut self, consumer_id: &str) -> Result<(), String> {
+        if self.consumer_id.as_deref() != Some(consumer_id) {
+            return Err("STALE_FRAME_CONSUMER".into());
+        }
+        self.binary_enabled = false;
+        self.binary_session = None;
+        self.consumer_id = None;
+        // Keep the most recent real frame for explicitly chosen screenshot contexts.
+        Ok(())
+    }
+    fn take_current(&mut self, state: &AppSnapshot, consumer_id: &str) -> Result<Vec<u8>, String> {
         if !self.binary_enabled {
             return Err("BINARY_TRANSPORT_NOT_ENABLED".into());
+        }
+        if self.consumer_id.as_deref() != Some(consumer_id) {
+            return Err("STALE_FRAME_CONSUMER".into());
         }
         if self.binary_session.as_deref() != state.session_id.as_deref() {
             self.clear();
@@ -158,6 +203,17 @@ struct Engine {
     serial: u64,
     detaching: bool,
     frames: Arc<Mutex<FrameDelivery>>,
+    selections: Option<crate::selection::SelectionStore>,
+    agents: crate::agent::AgentRouter,
+    inspection: Option<PendingInspection>,
+    inspection_tree: Option<InspectorTree>,
+    inspection_anchor: Option<BinaryFrame>,
+    last_inspection_at: u64,
+    last_selection_sync: u64,
+    native_visible: Option<bool>,
+    last_visibility_sync: u64,
+    last_visibility_emit: u64,
+    own_handle: isize,
 }
 
 fn now() -> u64 {
@@ -165,6 +221,14 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+fn app_data_selection_store(
+    app: &tauri::AppHandle,
+) -> Result<crate::selection::SelectionStore, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|_| "SELECTION_APP_DATA_UNAVAILABLE".to_owned())
+        .and_then(|path| crate::selection::SelectionStore::open(&path))
 }
 
 fn initial(backend: BackendStatus) -> AppSnapshot {
@@ -224,9 +288,25 @@ fn execution_gate(
 }
 
 impl Engine {
+    fn sync_visibility(&mut self) {
+        let Some(window) = self.app.get_webview_window("main") else {
+            return;
+        };
+        let visible = visibility::visible(self.own_handle);
+        if self.native_visible != Some(visible)
+            || now().saturating_sub(self.last_visibility_emit) >= 1000
+        {
+            self.native_visible = Some(visible);
+            self.last_visibility_emit = now();
+            let _ = window.emit("arkdock:visibility", PreviewVisibility { visible });
+        }
+    }
     fn publish(&mut self) {
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
+        if let Some(selections) = &self.selections {
+            let _ = selections.sync_runtime(&self.snapshot, now());
+        }
         if let Ok(mut state) = self.output.lock() {
             *state = self.snapshot.clone();
         }
@@ -248,6 +328,11 @@ impl Engine {
         });
     }
     fn suspend_execution(&mut self) {
+        self.inspection_tree = None;
+        self.inspection_anchor = None;
+        if let Some(pending) = self.inspection.take() {
+            let _ = pending.reply.send(Err("STALE_INSPECTOR_SESSION".into()));
+        }
         if let Ok(mut frames) = self.frames.lock() {
             frames.clear();
         }
@@ -594,7 +679,7 @@ impl Engine {
                 self.snapshot.session_ref = None;
                 self.snapshot.phase = Phase::Stopped;
             }
-            Action::BinaryFrames(version) => {
+            Action::BinaryFrames(version, consumer_id) => {
                 if !self.snapshot.trusted {
                     return Err("TRUST_REQUIRED".into());
                 }
@@ -606,13 +691,16 @@ impl Engine {
                 self.frames
                     .lock()
                     .map_err(|_| "FRAME_UNAVAILABLE")?
-                    .enable(version, session)?;
+                    .enable(version, session, &consumer_id)?;
             }
-            Action::LegacyFrames(version) => {
+            Action::LegacyFrames(version, consumer_id) => {
                 if version != BINARY_FRAME_PROTOCOL_VERSION {
                     return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
                 }
-                self.frames.lock().map_err(|_| "FRAME_UNAVAILABLE")?.clear();
+                self.frames
+                    .lock()
+                    .map_err(|_| "FRAME_UNAVAILABLE")?
+                    .disable(&consumer_id)?;
             }
             Action::Arrange(consent) => {
                 self.current_target()?;
@@ -1020,12 +1108,13 @@ async fn enable_binary_preview_frames(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     protocol_version: u32,
+    consumer_id: String,
 ) -> Result<AppSnapshot, PreviewProtocolError> {
     request(
         window,
         service,
         scope,
-        Action::BinaryFrames(protocol_version),
+        Action::BinaryFrames(protocol_version, consumer_id),
     )
     .await
     .map_err(|error| protocol_error(error, protocol_version))
@@ -1037,12 +1126,13 @@ async fn disable_binary_preview_frames(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     protocol_version: u32,
+    consumer_id: String,
 ) -> Result<AppSnapshot, PreviewProtocolError> {
     request(
         window,
         service,
         scope,
-        Action::LegacyFrames(protocol_version),
+        Action::LegacyFrames(protocol_version, consumer_id),
     )
     .await
     .map_err(|error| protocol_error(error, protocol_version))
@@ -1054,6 +1144,7 @@ async fn read_preview_frame(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     protocol_version: u32,
+    consumer_id: String,
 ) -> Result<tauri::ipc::Response, PreviewProtocolError> {
     let result = (|| {
         check_window(&window)?;
@@ -1067,7 +1158,7 @@ async fn read_preview_frame(
             .frames
             .lock()
             .map_err(|_| "FRAME_UNAVAILABLE")?
-            .take_current(&snapshot)
+            .take_current(&snapshot, &consumer_id)
     })();
     result
         .map(tauri::ipc::Response::new)
@@ -1130,7 +1221,21 @@ pub fn run() {
             click_preview,
             enable_binary_preview_frames,
             disable_binary_preview_frames,
-            read_preview_frame
+            read_preview_frame,
+            inspection::inspector_get_capabilities,
+            inspection::inspector_get_tree,
+            inspection::selection_create,
+            inspection::selection_get,
+            inspection::selection_clear,
+            inspection::selection_update_instruction,
+            inspection::selection_prompt,
+            inspection::selection_read_image,
+            inspection::selection_export_image,
+            inspection::agent_session_list,
+            inspection::agent_session_bind,
+            inspection::agent_delivery_prepare,
+            inspection::agent_delivery_send,
+            inspection::agent_delivery_status,
         ])
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
@@ -1173,6 +1278,7 @@ pub fn run() {
                 0
             };
             let worker = thread::spawn(move || {
+                let selection_result = app_data_selection_store(&handle);
                 let mut engine = Engine {
                     app: handle,
                     output: state,
@@ -1187,7 +1293,26 @@ pub fn run() {
                     serial: 0,
                     detaching: false,
                     frames,
+                    selections: None,
+                    agents: crate::agent::AgentRouter::new(),
+                    inspection: None,
+                    inspection_tree: None,
+                    inspection_anchor: None,
+                    last_inspection_at: 0,
+                    last_selection_sync: 0,
+                    native_visible: None,
+                    last_visibility_sync: 0,
+                    last_visibility_emit: 0,
+                    own_handle,
                 };
+                match selection_result {
+                    Ok(store) => engine.selections = Some(store),
+                    Err(error) => engine.diagnostic(
+                        "SELECTION_STORAGE_UNAVAILABLE",
+                        error,
+                        CheckStatus::Blocked,
+                    ),
+                }
                 match store_result {
                     Ok(store) => engine.store = Some(store),
                     Err(error) => {
@@ -1221,10 +1346,25 @@ pub fn run() {
                             }
                             let _ = reply.send(result);
                         }
+                        Ok(Message::Data(scope, action, reply)) => {
+                            engine.dispatch_data(scope, action, reply)
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     engine.drain_events();
                     engine.tick();
+                    engine.poll_inspection();
+                    if now().saturating_sub(engine.last_visibility_sync) >= 100 {
+                        engine.last_visibility_sync = now();
+                        engine.sync_visibility();
+                    }
+                    if now().saturating_sub(engine.last_selection_sync) >= 2000 {
+                        engine.last_selection_sync = now();
+                        if let Some(selections) = &mut engine.selections {
+                            let _ = selections.cleanup(now());
+                            let _ = selections.sync_runtime(&engine.snapshot, now());
+                        }
+                    }
                 }
                 engine.close_session();
                 engine.controller.take();
@@ -1253,9 +1393,21 @@ mod tests {
     #[test]
     fn transport_teardown_releases_pixels_and_restores_legacy_delivery() {
         let mut delivery = FrameDelivery::default();
-        delivery.enable(1, "s").unwrap();
+        delivery.enable(1, "s", "consumer").unwrap();
         delivery.clear();
         assert!(!delivery.binary_enabled);
+    }
+    #[test]
+    fn obsolete_consumer_cannot_close_same_session_successor() {
+        let mut delivery = FrameDelivery::default();
+        delivery.enable(1, "session", "old").unwrap();
+        delivery.enable(1, "session", "new").unwrap();
+        assert_eq!(delivery.disable("old").unwrap_err(), "STALE_FRAME_CONSUMER");
+        assert!(delivery.binary_enabled);
+        assert_eq!(delivery.consumer_id.as_deref(), Some("new"));
+        delivery.disable("new").unwrap();
+        assert!(!delivery.binary_enabled);
+        assert!(delivery.enable(1, "session", "").is_err());
     }
 
     #[test]
@@ -1297,28 +1449,54 @@ mod tests {
         };
         let mut delivery = FrameDelivery::default();
         assert_eq!(
-            delivery.enable(2, "s").unwrap_err(),
+            delivery.enable(2, "s", "consumer").unwrap_err(),
             "PROTOCOL_VERSION_UNSUPPORTED"
         );
         assert_eq!(
-            delivery.enable(1, "").unwrap_err(),
+            delivery.enable(1, "", "consumer").unwrap_err(),
             "PREVIEW_SESSION_REQUIRED"
         );
-        delivery.enable(1, "s").unwrap();
+        delivery.enable(1, "s", "consumer").unwrap();
         delivery.push(frame(1));
         delivery.push(frame(2));
-        let packet = delivery.take_current(&state).unwrap();
+        let packet = delivery.take_current(&state, "consumer").unwrap();
         let length = u32::from_le_bytes(packet[..4].try_into().unwrap()) as usize;
         let metadata: BinaryFrameMetadata = serde_json::from_slice(&packet[4..4 + length]).unwrap();
         assert_eq!(metadata.sequence, 2);
         assert_eq!(packet[4 + length..], [0xff, 0xd8, 0xff, 0xd9]);
-        assert!(delivery.take_current(&state).unwrap().is_empty());
+        assert!(delivery
+            .take_current(&state, "consumer")
+            .unwrap()
+            .is_empty());
+        for sequence in 3..=20 {
+            delivery.push(frame(sequence));
+        }
+        assert_eq!(delivery.retained.len(), 8);
+        assert_eq!(delivery.retained.front().unwrap().metadata.sequence, 13);
+        for sequence in 21..=28 {
+            let mut large = frame(sequence);
+            large.payload = vec![0; crate::preview::frames::MAX_JPEG_PAYLOAD_BYTES];
+            large.metadata.payload_length = large.payload.len() as u32;
+            delivery.push(large);
+        }
+        assert!(
+            delivery
+                .retained
+                .iter()
+                .map(|item| item.payload.len())
+                .sum::<usize>()
+                <= 4 * 1024 * 1024
+        );
+        assert!(delivery.retained.len() <= 8);
         delivery.push(frame(3));
         state.session_id = Some("new".into());
-        assert_eq!(delivery.take_current(&state).unwrap_err(), "STALE_SESSION");
+        assert_eq!(
+            delivery.take_current(&state, "consumer").unwrap_err(),
+            "STALE_SESSION"
+        );
         delivery.clear();
         assert_eq!(
-            delivery.take_current(&state).unwrap_err(),
+            delivery.take_current(&state, "consumer").unwrap_err(),
             "BINARY_TRANSPORT_NOT_ENABLED"
         );
     }

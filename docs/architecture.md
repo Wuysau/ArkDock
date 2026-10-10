@@ -4,6 +4,11 @@
 React 只发类型化请求并显示后端快照。协议定义在 `protocol/model.json`，
 生成 TypeScript 与 Rust serde 类型，检查生成结果与来源一致。
 
+原生显示由 `src/preview` 的有界二进制消费者和稳定 Canvas 拥有；Inspector 覆盖层
+与像素解码分离。Rust `inspector` 只读查询自有 Previewer；`selection` 保存有界 JPEG、
+裁剪与过期上下文；`agent` 核验明确会话和能力，当前无未经证明的桌面发送适配器。
+新增数据命令集中 `desktop/inspection.rs`，共享 `desktop.rs` 仅接线和会话资源管理。
+
 ```
 Windows 拖动/事件 → windowing → 目标生命周期
                                 ↓

@@ -10,8 +10,12 @@ const checks = [];
 const driverDeadline = Date.now() + 15 * 60_000;
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 const project = resolve('examples/native-counter');
+const normalizedPath = (value) => value.replaceAll('\\','/').replace(/^\/\/\?\//,'').toLowerCase();
 const sourcePath = join(project, 'entry/src/main/ets/pages/Index.ets');
 const source = readFileSync(sourcePath, 'utf8');
+const ownedPid = Number(process.env.ARKDOCK_TEST_PID ?? process.env.ARKDOCK_PROBE_PID);
+const debugPort = Number(process.env.ARKDOCK_TEST_PORT ?? process.env.ARKDOCK_PROBE_PORT ?? 9223);
+const expectedUrl = process.env.ARKDOCK_TEST_URL ?? process.env.ARKDOCK_PROBE_URL ?? 'http://127.0.0.1:1420/';
 let host;
 let view;
 let originalTrust = false;
@@ -54,7 +58,7 @@ async function clickUiControl(expression, name) {
 }
 const trustThroughUi = () => clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual execution trust confirmation');
 async function frame(name) {
-  const data = await view.evaluate('document.querySelector(".native-frame")?.src.split(",")[1]');
+  const data = await view.evaluate('(() => {const canvas=document.querySelector("canvas.native-frame");return canvas?.dataset.frameSequence ? canvas.toDataURL("image/png").split(",")[1] : null;})()');
   assert.ok(data, 'Actual native frame must be delivered to the UI');
   const bytes = Buffer.from(data, 'base64');
   writeFileSync(`artifacts/native-${name}.png`, bytes);
@@ -69,41 +73,20 @@ function logFrom(state) {
 }
 const nativeCount = () => Number([...readFileSync(currentLog,'utf8').matchAll(/ARKDOCK_NATIVE_COUNT=(\d+)/g)].at(-1)?.[1] ?? 0);
 const currentScope = (state) => ({ targetId: state.target?.id ?? null, sessionId: state.sessionId });
-async function binaryRequest(command, args, scope) {
-  return view.evaluate(`import('/src/ipc/client.ts').then(({ request }) => request(${JSON.stringify(command)}, ${JSON.stringify(args)}, ${JSON.stringify(scope)}))`);
-}
-async function binaryFrame(scope) {
-  return view.evaluate(`(async () => {
-    const { readPreviewFrame } = await import('/src/ipc/client.ts');
-    const packet = await readPreviewFrame(${JSON.stringify(scope)}, 1);
-    if (!(packet instanceof ArrayBuffer)) throw new Error('Actual binary response must be ArrayBuffer');
-    if (packet.byteLength === 0) return null;
-    if (packet.byteLength < 8 || packet.byteLength > 4 + 4096 + 1024 * 1024 - 40) throw new Error('Binary packet limit');
-    const metadataLength = new DataView(packet).getUint32(0, true);
-    if (metadataLength === 0 || metadataLength > 4096 || 4 + metadataLength > packet.byteLength - 4) throw new Error('Binary metadata limit');
-    const metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(packet, 4, metadataLength)));
-    const jpeg = new Uint8Array(packet, 4 + metadataLength);
-    if (metadata.protocolVersion !== 1 || metadata.format !== 'jpeg' || metadata.payloadLength !== jpeg.byteLength
-      || jpeg.byteLength > 1024 * 1024 - 40 || jpeg[0] !== 255 || jpeg[1] !== 216
-      || jpeg[jpeg.length - 2] !== 255 || jpeg[jpeg.length - 1] !== 217) throw new Error('Binary JPEG envelope');
-    const image = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }));
-    let dimensions;
-    try { dimensions = { width: image.width, height: image.height }; }
-    finally { image.close(); }
-    let encoded = '';
-    for (let start = 0; start < jpeg.length; start += 16384) encoded += String.fromCharCode(...jpeg.subarray(start, start + 16384));
-    return { arrayBuffer: true, metadata, metadataLength, byteLength: packet.byteLength, dimensions, jpegBase64: btoa(encoded) };
-  })()`);
-}
 try {
   if (process.platform !== 'win32' || !process.env.ARKDOCK_SDK) blocked('Windows and explicit ARKDOCK_SDK required');
+  if (!Number.isSafeInteger(ownedPid) || ownedPid <= 0) blocked('ARKDOCK_TEST_PID must identify the dedicated ArkDock process created for this test');
   const gui = JSON.parse(execFileSync('pwsh', ['-NoProfile','-Command','ConvertTo-Json -InputObject @(Get-Process -Name deveco64,deveco -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)'], { encoding: 'utf8', windowsHide: true }));
   if (gui.length) blocked('Close DevEco Studio GUI before native acceptance; no external process was stopped');
   checks.push({ id: 'D1', status: 'PASS', name: 'DevEco Studio GUI closed' });
-  try { view = await connectWebview(); } catch { blocked('Start pnpm dev with ARKDOCK_SDK and WebView2 development debug port 9223 (see runbook)'); }
+  try { view = await connectWebview(debugPort, 5000, expectedUrl, ownedPid); } catch { blocked('Start the dedicated ArkDock process with ARKDOCK_SDK and configured development debug port (see runbook)'); }
   const initial = await snapshot();
+  if (initial.target || initial.sessionId) blocked('Dedicated test process must begin detached; user associations are not modified');
   if (!initial.backend.available) blocked(initial.backend.reason);
-  const dock = JSON.parse(execFileSync('pwsh', ['-NoProfile','-Command','Get-Process -Name arkdock | Where-Object MainWindowHandle -NE 0 | Select-Object -First 1 Id | ConvertTo-Json -Compress'], { encoding: 'utf8', windowsHide: true }));
+  // The existing Windows layout controller may finish an already-accepted detach
+  // compensation within three seconds. Do not start a new drag on that old placement.
+  await pause(3500);
+  const dock = { Id: ownedPid };
   host = spawn('pwsh', ['-NoProfile','-File',resolve('tests/native/window-host.ps1'),'-ProjectPath',project], { windowsHide: true, stdio: ['ignore','pipe','pipe'] });
   const target = await new Promise((done, reject) => {
     let output = ''; let errors = '';
@@ -113,7 +96,7 @@ try {
     host.once('exit', (code) => { clearTimeout(timer); reject(new Error(`Host exited ${code}`)); });
   });
   const dockHandle = action('find', 0, { ProcessId: dock.Id }).handle;
-  await invoke('detach');
+  if (!dockHandle) blocked('Explicitly owned ArkDock window not found');
   action('restore', dockHandle); await pause(200);
   action('move', target.first, { X:40,Y:400,Width:700,Height:700 });
   action('move', target.second, { X:50,Y:520,Width:400,Height:420 });
@@ -121,25 +104,38 @@ try {
   // Bring our target above unrelated desktop windows before placing ArkDock above it.
   action('foreground', target.first); await pause(200);
   action('foreground', dockHandle); await pause(250);
-  const before = action('info', dockHandle); const destination = action('info', target.first);
+  let before = action('info', dockHandle);
+  await pause(450);
+  const stable = action('info', dockHandle);
+  if (JSON.stringify([before.left,before.top,before.right,before.bottom]) !== JSON.stringify([stable.left,stable.top,stable.right,stable.bottom])) {
+    action('move', dockHandle, { X:1000,Y:400,Width:1000,Height:1250 }); await pause(3500);
+    before = action('info', dockHandle); await pause(450);
+    const settled = action('info', dockHandle);
+    assert.deepEqual([settled.left,settled.top,settled.right,settled.bottom],[before.left,before.top,before.right,before.bottom],'Owned window placement must settle before native drag');
+  } else before = stable;
+  const destination = action('info', target.first);
+  assert.equal(destination.visible,true,'Owned fixture must be visible');
+  assert.equal(destination.minimized,false,'Owned fixture must not be minimized');
+  assert.equal(await view.evaluate('!!document.querySelector("[inert]") || !!document.querySelector("dialog")'),false,'Owned drag must not be blocked by a modal');
   const button = await view.evaluate('(() => { const r=document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio }; })()');
   const x = Math.round(before.clientX + button.x*button.ratio); const y = Math.round(before.clientY + button.y*button.ratio);
   const dragged = action('drag', dockHandle, { X:x,Y:y,EndX:x+destination.right-before.left,EndY:y+destination.top-before.top,OutlinePid:dock.Id });
   writeFileSync('artifacts/native-drag.json',JSON.stringify({before,destination,button,dragged},null,2));
-  const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter')), 15_000);
-  const candidate = selected.candidates.find((c) => c.project.appRoot.replaceAll('\\','/').endsWith('/examples/native-counter'));
+  const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => normalizedPath(c.project.appRoot) === normalizedPath(project)), 15_000);
+  const candidate = selected.candidates.find((c) => normalizedPath(c.project.appRoot) === normalizedPath(project));
   assert.equal(candidate.autoEligible, false);
   await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.querySelector("code")?.textContent === ${JSON.stringify(candidate.project.appRoot)})`,'Actual candidate selection');
   const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && (state.phase === 'untrusted' || state.sessionId), 10_000);
   projectId = associated.project.id; originalTrust = associated.trusted;
   if (!originalTrust) await trustThroughUi();
   let running;
-  await check('D1', 'Actual SDK build, Previewer and PNG delivery into ArkDock', async () => {
+  await check('D1', 'Actual SDK build, Previewer and binary Canvas delivery into ArkDock', async () => {
     running = await until('Build and first native frame', (state) => state.project?.id === projectId && state.sessionId && state.phase === 'running' && state.build.displayedGeneration === state.build.generation);
     assert.equal(running.backend.sdkVersion, '26.0.0.105');
     assert.equal(running.backend.canClick, true);
     currentLog = logFrom(running);
     assert.match(readFileSync(currentLog,'utf8'), /ARKDOCK_NATIVE_REVISION=FIRST/);
+    await until('Native frame actually decoded and displayed', async () => (await view.evaluate('document.querySelector("canvas.native-frame")?.dataset.buildId')) === running.build.buildId, 10000);
     await frame('before-click');
     const initialScreenshot = await view.send('Page.captureScreenshot',{format:'png'});
     writeFileSync('artifacts/native-first-frame-window.png',Buffer.from(initialScreenshot.data,'base64'));
@@ -157,7 +153,7 @@ try {
     await trustThroughUi();
     running = await until('Real rebuild after regrant', (state) => state.phase === 'running' && state.sessionId !== oldSession && state.build.displayedGeneration === state.build.generation);
     currentLog = logFrom(running);
-    await until('Regrant image in React', async () => (await view.evaluate('document.querySelector(".native-frame")?.alt'))?.includes(running.build.buildId), 10_000);
+    await until('Regrant image on Canvas', async () => (await view.evaluate('document.querySelector(".native-frame")?.dataset.buildId')) === running.build.buildId, 10_000);
     assert.equal(await view.evaluate('!!document.querySelector("dialog")'),false,'Trust confirmation must release the native input surface');
   });
   await check('D2', 'Click on ArkDock image changes actual ArkUI component count', async () => {
@@ -170,69 +166,57 @@ try {
     assert.notEqual(await frame('after-click'), previous);
     await assert.rejects(invoke('click_preview',{buildId:'old-task',generation:0,x:180,y:360}), /STALE_INPUT/);
   });
-  await check('IPC1', 'Actual WebView2 binary JPEG IPC validates identity/errors and restores PNG delivery', async () => {
-    const expected = await snapshot();
-    const scope = currentScope(expected);
-    assert.equal(expected.phase,'running');
-    let first;
-    let changed;
-    try {
-      await binaryRequest('enable_binary_preview_frames',{protocolVersion:1},scope);
-      const protocolError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({ readPreviewFrame }) => {
-        try { await readPreviewFrame(${JSON.stringify(scope)}, 2); return null; }
-        catch (error) { return error; }
-      })`);
-      assert.equal(protocolError?.code,'PROTOCOL_VERSION_UNSUPPORTED');
-      assert.equal(protocolError.expectedProtocolVersion,1);
-      assert.equal(protocolError.receivedProtocolVersion,2);
-      const staleError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({ readPreviewFrame }) => {
-        try { await readPreviewFrame(${JSON.stringify({...scope,sessionId:`${scope.sessionId}-stale`})}, 1); return null; }
-        catch (error) { return error; }
-      })`);
-      assert.equal(staleError?.code,'STALE_REQUEST');
-      await until('Actual binary JPEG packet', async () => { first = await binaryFrame(scope); return Boolean(first); },10_000);
-      const verifyPacket = (packet) => {
-        assert.equal(packet.arrayBuffer,true);
-        assert.deepEqual(packet.dimensions,{width:360,height:640});
-        for (const [key,value] of Object.entries({protocolVersion:1,workspaceId:expected.project.id,sessionId:expected.sessionId,
-          buildId:expected.build.buildId,generation:expected.build.generation,width:360,height:640,rotation:0,format:'jpeg'})) {
-          assert.equal(packet.metadata[key],value,`Actual binary metadata ${key}`);
+  await check('IPC1', 'App owns binary mailbox; wrong consumer cannot read or disable; Canvas remains interactive', async () => {
+    const expected = await snapshot(), scope = currentScope(expected);
+    assert.equal(expected.phase, 'running');
+    assert.equal(await view.evaluate('document.querySelector("canvas.native-frame")?.dataset.format'), 'jpeg');
+    // Observe the app's existing consumer response. Never enable a competing reader.
+    await view.evaluate(`(async()=>{
+      const original=window.__TAURI__, {parseBinaryFrame}=await import('/src/preview/frame-decoder.ts');
+      const state=await original.core.invoke('snapshot');
+      const trace=window.__nativeSmokeBinary={latest:null,legacyEvents:0,original};
+      trace.off=await original.event.listen('arkdock:frame',()=>trace.legacyEvents++);
+      window.__TAURI__={...original,core:{...original.core,invoke:async(command,args)=>{
+        const value=await original.core.invoke(command,args);
+        if(command==='read_preview_frame'&&value instanceof ArrayBuffer&&value.byteLength){
+          const frame=parseBinaryFrame(value,state);
+          if(frame){let encoded='';const bytes=new Uint8Array(frame.jpeg);for(let i=0;i<bytes.length;i+=16384)encoded+=String.fromCharCode(...bytes.subarray(i,i+16384));trace.latest={...frame,jpeg:undefined,jpegBase64:btoa(encoded)};}
         }
-        assert.ok(Number.isSafeInteger(packet.metadata.sequence) && packet.metadata.sequence > 0);
-        assert.ok(Number.isSafeInteger(packet.metadata.capturedAt) && packet.metadata.capturedAt > 0);
-        const jpeg = Buffer.from(packet.jpegBase64,'base64');
-        assert.equal(jpeg.length,packet.metadata.payloadLength);
-        assert.equal(packet.byteLength,4 + packet.metadataLength + jpeg.length);
-        return jpeg;
-      };
-      writeFileSync('artifacts/native-binary-first.jpg',verifyPacket(first));
-      const count = nativeCount();
-      const legacyBefore = await frame('binary-legacy-before-click');
-      await binaryRequest('click_preview',{buildId:first.metadata.buildId,generation:first.metadata.generation,x:180,y:360},scope);
-      await until('Actual binary-mode native count delta', () => nativeCount() === count + 1,10_000);
-      await until('Actual binary-mode changed JPEG', async () => {
-        const packet = await binaryFrame(scope);
-        if (!packet || packet.metadata.sequence <= first.metadata.sequence || packet.jpegBase64 === first.jpegBase64) return false;
-        changed = packet; return true;
-      },10_000);
-      writeFileSync('artifacts/native-binary-after-click.jpg',verifyPacket(changed));
-      assert.notEqual(hash(Buffer.from(changed.jpegBase64,'base64')),hash(Buffer.from(first.jpegBase64,'base64')));
-      assert.equal(await frame('binary-legacy-paused'),legacyBefore,'Binary mode must pause compatibility frame events');
-    } finally {
-      await binaryRequest('disable_binary_preview_frames',{protocolVersion:1},currentScope(await snapshot()));
-    }
-    const count = nativeCount();
-    const previous = await frame('binary-legacy-before-resumed-click');
-    const point = await view.evaluate('(() => { const image=document.querySelector(".native-frame"); image.scrollIntoView({block:"center"}); const r=image.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height*360/640}; })()');
+        return value;
+      }}};
+    })()`);
+    const protocolError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({readPreviewFrame})=>{try{await readPreviewFrame(${JSON.stringify(scope)},2,'not-the-app-consumer');return null;}catch(error){return error;}})`);
+    assert.equal(protocolError?.code,'PROTOCOL_VERSION_UNSUPPORTED');
+    assert.equal(protocolError.expectedProtocolVersion,1); assert.equal(protocolError.receivedProtocolVersion,2);
+    const staleError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({readPreviewFrame})=>{try{await readPreviewFrame(${JSON.stringify({...scope,sessionId:scope.sessionId+'-stale'})},1,'not-the-app-consumer');return null;}catch(error){return error;}})`);
+    assert.equal(staleError?.code,'STALE_REQUEST');
+    const consumerError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({readPreviewFrame})=>{try{await readPreviewFrame(${JSON.stringify(scope)},1,'not-the-app-consumer');return null;}catch(error){return error;}})`);
+    assert.equal(consumerError?.code,'STALE_FRAME_CONSUMER');
+    const disableError = await view.evaluate(`import('/src/ipc/client.ts').then(async ({request})=>{try{await request('disable_binary_preview_frames',{protocolVersion:1,consumerId:'not-the-app-consumer'},${JSON.stringify(scope)});return null;}catch(error){return error;}})`);
+    assert.equal(disableError?.code,'STALE_FRAME_CONSUMER');
+    // The official engine can stop sending unchanged pixels. Wake it with a real user click,
+    // then observe the app's next packet rather than stealing the already-consumed static frame.
+    const observedCount=nativeCount();
+    const wakePoint=await view.evaluate('(()=>{const e=document.querySelector("canvas.native-frame");e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height*360/640};})()');
+    await view.send('Input.dispatchMouseEvent',{type:'mousePressed',...wakePoint,button:'left',clickCount:1});
+    await view.send('Input.dispatchMouseEvent',{type:'mouseReleased',...wakePoint,button:'left',clickCount:1});
+    await until('App reader observed after actual native input',()=>nativeCount()===observedCount+1,10000);
+    let first;
+    await until('Actual app-consumed binary JPEG',async()=>{first=await view.evaluate('window.__nativeSmokeBinary.latest');return Boolean(first);},10000);
+    for(const [key,value] of Object.entries({protocolVersion:1,workspaceId:expected.project.id,sessionId:expected.sessionId,buildId:expected.build.buildId,generation:expected.build.generation,width:360,height:640,rotation:0,format:'jpeg'})) assert.equal(first[key],value);
+    const firstBytes=Buffer.from(first.jpegBase64,'base64');assert.equal(firstBytes.length,first.payloadLength);writeFileSync('artifacts/native-binary-first.jpg',firstBytes);
+    const count=nativeCount(), previous=await frame('binary-before-click');
+    const point=await view.evaluate('(()=>{const e=document.querySelector("canvas.native-frame");e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height*360/640};})()');
     await view.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
     await view.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
-    await until('Actual resumed legacy native count delta', () => nativeCount() === count + 1,10_000);
-    await until('Actual PNG delivery resumes after binary consumer teardown', async () => {
-      const data = await view.evaluate('document.querySelector(".native-frame")?.src.split(",")[1]');
-      return Boolean(data && hash(Buffer.from(data,'base64')) !== previous);
-    },10_000);
-    assert.notEqual(await frame('binary-legacy-restored'),previous);
-  }).catch((error) => { checks.push({id:'IPC1',status:'FAIL',name:error.message}); throw error; });
+    await until('Actual app-consumer native count delta',()=>nativeCount()===count+1,10000);
+    let changed;
+    await until('Actual changed JPEG on app-owned reader',async()=>{changed=await view.evaluate('window.__nativeSmokeBinary.latest');return changed?.sequence>first.sequence&&changed.jpegBase64!==first.jpegBase64;},10000);
+    writeFileSync('artifacts/native-binary-after-click.jpg',Buffer.from(changed.jpegBase64,'base64'));
+    assert.notEqual(await frame('binary-after-click'),previous);
+    assert.equal(await view.evaluate('window.__nativeSmokeBinary.legacyEvents'),0,'Binary mode must suppress compatibility events');
+    await view.evaluate('(()=>{const trace=window.__nativeSmokeBinary;trace.off();window.__TAURI__=trace.original;delete window.__nativeSmokeBinary;})()');
+  }).catch((error)=>{checks.push({id:'IPC1',status:'FAIL',name:error.message});throw error;});
   await check('D2', 'Editing real .ets triggers watcher, serial rebuild and new native generation', async () => {
     const previousGeneration = running.build.generation;
     const previous = await frame('after-click');
@@ -242,7 +226,7 @@ try {
     running = await until('Source rebuild native frame', (state) => state.phase === 'running' && state.build.generation > previousGeneration && state.build.displayedGeneration === state.build.generation);
     currentLog = logFrom(running);
     assert.match(readFileSync(currentLog,'utf8'), /ARKDOCK_NATIVE_REVISION=SECOND/);
-    await until('New build image rendered into React', async () => (await view.evaluate('document.querySelector(".native-frame")?.alt'))?.includes(running.build.buildId), 10_000);
+    await until('New build image rendered on Canvas', async () => (await view.evaluate('document.querySelector(".native-frame")?.dataset.buildId')) === running.build.buildId, 10_000);
     assert.notEqual(await frame('source-updated'),previous);
     await view.evaluate('document.querySelector(".preview").scrollIntoView({block:"start"})');
     const screenshot = await view.send('Page.captureScreenshot',{format:'png'});
@@ -264,7 +248,7 @@ try {
     running = await until('Native recovery after actual source repair',(state) => state.phase === 'running' && state.build.generation > failed.build.generation && !state.build.stale);
     currentLog = logFrom(running);
     assert.match(readFileSync(currentLog,'utf8'),/ARKDOCK_NATIVE_REVISION=SECOND/);
-    await until('Recovered build image rendered into React', async () => (await view.evaluate('document.querySelector(".native-frame")?.alt'))?.includes(running.build.buildId), 10_000);
+    await until('Recovered build image rendered on Canvas', async () => (await view.evaluate('document.querySelector(".native-frame")?.dataset.buildId')) === running.build.buildId, 10_000);
     const recoveredScreenshot = await view.send('Page.captureScreenshot',{format:'png'});
     writeFileSync('artifacts/native-recovered-window.png',Buffer.from(recoveredScreenshot.data,'base64'));
   });
@@ -287,7 +271,7 @@ try {
   process.exitCode = error.blocked ? 2 : 1;
 } finally {
   if (view) {
-    try { if (projectId && !originalTrust) await invoke('set_trust',{projectId,trusted:false}); await invoke('detach'); }
+    try { await view.evaluate('(()=>{const trace=window.__nativeSmokeBinary;if(trace){trace.off();window.__TAURI__=trace.original;delete window.__nativeSmokeBinary;}})()'); if (projectId && !originalTrust) await invoke('set_trust',{projectId,trusted:false}); if (host) await invoke('detach'); }
     catch (error) { checks.push({id:'C2',status:'FAIL',name:`Driver cleanup: ${error.message}`}); process.exitCode = 1; }
     view.close();
   }

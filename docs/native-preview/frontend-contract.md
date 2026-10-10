@@ -1,6 +1,6 @@
 # 前端接入契约
 
-本文供后续前端会话接入本分支的原生后端。本次不修改 React 界面。
+前端已接入二进制 JPEG Canvas、互斥交互/检查模式和选择上下文。
 共享类型唯一来源为 `protocol/model.json`，执行 `node tools/generate-ipc.mjs`
 生成 `src/ipc/model.ts` 和 Rust 类型；不要手写另一份字段或命令定义。
 
@@ -8,7 +8,7 @@
 
 前端原生能力入口仍为 `src/ipc/client.ts`。`snapshot` 返回 `AppSnapshot`；
 除下述二进制读取外，其他命令通过 `request` 传入当前 `RequestScope`，返回更新后的快照。
-`observe` 订阅 `arkdock:state` 和现有 `arkdock:frame`，卸载时释放两项订阅。
+`observe` 订阅 `arkdock:state`、兼容 `arkdock:frame` 及 `arkdock:visibility`，卸载时释放三项订阅。
 没有 Tauri 桥接时明确显示桌面能力缺失，不生成预览替身。
 
 | 操作 | 现有命令及参数 | 后端要求 |
@@ -39,11 +39,12 @@ React 全局状态。`src/ipc/client.ts` 保留通用 `request` 的快照返回�
 新增 `readPreviewFrame` 使用生成的 `CommandResults['read_preview_frame']`：
 
 ```typescript
-await request('enable_binary_preview_frames', { protocolVersion: 1 }, scope);
-const packet = await readPreviewFrame(scope, 1);
+const consumerId = crypto.randomUUID();
+await request('enable_binary_preview_frames', { protocolVersion: 1, consumerId }, scope);
+const packet = await readPreviewFrame(scope, 1, consumerId);
 // packet: ArrayBuffer；0 字节表示当前没有未读帧。
 // 组件卸载时使用仍有效的 scope 恢复兼容入口：
-await request('disable_binary_preview_frames', { protocolVersion: 1 }, scope);
+await request('disable_binary_preview_frames', { protocolVersion: 1, consumerId }, scope);
 ```
 
 不要从 React 组件绕过该入口直接调用原生能力。共享协议为现有 v1 的增量扩展，
@@ -52,7 +53,9 @@ await request('disable_binary_preview_frames', { protocolVersion: 1 }, scope);
 `enable_binary_preview_frames` 返回更新后的快照，`read_preview_frame` 返回
 `ArrayBuffer`/字节数组；不要把后者按 JSON 快照解析。每次请求携带
 `protocolVersion: 1` 和最新 scope，串行轮询，卸载或停止时结束轮询。
-模式绑定当前可信会话；停止、解除、换工程、撤销信任和 main WebView 重新加载
+模式绑定当前可信会话和 consumerId；同一会话旧消费者不能关闭或读取新消费者的流。
+每次重新协商生成新的 consumerId；即使控制器和 session 没有变化，也不复用旧 lease ID。
+停止、解除、换工程、撤销信任和 main WebView 重新加载
 会释放缓存并恢复兼容模式。新会话需要重新协商；旧 scope 不能关闭新会话的传输。
 二进制命令失败返回生成类型 `PreviewProtocolError`：`code`、`message`、
 `expectedProtocolVersion`、`receivedProtocolVersion`。收到
@@ -82,6 +85,13 @@ JSON 元数据最多 4096 字节。SDK 的完整 JPEG40 消息最多 1 MiB，去
 
 ## 状态和帧的版本边界
 
+Windows WebView2 最小化时，`document.hidden` 本机实测仍可为 false。新增生成类型
+`PreviewVisibility` 的 `arkdock:visibility` 为权威窗口门禁：后台只读取当前进程自有
+main HWND 的 IsWindowVisible 与 IsIconic，每 100 ms 核验，变化时通知，并每秒刷新一次
+以处理重新订阅；不在后台同步调用 WebView 线程 getter。前端结合原生 visible 与
+document.hidden 暂停消费者和 presenter；恢复沿用同一 Canvas/bitmap，再消费最新有效帧。
+悬浮球集成时应保持此原生 hide/show 门禁，不用 React 隐藏 class 代替真实窗口状态。
+
 状态通知与帧通知可能在不同时间到达，不能仅凭“最近收到”选画面。二进制帧必须
 匹配当前工程、会话、构建和代次；同一流内只接受更大 `sequence`。
 PNG 兼容帧缺少 `workspaceId`，仍须通过当前快照的会话、构建和代次核验。
@@ -109,6 +119,21 @@ PNG 兼容帧缺少 `workspaceId`，仍须通过当前快照的会话、构建�
 重复缩放后的值直接发给 Previewer。后端再次校验边界和构建身份。
 
 ## 接入验证
+
+检查与选择命令使用 `src/ipc/client.ts` 的 `transfer` 返回生成的 `CommandResults`，
+不按 AppSnapshot 解析。Inspector 查询异步执行，最多一项在途；前端至少间隔 350 ms，
+画面内容变化后合并查询，静态场景约 750 ms 刷新。组件树保留原生矩形、节点、属性
+和源码提示，缺失字段为空；JPEG 内容锚点变化后不能继续用旧边界命中。
+协议无原子帧标记，`inspectionExactFrameMatch=false`，源码提示目前仅 Candidate。
+
+选择创建只传完整 metadata、区域、节点 ID、树版本和意见；不传 frontend JPEG/属性。
+后端从自己的压缩帧归档核验完整 metadata 并截图，最多 8 帧且 4 MiB，与最新未读邮箱分离。
+超过该保留窗口会保守拒绝并提示重新选择。源码重建、换工程、停止、撤销信任立即失效。
+`selection_update_instruction` 保持意见与 selectionId 关联；图片经专门二进制入口读取。
+
+Codex/Claude 的手工线程 ID 登记不会赋予写入权。当前适配器 UNSUPPORTED；只有实际
+写入通道和提交回执才可显示 SUBMITTED。复制、导出、受显式 grant 约束的只读 MCP
+均保留独立语义。具体契约见 [交付设计](../design/agent-selection-delivery.md)。
 
 前端完成后，在实际 ArkDock WebView2 验证真实首帧、点击计数、源码变更、
 编译失败旧图、恢复和停止。CLI 的后端原生验收不等于前端点击坐标或布局验收。

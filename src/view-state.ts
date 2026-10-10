@@ -1,12 +1,15 @@
 import type { AppSnapshot, Candidate, NativeFrame, Phase } from './ipc/model.ts';
+import type { PreviewFrame } from './preview/frame-types.ts';
+import { isBinaryFrame } from './preview/frame-types.ts';
 import { hasDockCandidate } from './request-state.ts';
 
 export function applySnapshot(current: AppSnapshot | null, incoming: AppSnapshot): AppSnapshot {
   return current && incoming.revision <= current.revision ? current : incoming;
 }
 
-export function acceptFrame(state: AppSnapshot, current: NativeFrame | null, frame: NativeFrame): NativeFrame | null {
-  if (frame.sessionId !== state.sessionId || frame.generation !== state.build.generation || frame.buildId !== state.build.buildId
+export function acceptFrame(state: AppSnapshot, current: PreviewFrame | null, frame: PreviewFrame): PreviewFrame | null {
+  if ((isBinaryFrame(frame) && frame.workspaceId !== state.project?.id)
+    || frame.sessionId !== state.sessionId || frame.generation !== state.build.generation || frame.buildId !== state.build.buildId
     || (current?.sessionId === frame.sessionId && current.buildId === frame.buildId
       && current.generation === frame.generation && frame.sequence <= current.sequence)) return current;
   return frame;
@@ -51,7 +54,7 @@ export interface UiState {
 }
 
 /** Frame metadata is validated again before display; pixels remain owned by the native transport. */
-export function frameMetadataValid(frame: NativeFrame): boolean {
+export function frameMetadataValid(frame: PreviewFrame): boolean {
   return Number.isSafeInteger(frame.width) && frame.width > 0 && frame.width <= 8192
     && Number.isSafeInteger(frame.height) && frame.height > 0 && frame.height <= 8192
     && frame.width * frame.height <= 16 * 1024 * 1024
@@ -59,11 +62,15 @@ export function frameMetadataValid(frame: NativeFrame): boolean {
     && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0
     && Number.isFinite(frame.capturedAt) && frame.capturedAt >= 0
     && [0, 90, 180, 270].includes(frame.rotation)
-    && typeof frame.pngBase64 === 'string' && frame.pngBase64.length > 0 && frame.pngBase64.length <= 16 * 1024 * 1024;
+    && (isBinaryFrame(frame) ? frame.protocolVersion === 1 && frame.format === 'jpeg'
+      && frame.jpeg instanceof ArrayBuffer && frame.jpeg.byteLength === frame.payloadLength
+      && frame.payloadLength > 0 && frame.payloadLength <= 1024 * 1024 - 40
+      : typeof frame.pngBase64 === 'string' && frame.pngBase64.length > 0 && frame.pngBase64.length <= 16 * 1024 * 1024);
 }
 
-export function frameBelongsToCurrentBuild(state: AppSnapshot | null, frame: NativeFrame | null): boolean {
+export function frameBelongsToCurrentBuild(state: AppSnapshot | null, frame: PreviewFrame | null): boolean {
   return Boolean(state?.sessionId && state.target && state.project && frame && frameMetadataValid(frame)
+    && (!isBinaryFrame(frame) || frame.workspaceId === state.project?.id)
     && frame.sessionId === state.sessionId && frame.buildId === state.build.buildId
     && frame.generation === state.build.generation);
 }
@@ -78,7 +85,7 @@ export function mapFramePoint(frame: Pick<NativeFrame, 'width' | 'height'>,
 }
 
 /** These dimensions describe confirmed backend state, never a timer or a predicted command result. */
-export function deriveUiState(state: AppSnapshot | null, frame: NativeFrame | null): UiState {
+export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | null): UiState {
   const binding: BindingState = state?.phase === 'unsupported' ? 'unavailable'
     : hasDockCandidate(state?.dockHint) ? 'candidate' : state?.target ? 'bound' : 'unbound';
   const workspace: WorkspaceState = state?.phase === 'discovering' ? 'discovering'

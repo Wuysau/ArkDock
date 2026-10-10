@@ -1,10 +1,15 @@
-import type { AppSnapshot, NativeFrame } from './ipc/model.ts';
-import { acceptFrame, frameMetadataValid } from './view-state.ts';
+import type { AppSnapshot } from './ipc/model.ts';
+import type { PreviewFrame } from './preview/frame-types.ts';
+import { acceptFrame, frameBelongsToCurrentBuild, frameMetadataValid } from './view-state.ts';
 
 export interface FrameStore {
-  getSnapshot: () => NativeFrame | null;
+  getSnapshot: () => PreviewFrame | null;
+  getDisplayed: () => PreviewFrame | null;
+  subscribeDisplayed: (listener: () => void) => () => void;
+  markDisplayed: (frame: PreviewFrame) => boolean;
+  isPresentable: (frame: PreviewFrame) => boolean;
   subscribe: (listener: () => void) => () => void;
-  push: (state: AppSnapshot, frame: NativeFrame) => void;
+  push: (state: AppSnapshot, frame: PreviewFrame) => void;
   sync: (state: AppSnapshot | null) => void;
   clear: () => void;
   dispose: () => void;
@@ -30,10 +35,13 @@ function identity(state: AppSnapshot | null): string | null {
 /** One latest-frame mailbox; only PreviewStage subscribes to pixel changes. */
 export function createFrameStore(scheduler: FrameScheduler = browserScheduler): FrameStore {
   let snapshot: AppSnapshot | null = null;
-  let current: NativeFrame | null = null;
+  let current: PreviewFrame | null = null;
+  let displayed: PreviewFrame | null = null;
   let scheduled: number | null = null;
   let disposed = false;
   const listeners = new Set<() => void>();
+  const displayedListeners = new Set<() => void>();
+  function notifyDisplayed() { for (const listener of displayedListeners) listener(); }
   function notify() {
     if (disposed || scheduled !== null || listeners.size === 0) return;
     scheduled = scheduler.requestFrame(() => {
@@ -42,18 +50,34 @@ export function createFrameStore(scheduler: FrameScheduler = browserScheduler): 
     });
   }
   function clear() {
-    if (current === null) return;
+    if (current === null && displayed === null) return;
     current = null;
+    displayed = null;
+    notifyDisplayed();
     notify();
   }
   function sync(state: AppSnapshot | null) {
     if (disposed || (state && snapshot && state.revision < snapshot.revision)) return;
     const changed = identity(snapshot) !== identity(state);
     snapshot = state;
-    if (changed || !state?.target || !state.sessionId || !state.project || !state.trusted || state.phase === 'stopped') clear();
+    if (changed || !state?.target || !state.sessionId || !state.project || !state.trusted || state.phase === 'stopped' || state.phase === 'crashed') clear();
+  }
+  function isPresentable(frame: PreviewFrame) {
+    return !disposed && current === frame && frameBelongsToCurrentBuild(snapshot, frame) && !snapshot?.build.error
+      && (snapshot?.phase === 'running' || (snapshot?.phase === 'building' && snapshot.build.durationMs !== null));
   }
   return {
     getSnapshot: () => current,
+    getDisplayed: () => displayed,
+    subscribeDisplayed: (listener) => { if (disposed) return () => undefined; displayedListeners.add(listener); return () => { displayedListeners.delete(listener); }; },
+    isPresentable,
+    markDisplayed: (frame) => {
+      if (!isPresentable(frame)) return false;
+      if (displayed === frame) return true;
+      displayed = frame;
+      notifyDisplayed();
+      return true;
+    },
     subscribe: (listener) => {
       if (disposed) return () => undefined;
       listeners.add(listener);
@@ -80,8 +104,10 @@ export function createFrameStore(scheduler: FrameScheduler = browserScheduler): 
       if (scheduled !== null) scheduler.cancelFrame(scheduled);
       scheduled = null;
       current = null;
+      displayed = null;
       snapshot = null;
       listeners.clear();
+      displayedListeners.clear();
     },
   };
 }

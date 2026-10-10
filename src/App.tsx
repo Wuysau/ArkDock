@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { AppSnapshot, Candidate, CommandArgs, NativeFrame } from './ipc/model.ts';
+import type { AppSnapshot, Candidate, CommandArgs, InteractionMode } from './ipc/model.ts';
 import { nativeBridge } from './ipc/client.ts';
 import type { UiBridge } from './ipc/client.ts';
 import { applySnapshot, deriveUiState, filterCandidates, needsDirectoryFallback } from './view-state.ts';
 import { createFrameStore } from './frame-store.ts';
 import type { FrameStore } from './frame-store.ts';
-import { PreviewStage } from './PreviewStage.tsx';
+import { BinaryFrameController } from './preview/BinaryFrameController.ts';
+import type { PreviewFrame } from './preview/frame-types.ts';
+import { InspectorToolbar } from './inspector/InspectorToolbar.tsx';
+import { InspectorPreview } from './inspector/InspectorPreview.tsx';
 import { PreviewCapabilities } from './PreviewCapabilities.tsx';
 import { Icon } from './Icon.tsx';
 import { Sheet } from './Sheet.tsx';
@@ -59,6 +62,11 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const [state, setState] = useState<AppSnapshot | null>(null);
   const stateRef = useRef<AppSnapshot | null>(null);
   const [store] = useState(createFrameStore);
+  const frameController = useRef<BinaryFrameController | null>(null);
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('interact');
+  const inputPending = useRef(false);
+  const [previewVisible, setPreviewVisible] = useState(true);
+  const previewVisibleRef = useRef(true);
   const [panel, setPanel] = useState<Panel>(null);
   const panelAnchor = useRef<HTMLElement | null>(null);
   const navigationRevision = useRef(0);
@@ -86,17 +94,23 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       if (lost && !cancelRequested.current && activeCommand.current !== 'detach') setFeedback('目标窗口不可用，已解除绑定。');
     }
     stateRef.current = updated; store.sync(updated); setState(updated);
+    frameController.current?.update(updated);
   }, [store]);
   useEffect(() => {
     let live = true;
     let unsubscribe: (() => void) | undefined;
-    if (connected) bridge.observe((value) => { if (live) receive(value); }, (frame) => { if (live && stateRef.current) store.push(stateRef.current, frame); }).then(async (off) => {
+    const controller = bridge.readFrame ? new BinaryFrameController({ bridge: { request: bridge.request, readFrame: bridge.readFrame }, store, getState: () => stateRef.current, onSnapshot: receive, onMode: (_mode, reason) => { if (live && reason) setError(reason); } }) : null;
+    frameController.current = controller;
+    controller?.update(stateRef.current);
+    const visibility = () => controller?.setVisible(previewVisibleRef.current && !document.hidden);
+    visibility(); document.addEventListener('visibilitychange', visibility);
+    if (connected) bridge.observe((value) => { if (live) receive(value); }, (frame) => { if (live && stateRef.current) { if (controller) controller.acceptLegacy(frame); else store.push(stateRef.current, frame); } }, (visible) => { if (live && previewVisibleRef.current !== visible) { previewVisibleRef.current = visible; setPreviewVisible(visible); visibility(); } }).then(async (off) => {
       if (!live) { off(); return; }
       unsubscribe = off;
       const snapshot = await bridge.request('snapshot', {});
       if (live) receive(snapshot);
     }).catch((reason: unknown) => { if (live) setError(String(reason)); });
-    return () => { live = false; unsubscribe?.(); store.clear(); };
+    return () => { live = false; unsubscribe?.(); document.removeEventListener('visibilitychange', visibility); controller?.dispose(); if (frameController.current === controller) frameController.current = null; store.clear(); };
   }, [bridge, connected, store, receive]);
   useEffect(() => { applyTheme(theme); }, [theme]);
   useEffect(() => { applyMotion(motion); }, [motion]);
@@ -158,6 +172,16 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     try { await navigator.clipboard.writeText(text); setFeedback(`${label}已复制`); }
     catch { setError('当前环境无法访问剪贴板。可在路径或诊断中选中文字复制。'); }
   }
+  async function clickNative(frame: PreviewFrame, x: number, y: number) {
+    if (inputPending.current || pendingRef.current || interactionMode !== 'interact') return;
+    const actual = stateRef.current;
+    if (!deriveUiState(actual, frame).inputAllowed) return;
+    const scope = { targetId: actual?.target?.id ?? null, sessionId: actual?.sessionId ?? null };
+    inputPending.current = true;
+    try { frameController.current?.wake(); receive(await bridge.request('click_preview', { buildId: frame.buildId, generation: frame.generation, x, y }, scope)); }
+    catch (reason) { if (scope.targetId === stateRef.current?.target?.id && scope.sessionId === stateRef.current?.sessionId) setError(String(reason)); }
+    finally { inputPending.current = false; }
+  }
   const candidates = filterCandidates(state?.candidates ?? [], search);
   const busy = pending !== null;
   const working = state?.phase === 'discovering' || state?.phase === 'building';
@@ -167,8 +191,8 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       <header className="header"><button className="drag-zone drag" aria-label="拖动 ArkDock 到目标应用窗口外侧" title="按住顶部，拖到目标窗口右侧" onPointerDown={(event) => { if (event.button === 0 && connected) void act('begin_drag', {}); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setFeedback('键盘移动：Alt+空格打开系统窗口菜单，选择移动。'); } }}><Icon name="grip" size={15} /><span className="mark" aria-hidden="true"><span /><span /></span><strong>ArkDock</strong></button><span className={`header-status ${ui.binding === 'bound' ? 'connected' : ''}`} title={state?.target?.title ?? statusText}><span className="dot" />{statusText}</span><div className="header-actions"><button className="icon-button" aria-label="更多操作" title="更多操作" onClick={() => navigate('menu')}><span className="ellipsis" aria-hidden="true">···</span></button><button className="icon-button minimize" disabled={!connected || busy} aria-label="最小化窗口" title={connected ? '最小化窗口' : '桌面桥接未连接'} onClick={() => void act('minimize_window', {})}><span aria-hidden="true">−</span></button><button className="icon-button maximize" disabled={!connected || busy || !pair.enabled} aria-label={pair.action} title={pair.reason} onClick={() => void act(pair.command, {})}><Icon name={pair.state === 'maximized' ? 'restore' : 'maximize'} size={16} /></button><button className="icon-button close-window" disabled={!connected || busy} aria-label="关闭 ArkDock" title={connected ? '关闭 ArkDock' : '桌面桥接未连接'} onClick={() => void act('close_window', {})}><Icon name="close" size={17} /></button></div></header>
       <section className="workspace-strip" aria-label="当前工程"><button className="workspace-main" aria-label="工程" onClick={() => navigate(state?.project ? 'path' : 'projects')} title={state?.project?.appRoot ?? '查看工程候选'}><span className="workspace-icon"><Icon name="folder" size={18} /></span><span><strong>{state?.project?.name ?? '尚未关联工程'}</strong><span className="workspace-path">{state?.project ? `${environments[state.project.environment]} · ${state.project.module}` : '拖动贴边后，只读识别当前工程'}</span></span><Icon name="chevron" size={15} /></button><button className="icon-button" disabled={!state?.target || busy} aria-label="重新识别" title={!state?.target ? '先连接开发窗口' : '重新读取目标工程线索'} onClick={() => void act('rediscover', {})}><Icon name="refresh" size={17} /></button></section>
       <output key={`${state?.phase}-${ui.workspace}-${state?.dockHint ?? ''}`} className={`state-strip ${working ? 'working' : ''}`}><Icon name={state?.trusted ? 'shield' : 'link'} size={14} /><span>{hasDockCandidate(state?.dockHint) ? '松开以连接 · 靠近目标外侧' : state?.dockHint ?? (state?.target ? ui.workspaceLabel : '独立悬浮 · 拖到开发窗口旁开始')}</span>{state?.target && <span className={`pair-badge ${pair.pending ? 'pending' : ''}`} title={pair.reason}>{pair.state === 'maximized' ? '共同最大化' : pair.pending ? '布局调整中' : pair.state === 'blocked' ? '布局受限' : pair.state === 'paired' ? '全贴合' : '等待布局'}</span>}{working && <span className="task-spinner" />}{state?.phase === 'discovering' && <button className="cancel-discovery" disabled={cancelling} title="解除绑定，使当前关联会话失效；正在进行的只读检查等待后端返回" onClick={() => void cancelAssociation()}>{cancelling ? '取消中…' : '取消关联'}</button>}</output>
-      <section className="preview-toolbar" aria-label="预览控制"><div className="toolbar-selects"><label><span className="sr-only">运行方式</span><select aria-label="运行方式" value="native" title={state?.backend.reason ?? '等待桌面后端'} onChange={() => {}}><option value="native">原生 Previewer{state?.backend.available ? '' : ' · 待就绪'}</option><option disabled>模拟器 · 未支持</option><option disabled>真机 · 未支持</option></select></label><label><span className="sr-only">页面或组件</span><select aria-label="页面或组件" disabled title="当前适配器仅支持默认 pages/Index；页面切换未接入"><option>Index · 默认页面</option></select></label><button className={`icon-button refresh-button ${pending === 'refresh_preview' ? 'pending' : ''}`} disabled={ui.capabilities.refresh.status !== 'available' || busy} aria-label="手动刷新" title={ui.capabilities.refresh.reason} onClick={() => void act('refresh_preview', {})}><Icon name="refresh" size={18} /></button></div><div className="toolbar-actions"><button className="stop-button" disabled={ui.capabilities.stop.status !== 'available' || busy} title={ui.capabilities.stop.reason} aria-label="停止预览" onClick={() => void act('stop_preview', {})}><Icon name="stop" size={14} /><span>停止</span></button><label className="zoom-control"><select aria-label="画面缩放" value={zoom} onChange={(event) => setZoom(event.target.value === 'fit' ? 'fit' : Number(event.target.value))}><option value="fit">适应窗口</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option></select></label><span className="toolbar-divider" /><span className="mode-caption"><Icon name="device" size={14} />原生画面</span><button className="icon-button" aria-label="预览能力" title="查看方向、应用主题和输入能力" onClick={() => navigate('controls')}><Icon name="settings" size={17} /></button></div></section>
-      <section className="preview" aria-label="原生预览画面"><div className="stage-caption"><span><span className={`tiny-dot ${state?.phase === 'running' ? 'live' : ''}`} />{state?.backend.available ? 'NATIVE PREVIEW' : 'PREVIEW WORKSPACE'}</span><span>{state?.backend.sdkVersion ? `SDK ${state.backend.sdkVersion}` : '等待工具链'}</span></div><PreviewStage snapshot={state} store={store} zoom={zoom} busy={busy} onClick={(frame: NativeFrame, x: number, y: number) => { void act('click_preview', { buildId: frame.buildId, generation: frame.generation, x, y }); }} /><EmptyState snapshot={state} store={store} connected={connected} navigate={navigate} /></section>
+      <section className="preview-toolbar" aria-label="预览控制"><div className="toolbar-selects"><InspectorToolbar mode={interactionMode} enabled={Boolean(state?.phase === 'running' && state.trusted && state.backend.available)} change={setInteractionMode} /><label><span className="sr-only">运行方式</span><select aria-label="运行方式" value="native" title={state?.backend.reason ?? '等待桌面后端'} onChange={() => {}}><option value="native">原生 Previewer{state?.backend.available ? '' : ' · 待就绪'}</option><option disabled>模拟器 · 未支持</option><option disabled>真机 · 未支持</option></select></label><label><span className="sr-only">页面或组件</span><select aria-label="页面或组件" disabled title="当前适配器仅支持默认 pages/Index；页面切换未接入"><option>Index · 默认页面</option></select></label><button className={`icon-button refresh-button ${pending === 'refresh_preview' ? 'pending' : ''}`} disabled={ui.capabilities.refresh.status !== 'available' || busy} aria-label="手动刷新" title={ui.capabilities.refresh.reason} onClick={() => void act('refresh_preview', {})}><Icon name="refresh" size={18} /></button></div><div className="toolbar-actions"><button className="stop-button" disabled={ui.capabilities.stop.status !== 'available' || busy} title={ui.capabilities.stop.reason} aria-label="停止预览" onClick={() => void act('stop_preview', {})}><Icon name="stop" size={14} /><span>停止</span></button><label className="zoom-control"><select aria-label="画面缩放" value={zoom} onChange={(event) => setZoom(event.target.value === 'fit' ? 'fit' : Number(event.target.value))}><option value="fit">适应窗口</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option></select></label><span className="toolbar-divider" /><span className="mode-caption"><Icon name="device" size={14} />原生画面</span><button className="icon-button" aria-label="预览能力" title="查看方向、应用主题和输入能力" onClick={() => navigate('controls')}><Icon name="settings" size={17} /></button></div></section>
+      <section className="preview" aria-label="原生预览画面"><div className="stage-caption"><span><span className={`tiny-dot ${state?.phase === 'running' ? 'live' : ''}`} />{state?.backend.available ? 'NATIVE PREVIEW' : 'PREVIEW WORKSPACE'}</span><span>{state?.backend.sdkVersion ? `SDK ${state.backend.sdkVersion}` : '等待工具链'}</span></div><InspectorPreview visible={previewVisible} bridge={bridge} interactionMode={interactionMode} exit={() => setInteractionMode('interact')} snapshot={state} store={store} zoom={zoom} busy={busy} onClick={(frame, x, y) => void clickNative(frame, x, y)} /><EmptyState snapshot={state} store={store} connected={connected} navigate={navigate} /></section>
       {state?.layoutRequired && <aside className="layout-notice"><Icon name="monitor" size={18} /><div><p>右侧空间不足。并排布局会调整目标窗口。</p><label><input type="checkbox" checked={layoutConsent} onChange={(event) => setLayoutConsent(event.target.checked)} />同意调整目标窗口</label></div><button disabled={!layoutConsent || busy} onClick={() => { void act('arrange_side_by_side', { consent: true }); setLayoutConsent(false); }}>应用布局</button></aside>}
       <BuildStatusBar snapshot={state} store={store} pending={pending} open={() => navigate('diagnostics')} />
     </div>

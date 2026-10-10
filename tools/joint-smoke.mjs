@@ -5,6 +5,8 @@ import {mkdirSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {connectWebview} from './webview-driver.mjs';
 const evidence=process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/joint-layout-2026-10-09';
+const ownedPid=Number(process.env.ARKDOCK_TEST_PID ?? process.env.ARKDOCK_PROBE_PID);
+const debugPort=Number(process.env.ARKDOCK_TEST_PORT ?? process.env.ARKDOCK_PROBE_PORT ?? 9223);
 const checks=[],measurements=[];
 const pause=ms=>new Promise(done=>setTimeout(done,ms));
 let view,host,dockHandle,dockPid,target;
@@ -64,9 +66,10 @@ async function bind(alreadyMaximized=false) {
 }
 try {
   mkdirSync(evidence,{recursive:true});
-  view=await connectWebview();
-  const dock=JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','Get-Process -Name arkdock | Select-Object -First 1 Id | ConvertTo-Json -Compress'],{encoding:'utf8',windowsHide:true}));
-  dockPid=dock.Id;dockHandle=action('find',0,{ProcessId:dockPid}).handle;assert.ok(dockHandle);
+  assert.ok(Number.isSafeInteger(ownedPid)&&ownedPid>0,'Explicit task-owned ArkDock PID required');
+  view=await connectWebview(debugPort,5000,process.env.ARKDOCK_TEST_URL ?? 'http://127.0.0.1:1420/',ownedPid);
+  assert.equal((await snapshot()).target,null,'Dedicated test instance must begin detached');
+  dockPid=ownedPid;dockHandle=action('find',0,{ProcessId:dockPid}).handle;assert.ok(dockHandle);
   host=spawn('pwsh',['-NoProfile','-File',resolve('tests/native/window-host.ps1')],{windowsHide:true,stdio:['ignore','pipe','pipe']});
   target=await new Promise((done,reject)=>{
     let output='',errors='';const timer=setTimeout(()=>reject(new Error(`Fixture startup ${errors}`)),10000);
