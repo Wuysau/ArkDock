@@ -1,5 +1,9 @@
 # ArkDock
 
+## License
+
+ArkDock's own source code is licensed under [Apache License 2.0](LICENSE). It preserves copyright and license notices and grants relevant contributor patents. It permits commercial use, modification, and redistribution; it cannot prohibit lawful uses or guarantee that others will not misuse the code. Third-party components retain their separate licenses in `src-tauri/resources/third-party-notices.txt`. The HarmonyOS SDK and Previewer are not covered by this license and are not distributed here.
+
 鸿蒙外置贴边预览伴侣。Windows 11 独立桌面窗口，跟随普通应用或终端，
 以证据关联实际工程。Rust 管理系统能力，React 显示后端状态。
 
