@@ -4,6 +4,10 @@
 use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
 use super::frames::{parse_jpeg40, BinaryFrameMailbox};
 use super::NativePoint;
+use crate::inspector::{
+    InspectionReceiver, InspectionRequest, InspectorCommand, RawInspectionResponse,
+    INSPECTION_TIMEOUT_MS,
+};
 use crate::ipc::model::ProjectRef;
 use crate::scheduler::BuildTask;
 use sha2::{Digest, Sha256};
@@ -97,6 +101,7 @@ struct WorkerContext<'a> {
     frames: &'a Mutex<BinaryFrameMailbox>,
     inputs: &'a mpsc::Receiver<NativePoint>,
     messages: &'a mpsc::SyncSender<String>,
+    inspections: &'a mpsc::Receiver<InspectionRequest>,
 }
 
 pub(super) fn verified_root(root: &Path, version: &str) -> Option<PathBuf> {
@@ -160,6 +165,7 @@ pub(super) struct Runtime {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     inputs: mpsc::SyncSender<NativePoint>,
+    inspections: mpsc::SyncSender<InspectionRequest>,
     pub completed: mpsc::Receiver<Completed>,
     pub frames: Arc<Mutex<BinaryFrameMailbox>>,
     pub messages: mpsc::Receiver<String>,
@@ -169,6 +175,7 @@ impl Runtime {
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(Mutex::new(BinaryFrameMailbox::new()));
         let (inputs, input_receiver) = mpsc::sync_channel(16);
+        let (inspections, inspection_receiver) = mpsc::sync_channel(2);
         let (completed_tx, completed) = mpsc::sync_channel(2);
         let (message_tx, messages) = mpsc::sync_channel(16);
         let worker_stop = stop.clone();
@@ -184,6 +191,7 @@ impl Runtime {
                     frames: &worker_frames,
                     inputs: &input_receiver,
                     messages: &message_tx,
+                    inspections: &inspection_receiver,
                 },
                 || {
                     let _ = completed_tx.try_send((task.clone(), Ok(())));
@@ -204,6 +212,7 @@ impl Runtime {
             stop,
             thread: Some(thread),
             inputs,
+            inspections,
             completed,
             frames,
             messages,
@@ -216,6 +225,16 @@ impl Runtime {
         self.inputs
             .try_send(point)
             .map_err(|_| "INPUT_QUEUE_BUSY".into())
+    }
+    pub fn request_inspection(
+        &self,
+        command: InspectorCommand,
+    ) -> Result<InspectionReceiver, String> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.inspections
+            .try_send(InspectionRequest { command, reply })
+            .map_err(|_| "INSPECTOR_QUEUE_BUSY".to_string())?;
+        Ok(response)
     }
 }
 impl Drop for Runtime {
@@ -290,23 +309,34 @@ impl Pipe {
                 }
                 self.connected = true;
             }
+            // Drain at most 64 KiB per tick. SDK26 Inspector trees are larger
+            // than one ReadFile buffer; one read per frame tick added avoidable
+            // latency. The bounded drain still yields to the frame receiver.
             let mut bytes = [0u8; 8192];
-            let mut count = 0;
-            if ReadFile(
-                self.handle,
-                bytes.as_mut_ptr().cast(),
-                bytes.len() as u32,
-                &mut count,
-                null_mut(),
-            ) == 0
-            {
-                let error = GetLastError();
-                if error == ERROR_NO_DATA {
-                    return Ok(Vec::new());
+            for _ in 0..8 {
+                let mut count = 0;
+                if ReadFile(
+                    self.handle,
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len() as u32,
+                    &mut count,
+                    null_mut(),
+                ) == 0
+                {
+                    let error = GetLastError();
+                    if error == ERROR_NO_DATA {
+                        break;
+                    }
+                    return Err(format!("PIPE_READ: {error}"));
                 }
-                return Err(format!("PIPE_READ: {error}"));
+                self.buffer.extend_from_slice(&bytes[..count as usize]);
+                if self.buffer.len() > FRAME_LIMIT {
+                    return Err("COMMAND_PAYLOAD_LIMIT".into());
+                }
+                if count == 0 {
+                    break;
+                }
             }
-            self.buffer.extend_from_slice(&bytes[..count as usize]);
         }
         if self.buffer.len() > FRAME_LIMIT {
             return Err("COMMAND_PAYLOAD_LIMIT".into());
@@ -338,6 +368,28 @@ impl Pipe {
                 || written as usize != bytes.len()
             {
                 return Err("INPUT_PIPE_BACKPRESSURE".into());
+            }
+        }
+        Ok(())
+    }
+    fn inspector(&self, command: InspectorCommand) -> Result<(), String> {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "version": "1.0.1", "type": "action", "command": command.wire_name(), "args": {}
+        }))
+        .map_err(|e| e.to_string())?;
+        bytes.push(0);
+        unsafe {
+            let mut written = 0;
+            if WriteFile(
+                self.handle,
+                bytes.as_ptr().cast(),
+                bytes.len() as u32,
+                &mut written,
+                null_mut(),
+            ) == 0
+                || written as usize != bytes.len()
+            {
+                return Err("INSPECTOR_PIPE_BACKPRESSURE".into());
             }
         }
         Ok(())
@@ -404,6 +456,7 @@ fn run(
         frames,
         inputs,
         messages,
+        inspections,
     } = context;
     if project.variant != "default"
         || project.module.is_empty()
@@ -637,6 +690,9 @@ fn run(
     let mut first = true;
     let mut sequence = 0;
     let mut release = None;
+    let mut inspection: Option<(InspectionRequest, Instant, u64, u64)> = None;
+    let mut inspection_poisoned = false;
+    let mut query_id = 0u64;
     while !stop.load(Ordering::Acquire) {
         if let Some(code) = previewer.exit_code()? {
             return Err(format!("PREVIEWER_EXIT: {code}"));
@@ -645,11 +701,75 @@ fn run(
             return Err("PREVIEWER_LOG_LIMIT".into());
         }
         for message in command.receive(previewer.pid)? {
+            if message
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| name == "inspector" || name == "inspectorDefault")
+            {
+                if inspection.as_ref().is_some_and(|(request, _, _, _)| {
+                    message.get("command").and_then(|v| v.as_str())
+                        == Some(request.command.wire_name())
+                }) {
+                    let (request, _, requested_at, id) =
+                        inspection.take().expect("matched pending inspection");
+                    let response = message
+                        .get("result")
+                        .cloned()
+                        .ok_or("INSPECTOR_RESULT_MISSING".to_string())
+                        .map(|result| RawInspectionResponse {
+                            command: request.command,
+                            protocol_version: message
+                                .get("version")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .into(),
+                            result,
+                            frame_sequence: sequence,
+                            requested_at,
+                            received_at: super::now_ms(),
+                            query_id: id,
+                            task: task.clone(),
+                        });
+                    let _ = request.reply.try_send(response);
+                }
+                continue;
+            }
             if message.get("result") == Some(&serde_json::Value::Bool(false)) {
                 return Err("NATIVE_COMMAND_REJECTED".into());
             }
         }
         trace.receive(previewer.pid)?;
+        if inspection.as_ref().is_some_and(|(_, sent, _, _)| {
+            sent.elapsed() >= Duration::from_millis(INSPECTION_TIMEOUT_MS)
+        }) {
+            if let Some((request, _, _, _)) = inspection.take() {
+                let _ = request.reply.try_send(Err(
+                    "INSPECTOR_TIMEOUT: response correlation unavailable until runtime restart"
+                        .into(),
+                ));
+            }
+            // The wire has no request IDs. Never let a late response satisfy another query.
+            inspection_poisoned = true;
+        }
+        if !first && inspection.is_none() {
+            if let Ok(request) = inspections.try_recv() {
+                if inspection_poisoned {
+                    let _ = request
+                        .reply
+                        .try_send(Err("INSPECTOR_CHANNEL_UNVERIFIED_AFTER_TIMEOUT".into()));
+                } else {
+                    match command.inspector(request.command) {
+                        Ok(()) => {
+                            query_id = query_id.saturating_add(1);
+                            inspection = Some((request, Instant::now(), super::now_ms(), query_id));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.try_send(Err(error));
+                        }
+                    }
+                }
+            }
+        }
         if let Some((point, due)) = release {
             if Instant::now() >= due {
                 command.mouse("MouseRelease", point)?;

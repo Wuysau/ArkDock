@@ -26,15 +26,17 @@ test('正式路径不能自动选择测试后端', () => {
 
 test('Rust 自定义命令的参数与单一 IPC 定义一致', () => {
   const definition = JSON.parse(readFileSync('protocol/model.json', 'utf8'));
-  const source = readFileSync('src-tauri/src/desktop.rs', 'utf8');
+  const source = ['src-tauri/src/desktop.rs', 'src-tauri/src/desktop/inspection.rs'].map((path) => readFileSync(path, 'utf8')).join('\n');
   for (const [name, fields] of Object.entries(definition.commands)) {
     const response = definition.commandResponses?.[name] ?? { rust: 'AppSnapshot', error: 'String' };
     const result = `Result<${response.rust}, ${response.error}>`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const signature = source.match(new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${name}\\(([^)]*)\\)\\s*->\\s*${result}`));
+    const signature = source.match(new RegExp(`#\\[tauri::command\\]\\s*(?:pub\\(crate\\) )?(?:async )?fn ${name}\\(([^)]*)\\)\\s*->\\s*${result}`));
     assert.ok(signature, `未注册/契约返回值错误：${name}`);
     for (const [field, type] of Object.entries(fields)) {
       const rustName = field.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`);
-      const rustType = { string: 'String', bool: 'bool' }[type] ?? type;
+      const baseType = type.replace(/\?$/, '');
+      const mapped = { string: 'String', bool: 'bool' }[baseType] ?? baseType;
+      const rustType = type.endsWith('?') ? `Option<${mapped}>` : mapped;
       assert.ok(signature[1].includes(`${rustName}: ${rustType}`), `${name}.${field} 参数漂移`);
     }
   }

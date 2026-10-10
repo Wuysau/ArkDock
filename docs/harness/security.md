@@ -35,7 +35,16 @@ CreateProcessW 暂停创建、先加入 kill-on-close Windows Job 再恢复，�
 
 原生管道用随机 128 位名称、所有者 DACL、拒绝远程连接，并核验实际客户端 PID。
 图像连接只接受经 TCP 表核验的自有 Previewer 回环端口，使用随机 session 路径。
-帧 1 MiB、360×640 JPEG 解码/PNG 重编码；命令 1 MiB、输入队列 16、最新帧邮箱 1。
+帧 1 MiB、360×640 JPEG 受限验证；主路径原始二进制，PNG/base64 仅显式兼容消费。
+命令 1 MiB、输入队列 16、最新未读帧邮箱 1；已接收截图归档另限 8 帧/4 MiB。
+二进制消费者每次重新协商使用独立 consumerId，旧读取和迟到关闭不能影响后继。
+原生窗口可见性只读取经当前进程 PID 核验的 main HWND，不操作外部窗口，也不因
+WebView2 document.hidden 的不一致继续消费/绘制最小化画面。
+Inspector 最多一条查询在途；无请求 ID 的 SDK 管道超时后关闭该查询能力直到运行时替换，
+不把迟到同名响应当新树。原生属性是数据；组件树和 JPEG 内容锚点变化后拒绝旧边界。
+选择图片只来自该受控原生表面；本地 TTL 10 分钟，MCP 需明确选择/工作区/会话/tool grant，
+并每次校验至多 10 秒的运行时 lease。打包宿主的 Windows AppData 子目录重定向可绑定
+实际固定子目录；仍拒绝 reparse/symlink，图片和上下文读取均核验范围、长度与 SHA256。
 同用户恶意进程仍不属于强隔离安全模型；协议不是供外部客户端执行命令的服务。
 具体版本、实验与正式验收分别见 [SDK 证据](../evidence/sdk-26-preview.md)。
 

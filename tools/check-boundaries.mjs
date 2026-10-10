@@ -5,7 +5,7 @@ const errors = [];
 for (const path of sourceFiles('src')) {
   if (!/\.(ts|tsx)$/.test(path)) continue;
   const code = readFileSync(path, 'utf8');
-  if (/node:|@tauri-apps\/plugin-(shell|fs|process)|child_process|SetParent|EnumWindows|SetWindowPos/.test(code)) errors.push(`${path}: UI 禁止系统/进程能力`);
+  if (/["']node:|@tauri-apps\/plugin-(shell|fs|process)|child_process|SetParent|EnumWindows|SetWindowPos/.test(code)) errors.push(`${path}: UI 禁止系统/进程能力`);
   if (!path.startsWith('src/ipc/') && /__TAURI__|\binvoke\s*\(|\bfetch\s*\(|\bWebSocket\s*\(/.test(code)) errors.push(`${path}: 原生/网络入口必须集中于 src/ipc`);
 }
 const capability = JSON.parse(readFileSync('src-tauri/capabilities/main.json', 'utf8'));

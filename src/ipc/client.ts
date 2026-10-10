@@ -1,4 +1,4 @@
-import type { AppSnapshot, CommandArgs, CommandResults, NativeFrame, RequestScope } from './model.ts';
+import type { AppSnapshot, CommandArgs, CommandResults, NativeFrame, PreviewVisibility, RequestScope } from './model.ts';
 
 interface DesktopBridge {
   core: { invoke<T>(command: string, args?: object): Promise<T> };
@@ -10,12 +10,16 @@ export interface UiBridge {
   available: boolean;
   request: typeof request;
   observe: typeof observe;
+  readFrame?: typeof readPreviewFrame;
+  transfer?: typeof transfer;
 }
 
 export const nativeBridge: UiBridge = {
   get available() { return desktopAvailable(); },
   request,
   observe,
+  readFrame: readPreviewFrame,
+  transfer,
 };
 
 export function desktopAvailable(): boolean { return Boolean(window.__TAURI__); }
@@ -35,21 +39,34 @@ export async function readMotionMetrics(scope: RequestScope): Promise<CommandRes
   return desktop.core.invoke<CommandResults['get_motion_metrics']>('get_motion_metrics', { scope });
 }
 
-export async function readPreviewFrame(scope: RequestScope, protocolVersion: number): Promise<CommandResults['read_preview_frame']> {
+export async function readPreviewFrame(scope: RequestScope, protocolVersion: number, consumerId: string): Promise<CommandResults['read_preview_frame']> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。');
-  const args: CommandArgs['read_preview_frame'] = { scope, protocolVersion };
+  const args: CommandArgs['read_preview_frame'] = { scope, protocolVersion, consumerId };
   const bytes = await desktop.core.invoke<CommandResults['read_preview_frame']>('read_preview_frame', args);
   if (!(bytes instanceof ArrayBuffer)) throw new Error('二进制帧响应类型错误。');
   return bytes;
 }
 
-export async function observe(state: (value: AppSnapshot) => void, frame: (value: NativeFrame) => void): Promise<() => void> {
+export type DataCommand = Exclude<keyof CommandArgs, 'read_preview_frame' | 'enable_binary_preview_frames' | 'disable_binary_preview_frames' | 'click_preview' | 'snapshot' | 'minimize_window' | 'close_window' | 'maximize_pair' | 'restore_pair' | 'begin_drag' | 'rediscover' | 'select_candidate' | 'select_directory' | 'detach' | 'set_trust' | 'configure_sdk' | 'refresh_preview' | 'stop_preview' | 'arrange_side_by_side'>;
+
+/** Typed data replies use the same validated desktop entry, outside AppSnapshot. */
+export async function transfer<K extends DataCommand>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope: RequestScope): Promise<CommandResults[K]> {
+  const desktop = window.__TAURI__;
+  if (!desktop) throw new Error('缺少桌面桥接。');
+  if (!scope.targetId || !scope.sessionId) throw new Error('需要当前目标与原生预览会话。');
+  return desktop.core.invoke<CommandResults[K]>(command, { ...args, scope });
+}
+
+export async function observe(state: (value: AppSnapshot) => void, frame: (value: NativeFrame) => void, visibility?: (visible: boolean) => void): Promise<() => void> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('浏览器调试不具备窗口和原生预览能力。');
   const offState = await desktop.event.listen<AppSnapshot>('arkdock:state', (event) => state(event.payload));
   let offFrame: () => void;
   try { offFrame = await desktop.event.listen<NativeFrame>('arkdock:frame', (event) => frame(event.payload)); }
   catch (error) { offState(); throw error; }
-  return () => { offState(); offFrame(); };
+  let offVisibility: () => void;
+  try { offVisibility = await desktop.event.listen<PreviewVisibility>('arkdock:visibility', (event) => visibility?.(event.payload.visible)); }
+  catch (error) { offState(); offFrame(); throw error; }
+  return () => { offState(); offFrame(); offVisibility(); };
 }

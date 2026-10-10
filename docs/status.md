@@ -1,5 +1,17 @@
 # 状态索引
 
+2026-10-10 Inspector/Agent 任务在独立 `feat/arkui-inspector-agent-bridge` 工作树实施，
+基线 `dev@db2bd49`；未覆盖原工程未提交修改或磁吸工作树，也未合并 dev。
+当前计划：[检查与交付计划](plans/active/arkui-inspector-agent.md)。
+真实 SDK Inspector 协议 PASS，组件树/截图证据见 [Inspector 验证](native-preview/inspector-validation.md)。
+稳定 Canvas、选择上下文、只读 MCP 和 Agent 能力路由已接入；源码提示 Candidate，
+Codex/Claude 当前会话直接发送 UNSUPPORTED。最终基础 verify 退出 0，便携 59/59 PASS。
+输入时钟 receiver 错误与同会话消费者竞态已修复；最终 p50/p95 180.7/305.2 → 140.0/207.3 ms。
+Inspector GUI 六组及实际 stdio MCP PASS；高频 155 帧/11.508 s、DPI 缩放、原生最小化暂停/恢复 PASS。
+desktop,native-tools all-targets 140 项 PASS；运行 exe 文件锁已通过私有副本启动解决。verify:native 8 组 PASS；中间驱动/SDK 缓存失败证据保留。
+共同布局 11 组 PASS，四列工具栏截图已核验。完整 [十二项报告与命令证据](evidence/inspector-agent-selection-2026-10-10.md)。
+下一步：在用户选择集成后对磁吸/悬浮球 hide/show、双屏 DPI 执行共同回归；取得宿主授权桥接后才实现当前 Agent 真实发送。
+
 2026-10-10：前端 feat/joint-dock-layout@4ebb828 与后端 feat/native-preview-backend@7cf47d0
 已正常合并至 integration/arkdock-frontend-native，来源 worktree 和本地未跟踪原件保持不变。
 dev 原先不存在，基线 main@c090418；backup/dev-before-integration-20261010 保留恢复点。

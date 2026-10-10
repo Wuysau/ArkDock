@@ -1,5 +1,6 @@
 // Development-only driver for the actual Windows WebView2, never a preview backend.
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { ownedDesktop } from './owned-desktop.mjs';
 
 export async function connectOwnedWebview(port = Number(process.env.ARKDOCK_DEBUG_PORT ?? 9223), timeoutMs = 5000, expectedUrl = process.env.ARKDOCK_UI_URL ?? 'http://127.0.0.1:1420/') {
@@ -21,13 +22,17 @@ export async function connectOwnedWebview(port = Number(process.env.ARKDOCK_DEBU
     }
     if(-not $taskOwned){throw 'Debugger belongs to another desktop instance; no IPC will be sent'}
   `], { encoding: 'utf8', windowsHide: true, timeout: 12_000 });
-  return connectWebview(port, timeoutMs, expectedUrl);
+  return connectWebview(port, timeoutMs, expectedUrl, desktop.Id);
 }
 
-export async function connectWebview(port = Number(process.env.ARKDOCK_DEBUG_PORT ?? 9223), timeoutMs = 5000, expectedUrl = process.env.ARKDOCK_UI_URL ?? 'http://127.0.0.1:1420/') {
+export async function connectWebview(port = Number(process.env.ARKDOCK_DEBUG_PORT ?? 9223), timeoutMs = 5000, expectedUrl = process.env.ARKDOCK_UI_URL ?? 'http://127.0.0.1:1420/', ownerPid) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid development debugger port');
   const requested = new URL(expectedUrl);
   if (requested.protocol !== 'http:' || requested.hostname !== '127.0.0.1' || requested.pathname !== '/') throw new Error('Only an explicitly configured local ArkDock main URL may be inspected');
+  if (ownerPid !== undefined) {
+    if (process.platform !== 'win32' || !Number.isSafeInteger(ownerPid) || ownerPid <= 0 || !Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('Explicit owned debugger identity is invalid');
+    execFileSync('pwsh', ['-NoProfile', '-File', fileURLToPath(new URL('../tests/native/debug-owner.ps1', import.meta.url)), '-Port', String(port), '-OwnerId', String(ownerPid)], { windowsHide: true, stdio: 'pipe', timeout: 10_000 });
+  }
   const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`, {signal:AbortSignal.timeout(timeoutMs)})).json();
   const page = pages.find((item) => item.type === 'page' && item.url === expectedUrl);
   if (!page) throw new Error('Requested ArkDock WebView2 was not found');

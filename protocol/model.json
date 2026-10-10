@@ -37,9 +37,23 @@
       "BLOCKED",
       "SKIPPED"
     ],
-    "DisplayMode": ["expanded", "collapsing", "orb", "expanding", "hidden"],
-    "MotionIntensity": ["off", "light", "standard", "enhanced"],
-    "DockSide": ["left", "right"],
+    "DisplayMode": [
+      "expanded",
+      "collapsing",
+      "orb",
+      "expanding",
+      "hidden"
+    ],
+    "MotionIntensity": [
+      "off",
+      "light",
+      "standard",
+      "enhanced"
+    ],
+    "DockSide": [
+      "left",
+      "right"
+    ],
     "PairLayoutState": [
       "unbound",
       "paired",
@@ -47,6 +61,36 @@
       "maximized",
       "restoring",
       "blocked"
+    ],
+    "InteractionMode": [
+      "interact",
+      "inspect"
+    ],
+    "SelectionKind": [
+      "region",
+      "component"
+    ],
+    "SourceEvidenceStatus": [
+      "verified",
+      "candidate",
+      "unavailable"
+    ],
+    "AgentKind": [
+      "codex",
+      "claude"
+    ],
+    "AgentTransportKind": [
+      "unsupported",
+      "explicitBridge"
+    ],
+    "DeliveryState": [
+      "READY",
+      "UNSUPPORTED",
+      "SESSION_UNVERIFIED",
+      "SENDING",
+      "SUBMITTED",
+      "FAILED",
+      "EXPIRED"
     ]
   },
   "structs": {
@@ -209,10 +253,149 @@
       "target": "TargetInfo",
       "bindingEvidence": "Evidence[]",
       "sdkId": "string?"
+    },
+    "PreviewVisibility": {
+      "visible": "bool"
+    },
+    "InspectorBounds": {
+      "x": "f64",
+      "y": "f64",
+      "width": "f64",
+      "height": "f64"
+    },
+    "InspectorAttribute": {
+      "name": "string",
+      "value": "string"
+    },
+    "InspectorNode": {
+      "nodeId": "string",
+      "componentType": "string?",
+      "parentId": "string?",
+      "children": "string[]",
+      "bounds": "InspectorBounds?",
+      "visible": "bool?",
+      "attributes": "InspectorAttribute[]",
+      "page": "string?",
+      "depth": "u32",
+      "paintOrder": "u32?"
+    },
+    "InspectorCapabilities": {
+      "available": "bool",
+      "status": "CheckStatus",
+      "reason": "string"
+    },
+    "InspectorTree": {
+      "workspaceId": "string",
+      "sessionId": "string",
+      "buildId": "string",
+      "generation": "u64",
+      "frameSequence": "u64",
+      "inspectionVersion": "u64",
+      "queriedAt": "u64",
+      "receivedAt": "u64",
+      "exactFrameMatch": "bool",
+      "reason": "string",
+      "nodes": "InspectorNode[]"
+    },
+    "SourceEvidence": {
+      "status": "SourceEvidenceStatus",
+      "relativePath": "string?",
+      "line": "u32?",
+      "reason": "string"
+    },
+    "SelectionDraft": {
+      "frame": "BinaryFrameMetadata",
+      "bounds": "InspectorBounds",
+      "nodeId": "string?",
+      "inspectionVersion": "u64?",
+      "userInstruction": "string"
+    },
+    "SelectionImage": {
+      "artifactId": "string",
+      "format": "string",
+      "width": "u32",
+      "height": "u32",
+      "byteLength": "u32",
+      "sha256": "string"
+    },
+    "SelectionContext": {
+      "selectionId": "string",
+      "workspaceId": "string",
+      "workspaceName": "string",
+      "sessionId": "string",
+      "buildId": "string",
+      "generation": "u64",
+      "frameSequence": "u64",
+      "selectionKind": "SelectionKind",
+      "inspectionExactFrameMatch": "bool",
+      "inspectionReason": "string",
+      "selectedNode": "InspectorNode?",
+      "componentBounds": "InspectorBounds",
+      "sourceEvidence": "SourceEvidence",
+      "screenshot": "SelectionImage",
+      "crop": "SelectionImage",
+      "userInstruction": "string",
+      "createdAt": "u64",
+      "expiresAt": "u64"
+    },
+    "AgentCapabilities": {
+      "identifyCurrentSession": "bool",
+      "directSend": "bool",
+      "images": "bool",
+      "fileReferences": "bool",
+      "busyState": "bool",
+      "receipt": "bool",
+      "cancelPending": "bool"
+    },
+    "AgentAdapterStatus": {
+      "agentKind": "AgentKind",
+      "capabilities": "AgentCapabilities",
+      "status": "DeliveryState",
+      "reason": "string"
+    },
+    "AgentSessionBinding": {
+      "bindingId": "string",
+      "agentKind": "AgentKind",
+      "targetId": "string",
+      "process": "ProcessRef",
+      "workspaceId": "string",
+      "agentSessionId": "string",
+      "conversationOrThreadId": "string",
+      "transportKind": "AgentTransportKind",
+      "writable": "bool",
+      "capabilities": "AgentCapabilities",
+      "observedAt": "u64",
+      "expiresAt": "u64",
+      "reason": "string"
+    },
+    "AgentBindingDraft": {
+      "agentKind": "AgentKind",
+      "agentSessionId": "string",
+      "conversationOrThreadId": "string"
+    },
+    "AgentSessionList": {
+      "adapters": "AgentAdapterStatus[]",
+      "bindings": "AgentSessionBinding[]"
+    },
+    "AgentDelivery": {
+      "requestId": "string",
+      "selectionId": "string",
+      "bindingId": "string?",
+      "state": "DeliveryState",
+      "prompt": "string",
+      "target": "AgentSessionBinding?",
+      "receiptId": "string?",
+      "reason": "string",
+      "createdAt": "u64",
+      "updatedAt": "u64"
     }
   },
   "commandResponses": {
-    "get_motion_metrics": { "rust": "MotionMetrics", "typescript": "MotionMetrics", "error": "String" },
+    "get_motion_metrics": {
+      "rust": "MotionMetrics",
+      "typescript": "MotionMetrics",
+      "error": "String"
+    },
     "disable_binary_preview_frames": {
       "rust": "AppSnapshot",
       "typescript": "AppSnapshot",
@@ -227,28 +410,123 @@
       "rust": "tauri::ipc::Response",
       "typescript": "ArrayBuffer",
       "error": "PreviewProtocolError"
+    },
+    "selection_export_image": {
+      "rust": "bool",
+      "typescript": "bool",
+      "error": "String"
+    },
+    "selection_update_instruction": {
+      "rust": "SelectionContext",
+      "typescript": "SelectionContext",
+      "error": "String"
+    },
+    "inspector_get_capabilities": {
+      "rust": "InspectorCapabilities",
+      "typescript": "InspectorCapabilities",
+      "error": "String"
+    },
+    "inspector_get_tree": {
+      "rust": "InspectorTree",
+      "typescript": "InspectorTree",
+      "error": "String"
+    },
+    "selection_create": {
+      "rust": "SelectionContext",
+      "typescript": "SelectionContext",
+      "error": "String"
+    },
+    "selection_get": {
+      "rust": "SelectionContext",
+      "typescript": "SelectionContext",
+      "error": "String"
+    },
+    "selection_clear": {
+      "rust": "bool",
+      "typescript": "bool",
+      "error": "String"
+    },
+    "selection_prompt": {
+      "rust": "String",
+      "typescript": "string",
+      "error": "String"
+    },
+    "selection_read_image": {
+      "rust": "tauri::ipc::Response",
+      "typescript": "ArrayBuffer",
+      "error": "String"
+    },
+    "agent_session_list": {
+      "rust": "AgentSessionList",
+      "typescript": "AgentSessionList",
+      "error": "String"
+    },
+    "agent_session_bind": {
+      "rust": "AgentSessionBinding",
+      "typescript": "AgentSessionBinding",
+      "error": "String"
+    },
+    "agent_delivery_prepare": {
+      "rust": "AgentDelivery",
+      "typescript": "AgentDelivery",
+      "error": "String"
+    },
+    "agent_delivery_send": {
+      "rust": "AgentDelivery",
+      "typescript": "AgentDelivery",
+      "error": "String"
+    },
+    "agent_delivery_status": {
+      "rust": "AgentDelivery",
+      "typescript": "AgentDelivery",
+      "error": "String"
     }
   },
   "commands": {
-    "get_motion_metrics": { "scope": "RequestScope" },
-    "collapse_to_orb": { "scope": "RequestScope", "requestId": "u64" },
-    "expand_from_orb": { "scope": "RequestScope", "requestId": "u64" },
-    "hide_to_tray": { "scope": "RequestScope", "requestId": "u64" },
-    "show_from_tray": { "scope": "RequestScope", "requestId": "u64" },
-    "set_orb_auto_hide": { "scope": "RequestScope", "enabled": "bool" },
-    "set_motion_preferences": { "scope": "RequestScope", "preferences": "MotionSettings" },
-    "get_display_mode": { "scope": "RequestScope" },
+    "get_motion_metrics": {
+      "scope": "RequestScope"
+    },
+    "collapse_to_orb": {
+      "scope": "RequestScope",
+      "requestId": "u64"
+    },
+    "expand_from_orb": {
+      "scope": "RequestScope",
+      "requestId": "u64"
+    },
+    "hide_to_tray": {
+      "scope": "RequestScope",
+      "requestId": "u64"
+    },
+    "show_from_tray": {
+      "scope": "RequestScope",
+      "requestId": "u64"
+    },
+    "set_orb_auto_hide": {
+      "scope": "RequestScope",
+      "enabled": "bool"
+    },
+    "set_motion_preferences": {
+      "scope": "RequestScope",
+      "preferences": "MotionSettings"
+    },
+    "get_display_mode": {
+      "scope": "RequestScope"
+    },
     "disable_binary_preview_frames": {
       "scope": "RequestScope",
-      "protocolVersion": "u32"
+      "protocolVersion": "u32",
+      "consumerId": "string"
     },
     "enable_binary_preview_frames": {
       "scope": "RequestScope",
-      "protocolVersion": "u32"
+      "protocolVersion": "u32",
+      "consumerId": "string"
     },
     "read_preview_frame": {
       "scope": "RequestScope",
-      "protocolVersion": "u32"
+      "protocolVersion": "u32",
+      "consumerId": "string"
     },
     "click_preview": {
       "scope": "RequestScope",
@@ -303,6 +581,64 @@
     "arrange_side_by_side": {
       "consent": "bool",
       "scope": "RequestScope"
+    },
+    "selection_export_image": {
+      "scope": "RequestScope",
+      "selectionId": "string",
+      "crop": "bool"
+    },
+    "selection_update_instruction": {
+      "scope": "RequestScope",
+      "selectionId": "string",
+      "userInstruction": "string"
+    },
+    "inspector_get_capabilities": {
+      "scope": "RequestScope"
+    },
+    "inspector_get_tree": {
+      "scope": "RequestScope",
+      "frame": "BinaryFrameMetadata"
+    },
+    "selection_create": {
+      "scope": "RequestScope",
+      "draft": "SelectionDraft"
+    },
+    "selection_get": {
+      "scope": "RequestScope",
+      "selectionId": "string"
+    },
+    "selection_clear": {
+      "scope": "RequestScope",
+      "selectionId": "string?"
+    },
+    "selection_prompt": {
+      "scope": "RequestScope",
+      "selectionId": "string"
+    },
+    "selection_read_image": {
+      "scope": "RequestScope",
+      "selectionId": "string",
+      "crop": "bool"
+    },
+    "agent_session_list": {
+      "scope": "RequestScope"
+    },
+    "agent_session_bind": {
+      "scope": "RequestScope",
+      "draft": "AgentBindingDraft"
+    },
+    "agent_delivery_prepare": {
+      "scope": "RequestScope",
+      "selectionId": "string",
+      "bindingId": "string?"
+    },
+    "agent_delivery_send": {
+      "scope": "RequestScope",
+      "requestId": "string"
+    },
+    "agent_delivery_status": {
+      "scope": "RequestScope",
+      "requestId": "string"
     }
   }
 }

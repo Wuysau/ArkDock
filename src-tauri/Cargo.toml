@@ -24,6 +24,11 @@ name = "arkdock-session"
 path = "src/bin/arkdock-session.rs"
 required-features = ["native-tools"]
 
+[[bin]]
+name = "arkdock-inspector-probe"
+path = "src/bin/arkdock-inspector-probe.rs"
+required-features = ["native-tools"]
+
 [features]
 default = []
 desktop = ["dep:tauri", "dep:tauri-build", "dep:rfd"]
