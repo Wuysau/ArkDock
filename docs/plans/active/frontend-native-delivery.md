@@ -52,6 +52,16 @@
 - [x] 检出的 dev 完成 Release NSIS/MSI；文档最终提交后再次重建，manifest 锁定最终 SHA。
 - [x] 核对 AMD64、0.1.0、生产前端/真实 IPC、NotSigned；最终 SHA-256/大小记录 manifest。
 - [x] 实际 NSIS 安装/启动/关闭/无调试参数重启/SDK_MISSING/卸载 PASS，原生配置摘要不变。
+- [x] 初版 0.1.0 NSIS 安装/启动/重启/SDK_MISSING/卸载 PASS，原生配置摘要不变；Apache许可版已构建及核对安装资源。
+- [x] Apache-2.0 版 NSIS/MSI 构建 PASS；许可证元数据、NOTICE 与 LICENSE 安装资源已检查。
+- [ ] Apache-2.0 安装版 WebView2 启动复测：当前有另一工作区同产品实例，HRESULT 0x8007139F / 101；该实例未触碰。
+
+## Task 5：GitHub 发布
+
+- [x] Apache-2.0 LICENSE、Cargo/npm SPDX 元数据和安装资源已提交到 dev。
+- [ ] 目标仓库缺失：GitHub 账户 Wuysau 下 Wuysau/ArkDock 返回 404；本地未配置 remote。
+- [ ] GitHub CLI 授权无效。用户需在 GitHub 创建空的公开仓库并于本机重新认证后再推送。
+- [ ] 现有 merge history 作者使用非-noreply 邮箱；发布前确认是否保留完整历史，不自动改写提交。
 - [ ] 记录产物关联 commit；交付指南不要求用户 Node/Rust/Vite。
 
 ## 执行记录
