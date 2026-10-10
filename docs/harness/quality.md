@@ -23,6 +23,8 @@ native-support.json 的历史布尔字段不参与门禁。测试会修改/恢�
 仓库 format 检查明确覆盖 LF、末尾换行、行末空白与 JSON 语法，
 Rust 风格另由 `cargo fmt --check` 执行；不声称文本检查等同完整语言格式化。
 Rust check/clippy/test/build 使用 --locked，版本下限检查不会把 Node 24.13 当成满足 >=24.18。
+基础 Rust 门禁启用 native-tools，桌面静态门禁启用 desktop,native-tools，保留两个 CLI 的测试。
+安装包仅启用 desktop；开发验收 CLI 不作为产品 sidecar 分发。
 Oxlint 检查 TS/TSX 正确性，TypeScript 检查类型，Vite 构建前端。
 结构检查限定 UI 原生入口/能力，不能替代运行期会话和参数校验。
 IPC 生成比较两端文件及 source SHA256；Rust serde 拒绝未知字段。

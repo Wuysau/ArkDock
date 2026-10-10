@@ -6,7 +6,7 @@
 Cargo 自动发现 `src-tauri/src/bin/arkdock-session.rs`；需要可用 Rust 工具链自行构建：
 
 ```text
-cargo build --manifest-path src-tauri/Cargo.toml --bin arkdock-session
+cargo build --manifest-path src-tauri/Cargo.toml --features native-tools --bin arkdock-session
 ```
 
 此 helper 提供弱候选登记，不是经过认证的命名管道协议。发送方 PID 是用户传入且
@@ -58,3 +58,5 @@ Rust Windows 后端以 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 与
 有界消息、TTL、撤销、活动标签证明、并发及假冒攻击原生测试。缺少其中证据时保持弱候选。
 本次环境缺 Cargo/Windows，helper 和生命周期测试未执行；当前证据见
 [发现验证记录](../evidence/discovery.md)。
+
+集成后的 arkdock-session 是源码开发工具，需 native-tools；Windows 安装包不包含它，基础贴边和目录选择不依赖它。

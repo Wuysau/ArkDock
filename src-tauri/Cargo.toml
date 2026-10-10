@@ -13,9 +13,20 @@ name = "arkdock"
 path = "src/main.rs"
 required-features = ["desktop"]
 
+[[bin]]
+name = "arkdock-native-preview"
+path = "src/bin/arkdock-native-preview.rs"
+required-features = ["native-tools"]
+
+[[bin]]
+name = "arkdock-session"
+path = "src/bin/arkdock-session.rs"
+required-features = ["native-tools"]
+
 [features]
 default = []
 desktop = ["dep:tauri", "dep:tauri-build", "dep:rfd"]
+native-tools = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

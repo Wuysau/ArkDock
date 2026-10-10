@@ -30,12 +30,12 @@ npmStep('frontend-lint', 'lint');
 npmStep('frontend-typecheck', 'typecheck');
 npmStep('frontend-build', 'build');
 run('rust-fmt', 'cargo', ['fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--all', '--', '--check']);
-run('rust-clippy', 'cargo', ['clippy', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--', '-D', 'warnings']);
-run('rust-test', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets']);
-run('rust-build', 'cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml']);
+run('rust-clippy', 'cargo', ['clippy', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'native-tools', '--all-targets', '--', '-D', 'warnings']);
+run('rust-test', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'native-tools', '--all-targets']);
+run('rust-build', 'cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'native-tools']);
 if (process.platform === 'win32') {
-  run('windows-desktop-check', 'cargo', ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'desktop', '--all-targets']);
-  run('windows-desktop-clippy', 'cargo', ['clippy', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'desktop', '--all-targets', '--', '-D', 'warnings']);
+  run('windows-desktop-check', 'cargo', ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'desktop,native-tools', '--all-targets']);
+  run('windows-desktop-clippy', 'cargo', ['clippy', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'desktop,native-tools', '--all-targets', '--', '-D', 'warnings']);
 }
 if (process.argv.includes('--release')) {
   run('native-acceptance', process.execPath, ['tools/native-gate.mjs'], [2]);

@@ -1,5 +1,9 @@
 # Windows 原生后端设置与实验
 
+集成后独立工具须启用 `--features native-tools`，例如
+`cargo run --locked --manifest-path src-tauri/Cargo.toml --features native-tools --bin arkdock-native-preview -- --help`。
+安装包只包含直接集成 NativePreviewer 的主应用，不分发依赖源码工作树的样例 CLI。
+
 本页针对本分支的独立 Rust 驱动，不依赖另一工作树正在运行的 ArkDock 或
 DevEco Studio。实际本次结果由 `validation.md` 和对应报告记录。
 仅用户合法获取的 SDK 可用于执行；本仓库不分发 SDK，不代登录或接受许可。
@@ -42,7 +46,7 @@ WSL、远程 SDK 路径、未知操作系统和 Windows ARM64 保留环境身份
 ```powershell
 $env:PATH = 'D:/CodingTools/node-v24.21.0-win-x64;D:/CodingTools/Rust/.cargo/bin;' + $env:PATH
 $env:ARKDOCK_SDK = 'D:/CodingTools/HarmonyOS/command-line-tools'
-cargo run --locked --manifest-path src-tauri/Cargo.toml --bin arkdock-native-preview -- --probe --sdk $env:ARKDOCK_SDK
+cargo run --locked --manifest-path src-tauri/Cargo.toml --features native-tools --bin arkdock-native-preview -- --probe --sdk $env:ARKDOCK_SDK
 ```
 
 `--probe` 只输出 JSON 依赖报告，不启动 Hvigor、Previewer 或 GUI，不写 SDK。
@@ -81,7 +85,7 @@ SDK 选择和工程信任独立。发现工程时不运行它的配置或脚本�
 
 ```powershell
 New-Item -ItemType Directory -Path 'artifacts/native-preview' -Force
-cargo run --locked --manifest-path src-tauri/Cargo.toml --bin arkdock-native-preview -- --sdk $env:ARKDOCK_SDK --trust-fixture --output artifacts/native-preview/run-01
+cargo run --locked --manifest-path src-tauri/Cargo.toml --features native-tools --bin arkdock-native-preview -- --sdk $env:ARKDOCK_SDK --trust-fixture --output artifacts/native-preview/run-01
 ```
 
 再次执行应使用新的输出目录。不要连接原工作树的 WebView 调试端口；独立驱动
