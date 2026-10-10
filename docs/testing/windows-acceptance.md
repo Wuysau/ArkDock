@@ -1,5 +1,9 @@
 # Windows 安装版验收指南
 
+本轮交付为 0.1.0 未签名 Windows x64 测试包。优先使用 NSIS `ArkDock_0.1.0_x64-setup.exe`；
+其当前用户安装、正常启动/关闭/重启、缺 SDK 提示与卸载已实测。MSI 是系统级安装包，未执行安装验证。
+安装版的完整贴边和 React 原生首帧/点击/刷新仍须按下列步骤复核，不能由后端 CLI 的 T1–T7 PASS 替代。
+
 本页供测试者使用实际安装包，在 Windows 11 本地桌面验收 ArkDock。步骤是待执行的检查清单，不是本轮通过记录；安装包路径、SHA256、执行结果和截图应另行记录。已有证据与未验证范围见 [兼容性矩阵](../evidence/compatibility.md)，开发者命令见 [原生操作手册](../runbooks/windows-native-preview.md)。
 
 ## 1. 准备与结果约定

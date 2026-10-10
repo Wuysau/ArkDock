@@ -1,5 +1,11 @@
 # 兼容性与验收矩阵
 
+2026-10-10 集成交付：基础检查和最终 desktop,native-tools 125 项 PASS；独立 SDK T1–T7 PASS。
+0.1.0 未签名 x64 NSIS/MSI 构建 PASS；NSIS 安装/生产 UI 与 Rust IPC/无 SDK/关闭/重启/卸载 PASS。
+安装包排除两个源码开发 CLI 和 SDK。MSI ALLUSERS=1，未做系统安装测试。
+本次 UI 7 组通过但角落缩放 FAIL，joint/native gate 在真实绑定前置 FAIL；用户暂不继续鼠标验收。
+本次结果优先看 [集成交付记录](integration-delivery-2026-10-10.md)，下方历史 PASS 不能覆盖这些失败。
+
 2026-10-10 增量结果：[真实共同布局与前端接续验证](joint-layout-2026-10-10.md)。
 共同窗口 11 组、实际 ChatGPT 零接缝/双向缩放/共同最大化、当前 SDK 7 组、真实 UI 8 组 PASS。
 旧恢复压力门禁本轮未完成，跨 DPI 仍 BLOCKED；下方历史子范围不等同本次全部通过。

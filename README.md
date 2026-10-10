@@ -18,6 +18,9 @@ Windows 11 x64 普通用户使用交付的 NSIS `.exe` 安装包，从开始菜�
 桌面界面需要 WebView2，真实原生预览另需用户合法安装的完整 HarmonyOS Command Line Tools。
 按 [Windows 安装版验收指南](docs/testing/windows-acceptance.md) 检查窗口联动、工程发现与信任、
 SDK 配置、真实首帧/点击/刷新、错误恢复和诊断。实际安装包路径、摘要与本轮结果以交付记录为准。
+本轮 0.1.0 为未签名测试构建。NSIS 已实际安装、启动、重启及卸载，缺 SDK 可正常显示阻塞。
+MSI 为系统级安装包，未执行安装测试；普通用户优先 NSIS。
+完整鼠标贴边与 React 原生画面验收尚未通过，见 [本轮交付记录](docs/evidence/integration-delivery-2026-10-10.md)。
 
 ## 命令
 

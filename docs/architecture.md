@@ -44,4 +44,5 @@ Hvigor PreviewBuild，使用模块 .preview 中真实 modules.abc 启动 Preview
 仅默认 Stage 目标、pages/Index、360×640 和点击；其他版本/能力明确拒绝。
 正式路径没有 mock 后端，配置指纹不是验收成功开关；native gate 每次执行真实断言。
 工程信任与工具链状态分离：SDK 缺失或协议阻塞关闭执行资源，但不撤销有效工程配置授权。
+桌面安装包仅分发主应用与许可资源。两个源码 CLI 须显式启用 native-tools；基础门禁保留其测试，桌面不调用它们。
 具体范围见 [SDK 证据](evidence/sdk-26-preview.md) 和 [本次集成交付](evidence/integration-delivery-2026-10-10.md)。

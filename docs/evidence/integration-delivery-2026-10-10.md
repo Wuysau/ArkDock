@@ -62,10 +62,22 @@ native-drag.json 显示拖动前后矩形未变化、outline 为空、前台 HWN
 
 最终 dev 执行 Windows Release 构建；包与 SHA-256/字节大小/签名/构建提交保存于
 artifacts/delivery-2026-10-10/manifest.json、SHA256SUMS.txt 和 release-build.log。
+实际产物：NSIS ArkDock_0.1.0_x64-setup.exe 与 MSI ArkDock_0.1.0_x64_en-US.msi。
+NSIS 专用目录安装、生产前端/Rust snapshot IPC、无 SDK 正常提示、正常关闭、无调试参数重启、卸载 PASS，
+证据 installer-smoke.json / installed-state.json / installed-release.png；原有原生配置逐文件摘要保持不变。
+MSI File 表仅主 exe 和三个许可资源；ALLUSERS=1，系统安装/卸载 SKIPPED，普通用户优先 NSIS。
+PE AMD64、版本 0.1.0、签名 NotSigned；dumpbin 依赖为 Windows 系统/UCRT，无直接 VC runtime DLL 导入。
 仅交付未签名测试包。完整 verify:release 未通过原生桌面前置，不能声明正式发布验收 PASS。
 用户无需 Node/Rust/Vite；WebView2 Runtime 必需，缺失时安装器使用官方 bootstrapper（需要网络）。
 不分发 Huawei SDK/Previewer，不把硬编码工作树的样例 CLI 当产品 sidecar。
 安装/启动/卸载的实际状态以 installer-smoke.json 为准；未执行项不得写 PASS。
+
+打包修复：Tauri 会自动分发 Cargo src/bin，第一次包曾包含开发 CLI。新增 native-tools 仅控制两 CLI 目标，
+正式桌面 NativePreviewer 库不受该 feature 控制；verify 显式启用工具，全部 CLI 测试仍运行。
+installer-exclusion-red.log 用旧安装包实际触发“不得安装开发工具”断言退出 1；app-only 重建后同一安装断言退出 0。
+最终基础 app-only-verify.log 退出 0；desktop,native-tools --all-targets 125 项 app-only-desktop-tests.log 退出 0。
+首次安装验证的 Tauri bundle tag 假设及许可证 LF/CRLF 差异失败记录保留；最终校验允许已核对的三个 bundle tag 字节，
+其余 exe 字节严格相同，许可资源严格逐文件摘要相同。.gitattributes 防止更改上游许可证字节。
 
 ## 官方工具来源
 

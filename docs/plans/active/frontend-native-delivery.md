@@ -43,15 +43,15 @@
 
 - [x] 独立最终代码审查无新增缺陷；两源 HEAD 都为集成提交祖先，前端功能保留。
 - [x] 文档记录基础 PASS、独立 SDK T1–T7 PASS 和 UI/窗口/native gate 的实际 FAIL。
-- [ ] 确认 dev 未变化，用正常安全 fast-forward 更新 dev；保持隔离 worktree。
+- [x] 确认 dev 基线未变化，正常 fast-forward；只在自有隔离 worktree 检出 dev。
 
 ## Task 4：最终 dev 软件包与验收
 
 文件：src-tauri/tauri.conf.json、tools/desktop.mjs（仅必要兼容修复）、artifacts/delivery-2026-10-10/。
 
-- [ ] 在检出的最终 dev 提交执行 pnpm desktop:build；NSIS 优先，MSI 条件允许时生成。
-- [ ] 检查安装包、PE x64、版本、生产资源、签名状态；记录大小和 SHA-256。
-- [ ] 测试 Release 启动/关闭/重启、SDK 缺失行为；可行时从安装包安装、启动、卸载。
+- [x] 检出的 dev 完成 Release NSIS/MSI；文档最终提交后再次重建，manifest 锁定最终 SHA。
+- [x] 核对 AMD64、0.1.0、生产前端/真实 IPC、NotSigned；最终 SHA-256/大小记录 manifest。
+- [x] 实际 NSIS 安装/启动/关闭/无调试参数重启/SDK_MISSING/卸载 PASS，原生配置摘要不变。
 - [ ] 记录产物关联 commit；交付指南不要求用户 Node/Rust/Vite。
 
 ## 执行记录
@@ -65,3 +65,7 @@ Ruling：集成允许正常 merge 保留历史；共享生成类型不手动拼�
 2026-10-10 更新：实际 UI 七组通过，指针边缘缩放失败；joint/native 在真实绑定前置失败。用户选择暂不提供鼠标验收桌面，优先安装包。保持未签名测试构建，不声明完整发布门禁通过。
 独立真实 SDK CLI T1–T7 PASS（artifacts/native-preview/integration-20261010/report.json），源文件已恢复。
 固定官方 NSIS/WiX 归档摘要核验，第三方许可资源和五个 MPL 源码归档已准备；vendor Rust 版权 HTML 保持原字节、以 .html.txt 作为资源。
+
+最终实施：新增 native-tools 只隔离开发 CLI 安装目标，正式原生库未禁用；全套工具回归仍运行。独立审查确认 Tauri 不会重新发现被 required-features 排除的 src/bin。
+实际包内红绿回归：旧包含 native-preview.exe 时退出 1，重建后同一安装断言退出 0。MSI 文件表仅主 exe 和许可资源，ALLUSERS=1，系统安装 SKIPPED。
+剩余任务是空闲可见桌面的鼠标/React 原生/跨 DPI 验收；按用户要求先交付已验证基本安装/启动的测试包。
