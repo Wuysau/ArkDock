@@ -6,9 +6,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
-const evidence = resolve('artifacts/ui-2026-10-09');
+const jointLayout = process.argv.includes('--joint-layout');
+const evidence = resolve(jointLayout ? 'artifacts/joint-layout-2026-10-09' : 'artifacts/ui-2026-10-09');
 const sizes = [[360, 640], [440, 820], [520, 960]];
 const scenarios = ['welcome', 'hint', 'discovering', 'reliable', 'multi', 'weak', 'none', 'trust', 'sdkMissing', 'building', 'waiting', 'running', 'stale', 'recovery', 'diagnostics'];
+if (jointLayout) scenarios.push('pairUnconfirmed', 'pairMaximizing', 'pairMaximized', 'pairRestoring', 'pairBlocked');
 const checks = []; const screenshots = []; const browserErrors = []; const motion = []; const performance = []; const contrast = [];
 const pause = (duration) => new Promise((done) => setTimeout(done, duration));
 const suppliedUrl = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6);
@@ -82,7 +84,7 @@ async function key(value, options = {}) {
   await driver.send('Input.dispatchKeyEvent', { type: 'keyDown', key: value, code: value, ...code, ...(value === 'Enter' ? { text: '\r', unmodifiedText: '\r' } : {}), ...options });
   await driver.send('Input.dispatchKeyEvent', { type: 'keyUp', key: value, code: value, ...code, ...options });
 }
-async function state() { return driver.evaluate('({binding:document.querySelector(".app").dataset.binding,workspace:document.querySelector(".app").dataset.workspace,preview:document.querySelector("footer").dataset.preview,fixture:window.__ARKDOCK_DEMO__.current()})'); }
+async function state() { return driver.evaluate('({binding:document.querySelector(".app").dataset.binding,workspace:document.querySelector(".app").dataset.workspace,pairLayout:document.querySelector(".app").dataset.pairLayout,preview:document.querySelector("footer").dataset.preview,fixture:window.__ARKDOCK_DEMO__.current()})'); }
 async function screenshot(name) {
   const image = await driver.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
   const path = join(evidence, `${name}.png`); writeFileSync(path, Buffer.from(image.data, 'base64')); screenshots.push(path);
@@ -115,6 +117,69 @@ try {
   let port;
   await waitUntil(() => { try { port = Number(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]); return Number.isInteger(port) && port > 0; } catch { return false; } }, 'Owned headless browser did not open debugger');
   driver = await connectDebugger(port);
+  if (jointLayout) {
+    await check('Joint UI: unbound/unconfirmed/blocked disable pair controls and disclose reasons without confirmed badges', async () => {
+      await load('welcome');assert.equal(await driver.evaluate('document.querySelector(".header [aria-label=共同最大化]").disabled'),true);
+      assert.equal(await driver.evaluate('!!document.querySelector(".pair-badge")'),false);
+      await load('pairUnconfirmed');assert.equal((await state()).pairLayout,'unbound');
+      assert.equal(await driver.evaluate('document.querySelector(".header [aria-label=共同最大化]").disabled'),true);
+      assert.equal(await driver.evaluate('document.querySelector(".pair-badge").textContent'),'等待布局');
+      await load('pairBlocked');assert.equal((await state()).pairLayout,'blocked');
+      const blocked=await driver.evaluate('(()=>{const e=document.querySelector(".header [aria-label=共同最大化]");return {disabled:e.disabled,reason:e.title,badge:document.querySelector(".pair-badge").textContent};})()');
+      assert.equal(blocked.disabled,true);assert.ok(blocked.reason.includes('权限高于'));assert.equal(blocked.badge,'布局受限');
+    });
+    await check('Joint UI: confirmed maximize/restore remain available independently of SDK and project trust', async () => {
+      for(const initial of ['sdkMissing','trust']) {
+        await load(initial);if(initial==='trust'){await key('Escape');await waitUntil(()=>driver.evaluate('!document.querySelector("dialog")'),'Trust panel did not close');}
+        const before=(await state()).fixture;assert.equal(before.backend.available,false);
+        assert.equal(await driver.evaluate('document.querySelector(".header [aria-label=共同最大化]").disabled'),false);
+        await click('.header [aria-label="共同最大化"]');await waitUntil(async()=>(await state()).pairLayout==='maximized','Maximize confirmation not received');
+        assert.equal(await driver.evaluate('document.querySelector(".pair-badge").textContent'),'共同最大化');
+        await click('.header [aria-label="恢复共同布局"]');await waitUntil(async()=>(await state()).pairLayout==='paired','Restore confirmation not received');
+        assert.equal(await driver.evaluate('document.querySelector(".pair-badge").textContent'),'全贴合');
+        const after=(await state()).fixture;assert.equal(after.trusted,before.trusted);assert.equal(after.phase,before.phase);assert.equal(after.backend.available,false);
+        const calls=await driver.evaluate('window.__ARKDOCK_DEMO__.calls');assert.equal(calls.filter(e=>e.command==='maximize_pair').length,1);assert.equal(calls.filter(e=>e.command==='restore_pair').length,1);
+        assert.equal(calls.some(e=>e.command==='set_trust'||e.command==='refresh_preview'),false);
+        assert.deepEqual(calls.find(e=>e.command==='maximize_pair').scope,{targetId:before.target.id,sessionId:before.sessionId});
+      }
+    });
+    await check('Joint UI: explicit pending events never claim completion and rapid repeated clicks issue one request', async () => {
+      await load('sdkMissing');
+      for(const [command,initial,transient,confirmed,label] of [['maximize_pair','paired','maximizing','maximized','共同最大化'],['restore_pair','maximized','restoring','paired','恢复共同布局']]) {
+        assert.equal((await state()).pairLayout,initial);await driver.evaluate(`window.__ARKDOCK_DEMO__.deferNext(${JSON.stringify(command)},"command")`);
+        const point=await driver.evaluate(`(()=>{const r=document.querySelector('.header [aria-label=${JSON.stringify(label)}]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+        await click(`.header [aria-label="${label}"]`);await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Pair request did not defer');
+        assert.equal((await state()).pairLayout,initial,'Request start predicted a confirmed pair state');
+        await driver.evaluate(`window.__ARKDOCK_DEMO__.emitPairLayout(${JSON.stringify(transient)})`);
+        await waitUntil(async()=>(await state()).pairLayout===transient,'Transient pair event not rendered');
+        assert.equal(await driver.evaluate('document.querySelector(".header .maximize").disabled'),true);
+        assert.equal(await driver.evaluate('document.querySelector(".pair-badge").textContent'),'布局调整中');
+        for(let repeat=0;repeat<3;repeat++){await driver.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});await driver.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});}
+        assert.equal(await driver.evaluate(`window.__ARKDOCK_DEMO__.calls.filter(e=>e.command===${JSON.stringify(command)}).length`),1);
+        await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');await waitUntil(async()=>(await state()).pairLayout===confirmed,'Pair completion not rendered');
+        await driver.evaluate('window.__ARKDOCK_DEMO__.emitOldState()');await pause(40);assert.equal((await state()).pairLayout,confirmed,'Stale pair event overwrote completion');
+      }
+    });
+    await check('Joint UI: stale maximize response cannot overwrite a newly connected target layout', async () => {
+      await load('sdkMissing');await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("maximize_pair","response")');
+      await click('.header [aria-label="共同最大化"]');await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Maximize response did not defer');
+      await driver.evaluate('window.__ARKDOCK_DEMO__.switchTarget();window.__ARKDOCK_DEMO__.emitPairLayout("paired")');await pause(40);
+      const current=(await state()).fixture;await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');await pause(80);
+      assert.equal((await state()).fixture.target.id,current.target.id);assert.equal((await state()).pairLayout,'paired');
+      assert.equal(await driver.evaluate('document.querySelector(".pair-badge").textContent'),'全贴合');
+      assert.equal(await driver.evaluate('document.querySelector(".header [aria-label=共同最大化]").disabled'),false);
+    });
+    await check('Joint UI: overflow maximize and restore are keyboard operable in the 360 DIP window', async () => {
+      await load('sdkMissing','dark',360,640);
+      for(const label of ['共同最大化','恢复共同布局']) {
+        await click('[aria-label="更多操作"]');await waitUntil(()=>driver.evaluate('!!document.querySelector("dialog")'),'Overflow did not open');
+        for(let count=0;count<20;count++){if(await driver.evaluate(`document.activeElement?.textContent.trim()===${JSON.stringify(label)}`))break;await key('Tab');}
+        assert.equal(await driver.evaluate('document.activeElement?.textContent.trim()'),label);await key('Enter');
+        await waitUntil(()=>driver.evaluate('!document.querySelector("dialog")'),'Confirmed overflow action did not close its originating sheet');
+      }
+      assert.equal((await state()).pairLayout,'paired');
+    });
+  }
   await check('V1: all explicit scenarios at 360×640 / 440×820 / 520×960 in dark and light; no outer scroll', async () => {
     for (const [width, height] of sizes) for (const theme of ['dark', 'light']) for (const name of scenarios) {
       await load(name, theme, width, height);

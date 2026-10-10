@@ -36,7 +36,13 @@ public static class ArkDockWindowTest {
   }
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left, top, right, bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }
+  [StructLayout(LayoutKind.Sequential)] public struct MonitorInfo { public int size; public Rect monitor, work; public uint flags; }
+  [StructLayout(LayoutKind.Sequential)] public struct Placement { public uint length, flags, showCmd; public Point minimum, maximum; public Rect normal; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out Rect r);
+  [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr h, ref Placement p);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetMonitorInfo(IntPtr h, ref MonitorInfo info);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref Point p);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr z, int x, int y, int w, int height, uint flags);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int command);
@@ -63,7 +69,12 @@ try {
     'restore' { [ArkDockWindowTest]::ShowWindowAsync($windowHandle,4) | Out-Null }
     'maximize' { [ArkDockWindowTest]::ShowWindowAsync($windowHandle,3) | Out-Null }
     'close' { [ArkDockWindowTest]::PostMessage($windowHandle,0x10,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null }
-    'foreground' { [ArkDockWindowTest]::SetForegroundWindow($windowHandle) | Out-Null }
+    'foreground' {
+      # A background test helper may be denied foreground activation. Raise only the requested
+      # test window (not TOPMOST); the subsequent real mouse action can then activate it normally.
+      if (-not [ArkDockWindowTest]::SetWindowPos($windowHandle,[IntPtr]::Zero,0,0,0,0,0x53)) { throw 'Cannot raise requested test window' }
+      [ArkDockWindowTest]::SetForegroundWindow($windowHandle) | Out-Null
+    }
     'pause' { [ArkDockWindowTest]::PostMessage($windowHandle,0x8001,[IntPtr]::new(2000),[IntPtr]::Zero) | Out-Null; @{queued=$true} | ConvertTo-Json -Compress; return }
     { $_ -in 'click','drag' } {
       [ArkDockWindowTest]::SetCursorPos($X,$Y) | Out-Null
@@ -88,16 +99,29 @@ try {
   [ArkDockWindowTest]::GetWindowRect($windowHandle,[ref]$rect) | Out-Null
   [ArkDockWindowTest]::ClientToScreen($windowHandle,[ref]$origin) | Out-Null
   [ArkDockWindowTest]::DwmGetWindowAttribute($windowHandle,9,[ref]$frame,16) | Out-Null
+  $client = [ArkDockWindowTest+Rect]::new()
+  [ArkDockWindowTest]::GetClientRect($windowHandle,[ref]$client) | Out-Null
+  $monitor = [ArkDockWindowTest+MonitorInfo]::new()
+  $monitor.size = 40
+  [ArkDockWindowTest]::GetMonitorInfo([ArkDockWindowTest]::MonitorFromWindow($windowHandle,2),[ref]$monitor) | Out-Null
+  $placement = [ArkDockWindowTest+Placement]::new()
+  [uint32]$observedProcessId = 0
+  [ArkDockWindowTest]::GetWindowThreadProcessId($windowHandle,[ref]$observedProcessId) | Out-Null
+  $placement.length = 44
+  [ArkDockWindowTest]::GetWindowPlacement($windowHandle,[ref]$placement) | Out-Null
   $higher = @([ArkDockWindowTest]::Higher($windowHandle) | ForEach-Object {
     $higherRect = [ArkDockWindowTest+Rect]::new()
     [ArkDockWindowTest]::DwmGetWindowAttribute([IntPtr]::new($_),9,[ref]$higherRect,16) | Out-Null
     @{handle=$_;left=$higherRect.left;top=$higherRect.top;right=$higherRect.right;bottom=$higherRect.bottom}
   })
-  @{ left=$rect.left; top=$rect.top; right=$rect.right; bottom=$rect.bottom;
+  @{ processId=$observedProcessId; left=$rect.left; top=$rect.top; right=$rect.right; bottom=$rect.bottom;
      outlineDuringDrag=$outlineDuringDrag;outlineVisible=@([ArkDockWindowTest]::Outlines($OutlinePid)).Count;
      frameLeft=$frame.left;frameTop=$frame.top;frameRight=$frame.right;frameBottom=$frame.bottom;
      owner=[ArkDockWindowTest]::GetWindow($windowHandle,4).ToInt64();style=[ArkDockWindowTest]::GetWindowLong($windowHandle,-16);extended=[ArkDockWindowTest]::GetWindowLong($windowHandle,-20);higher=$higher;
      clientX=$origin.x; clientY=$origin.y; dpi=[ArkDockWindowTest]::GetDpiForWindow($windowHandle);
+     clientWidth=$client.right;clientHeight=$client.bottom;
+     workLeft=$monitor.work.left;workTop=$monitor.work.top;workRight=$monitor.work.right;workBottom=$monitor.work.bottom;
+     normalLeft=$placement.normal.left;normalTop=$placement.normal.top;normalRight=$placement.normal.right;normalBottom=$placement.normal.bottom;showCmd=$placement.showCmd;
      visible=[ArkDockWindowTest]::IsWindowVisible($windowHandle); minimized=[ArkDockWindowTest]::IsIconic($windowHandle);
      maximized=[ArkDockWindowTest]::IsZoomed($windowHandle); foreground=[ArkDockWindowTest]::GetForegroundWindow().ToInt64() } | ConvertTo-Json -Compress
 } finally { [ArkDockWindowTest]::SetThreadDpiAwarenessContext($previousDpi) | Out-Null }

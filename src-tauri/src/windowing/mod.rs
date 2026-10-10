@@ -1,7 +1,7 @@
 //! Independent external docking. Native handles stay inside this backend module.
 //! The caller owns the Tauri drag operation and must validate IPC/session provenance.
 
-use crate::ipc::model::TargetInfo;
+use crate::ipc::model::{PairLayoutState, PairLayoutStatus, TargetInfo};
 
 #[cfg(any(windows, test))]
 mod geometry;
@@ -17,6 +17,17 @@ pub struct WindowUpdate {
     pub target: Option<TargetInfo>,
     pub dock_hint: Option<String>,
     pub layout_required: bool,
+    pub pair_layout: PairLayoutStatus,
+}
+
+impl Default for PairLayoutStatus {
+    fn default() -> Self {
+        Self {
+            state: PairLayoutState::Unbound,
+            preferred_width_dip: 440,
+            reason: None,
+        }
+    }
 }
 
 pub struct WindowController {
@@ -95,6 +106,28 @@ impl WindowController {
         #[cfg(not(windows))]
         {
             None
+        }
+    }
+
+    pub fn maximize_pair(&self, target_id: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.maximize_pair(target_id)
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Windows joint layout is unsupported on this platform".into())
+        }
+    }
+
+    pub fn restore_pair(&self, target_id: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.restore_pair(target_id)
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Windows joint layout is unsupported on this platform".into())
         }
     }
 }

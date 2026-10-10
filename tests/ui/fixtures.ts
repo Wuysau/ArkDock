@@ -1,4 +1,4 @@
-import type { AppSnapshot, Candidate, CommandArgs, NativeFrame, RequestScope } from '../../src/ipc/model.ts';
+import type { AppSnapshot, Candidate, CommandArgs, NativeFrame, PairLayoutState, RequestScope } from '../../src/ipc/model.ts';
 import type { UiBridge } from '../../src/ipc/client.ts';
 
 export const scenarios = {
@@ -6,6 +6,8 @@ export const scenarios = {
   multi: '多候选', weak: '单个弱候选', none: '无候选', trust: '等待信任', sdkMissing: 'SDK 缺失',
   building: '构建中', waiting: '等待首帧', running: '测试画面运行', stale: '旧画面 / 构建失败',
   recovery: '错误恢复', diagnostics: '诊断记录',
+  pairUnconfirmed: '共同布局未确认', pairMaximizing: '共同最大化待确认',
+  pairMaximized: '共同最大化已确认', pairRestoring: '共同布局恢复中', pairBlocked: '共同布局受限',
 } as const;
 export type Scenario = keyof typeof scenarios;
 const stamp = Date.parse('2026-10-09T02:24:36Z');
@@ -30,19 +32,26 @@ function base(revision: number): AppSnapshot {
     revision, phase: 'idle', target: null, project: null, candidates: [], trusted: false, sessionId: null,
     backend: { id: 'ui-fixture', mode: 'UI 演示 · 非原生渲染', available: false, reason: 'UI 演示数据，不能证明 Windows 贴边或 HarmonyOS 原生预览。', sdkPath: null, sdkVersion: null, canClick: false, canSwipe: false, canText: false, canRotate: false },
     build: { generation: 0, displayedGeneration: null, buildId: null, durationMs: null, error: null, stale: false },
-    diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null,
+    diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null, pairLayout: { state: 'unbound', preferredWidthDip: 440, reason: null },
   };
 }
 function snapshot(scenario: Scenario, revision: number): AppSnapshot {
   const value = base(revision);
   if (scenario === 'welcome') return value;
   if (scenario === 'hint') return { ...value, dockHint: 'Release to bind Windows Terminal' };
-  value.target = { ...target };
+  value.target = { ...target }; value.pairLayout = { state: 'paired', preferredWidthDip: 440, reason: null };
   if (scenario === 'discovering') return { ...value, phase: 'discovering' };
   if (scenario === 'multi' || scenario === 'weak' || scenario === 'none') return { ...value, phase: 'selectProject', candidates: scenario === 'none' ? [] : scenario === 'weak' ? [candidate(0)] : Array.from({ length: 6 }, (_, index) => candidate(index)) };
   value.project = { ...project };
   value.sessionId = `demo-session-${revision}`;
   value.sessionRef = { id: value.sessionId, project: value.project, target: value.target, bindingEvidence: [], sdkId: null };
+  if (scenario.startsWith('pair')) {
+    const pairStates: Record<string, PairLayoutState> = { pairMaximizing: 'maximizing', pairMaximized: 'maximized', pairRestoring: 'restoring', pairBlocked: 'blocked' };
+    return { ...value, trusted: true, phase: 'sdkMissing', pairLayout: scenario === 'pairUnconfirmed' ? null : {
+      state: pairStates[scenario], preferredWidthDip: 440,
+      reason: scenario === 'pairBlocked' ? 'UI 测试：目标窗口权限高于 ArkDock，不能调整共同布局。' : 'UI 演示只验证布局状态；不移动或缩放任何系统窗口。',
+    } };
+  }
   if (scenario === 'trust' || scenario === 'reliable') return { ...value, phase: 'untrusted', candidates: scenario === 'reliable' ? [candidate(0, true)] : [] };
   value.trusted = true;
   if (scenario === 'sdkMissing') return { ...value, phase: 'sdkMissing', backend: { ...value.backend, reason: '未找到合法 HarmonyOS SDK；请在桌面环境指定 SDK 目录。' }, diagnostics: [{ code: 'SDK_MISSING', message: '合法 SDK 未配置；原生门禁 BLOCKED。此场景为 UI 测试数据。', status: 'BLOCKED', observedAt: stamp, workspaceId: project.id, sessionId: value.sessionId, buildId: null, backendId: 'ui-fixture' }] };
@@ -92,6 +101,7 @@ export interface FixtureDriver {
   deferNext(command: keyof CommandArgs, mode: 'command' | 'response'): void;
   releaseDeferred(): void;
   hasDeferred(): boolean;
+  emitPairLayout(state: PairLayoutState | null, reason?: string): void;
 }
 export function createFixtureDriver(initial: Scenario): FixtureDriver {
   let revision = 1; let current = snapshot(initial, revision); let previous: AppSnapshot | null = null; let oldFrame: NativeFrame | null = null; let initialPending = true;
@@ -125,7 +135,8 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
         if (current.phase !== 'running' || current.build.stale) throw new Error('UI 测试：过期画面禁止输入。');
         return copy(current);
       }
-      if (name === 'detach') publish(base(++revision));
+      if (name === 'maximize_pair' || name === 'restore_pair') publish({ ...current, revision: ++revision, pairLayout: { state: name === 'maximize_pair' ? 'maximized' : 'paired', preferredWidthDip: 440, reason: 'UI 演示仅验证共同布局状态，不操作系统窗口。' } });
+      else if (name === 'detach') publish(base(++revision));
       else if (name === 'rediscover') publish({ ...current, revision: ++revision, phase: 'discovering', candidates: [], project: null, sessionId: null, trusted: false, sessionRef: null });
       else if (name === 'cancel_discovery') publish({ ...current, revision: ++revision, phase: 'selectProject', candidates: [], dockHint: null });
       else if (name === 'begin_drag') publish({ ...current, revision: ++revision, dockHint: 'Release to bind Windows Terminal' });
@@ -168,5 +179,6 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
     deferNext: (command, mode) => { if (queued || deferred) throw new Error('测试已有待释放请求。'); queued = { command, mode }; },
     hasDeferred: () => deferred !== null,
     releaseDeferred: () => { if (!deferred) throw new Error('没有待释放测试请求。'); const release = deferred; deferred = null; release(); },
+    emitPairLayout: (state, reason = 'UI 演示布局事件；不操作系统窗口。') => publish({ ...current, revision: ++revision, pairLayout: state === null ? null : { state, preferredWidthDip: 440, reason } }),
   };
 }
