@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { connectOwnedWebview as connectWebview } from './webview-driver.mjs';
 import { ownedDesktop } from './owned-desktop.mjs';
-import { activateOwnedHeader } from './window-input.mjs';
+import { activateOwnedHeader, requireOwnedTargetEdge } from './window-input.mjs';
 
 const checks = [];
 const evidence = process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts';
@@ -63,8 +63,6 @@ try {
   action('move', target.second, { X: 50, Y: 520, Width: 400, Height: 420 });
   action('move', dockHandle, { X: 1800, Y: 100, Width: 906, Height: 1320 });
   action('foreground', target.first);
-  const activatedTarget=action('info',target.first);
-  action('click',target.first,{X:activatedTarget.clientX+100,Y:activatedTarget.clientY+100});
   action('foreground', dockHandle);
   await pause(300);
   await activateOwnedHeader(view, dockHandle, action);
@@ -73,6 +71,7 @@ try {
   const startX = Math.round(before.clientX + button.x * button.ratio);
   const startY = Math.round(before.clientY + button.y * button.ratio);
   const targetBefore = action('info', target.first);
+  requireOwnedTargetEdge(action,target.first,targetBefore);
   await view.evaluate('window.__arkdockPointer = []; document.addEventListener("pointerdown", e => window.__arkdockPointer.push({kind:e.type,x:e.clientX,y:e.clientY,target:e.target.className}), {once:true});');
   await view.evaluate(`(async()=>{
     const trace=window.__arkdockDockingSmoke={confirmations:[],ripples:[],animationStarts:[],seen:new Set()};

@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('find','info','move','minimize','restore','maximize','close','click','drag','foreground','pause','cursor')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('find','info','probe','move','minimize','restore','maximize','close','click','drag','foreground','pause','cursor')][string]$Action,
   [long]$Handle, [int]$ProcessId, [int]$OutlinePid, [int]$X, [int]$Y, [int]$Width, [int]$Height, [int]$EndX, [int]$EndY,
   [ValidateRange(0,2000)][int]$HoldMs=150, [string]$CaptureDir, [int]$CaptureX, [int]$CaptureY
 )
@@ -72,6 +72,14 @@ try {
   $captureFrames = @()
   switch ($Action) {
     'find' { @{ handle=[ArkDockWindowTest]::Find($ProcessId) } | ConvertTo-Json -Compress; return }
+    'probe' {
+      $probePoint=[ArkDockWindowTest+Point]::new();$probePoint.x=$X;$probePoint.y=$Y
+      $probeRoot=[ArkDockWindowTest]::GetAncestor([ArkDockWindowTest]::WindowFromPoint($probePoint),2)
+      [uint32]$probeOwner=0
+      [ArkDockWindowTest]::GetWindowThreadProcessId($probeRoot,[ref]$probeOwner) | Out-Null
+      @{root=$probeRoot.ToInt64();processId=$probeOwner;expected=$windowHandle.ToInt64();owned=($probeRoot -eq $windowHandle)} | ConvertTo-Json -Compress
+      return
+    }
     'move' { if (-not [ArkDockWindowTest]::SetWindowPos($windowHandle,[IntPtr]::Zero,$X,$Y,$Width,$Height,0x14)) { throw 'SetWindowPos failed' } }
     'minimize' { [ArkDockWindowTest]::ShowWindowAsync($windowHandle,6) | Out-Null }
     'restore' { [ArkDockWindowTest]::ShowWindowAsync($windowHandle,4) | Out-Null }
@@ -91,7 +99,12 @@ try {
       $inputPoint=[ArkDockWindowTest+Point]::new()
       $inputPoint.x=$X;$inputPoint.y=$Y
       $inputWindow=[ArkDockWindowTest]::WindowFromPoint($inputPoint)
-      if([ArkDockWindowTest]::GetAncestor($inputWindow,2) -ne $windowHandle){throw 'BLOCKED: Input point is covered by another window; no mouse button was pressed'}
+      $inputRoot=[ArkDockWindowTest]::GetAncestor($inputWindow,2)
+      if($inputRoot -ne $windowHandle){
+        [uint32]$coveringProcessId=0
+        [ArkDockWindowTest]::GetWindowThreadProcessId($inputRoot,[ref]$coveringProcessId) | Out-Null
+        throw ('BLOCKED: Input point is covered by another window; no mouse button was pressed. Expected root='+$windowHandle.ToInt64()+'; observed root='+$inputRoot.ToInt64()+'; observed PID='+$coveringProcessId+'; expected visible='+[ArkDockWindowTest]::IsWindowVisible($windowHandle))
+      }
       [ArkDockWindowTest]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
       try {
         Start-Sleep -Milliseconds 250

@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { connectWebview } from './webview-driver.mjs';
-import { activateOwnedHeader } from './window-input.mjs';
+import { activateOwnedHeader, requireOwnedTargetEdge } from './window-input.mjs';
 
 const checks = [];
 const driverDeadline = Date.now() + 15 * 60_000;
@@ -80,7 +80,7 @@ try {
   const gui = JSON.parse(execFileSync('pwsh', ['-NoProfile','-Command','ConvertTo-Json -InputObject @(Get-Process -Name deveco64,deveco -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)'], { encoding: 'utf8', windowsHide: true }));
   if (gui.length) blocked('Close DevEco Studio GUI before native acceptance; no external process was stopped');
   checks.push({ id: 'D1', status: 'PASS', name: 'DevEco Studio GUI closed' });
-  try { view = await connectWebview(debugPort, 5000, expectedUrl, ownedPid); } catch { blocked('Start the dedicated ArkDock process with ARKDOCK_SDK and configured development debug port (see runbook)'); }
+  try { view = await connectWebview(debugPort, 5000, expectedUrl, ownedPid); } catch { blocked('Start the dedicated ArkDock process with ARKDOCK_SDK and configured development debug port (see docs/building-windows.md)'); }
   const initial = await snapshot();
   if (initial.target || initial.sessionId) blocked('Dedicated test process must begin detached; user associations are not modified');
   if (!initial.backend.available) blocked(initial.backend.reason);
@@ -119,6 +119,7 @@ try {
   assert.equal(destination.minimized,false,'Owned fixture must not be minimized');
   assert.equal(await view.evaluate('!!document.querySelector("[inert]") || !!document.querySelector("dialog")'),false,'Owned drag must not be blocked by a modal');
   await activateOwnedHeader(view, dockHandle, action);
+  requireOwnedTargetEdge(action,target.first,destination);
   const button = await view.evaluate('(() => { const r=document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio }; })()');
   const x = Math.round(before.clientX + button.x*button.ratio); const y = Math.round(before.clientY + button.y*button.ratio);
   const dragged = action('drag', dockHandle, { X:x,Y:y,EndX:x+destination.frameRight-before.frameLeft,EndY:y+destination.frameTop-before.frameTop,OutlinePid:dock.Id });

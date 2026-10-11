@@ -4,7 +4,7 @@ import {spawn,execFileSync} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {connectWebview} from './webview-driver.mjs';
-import {activateOwnedHeader} from './window-input.mjs';
+import {activateOwnedHeader,requireOwnedTargetEdge} from './window-input.mjs';
 const evidence=process.env.ARKDOCK_EVIDENCE_DIR ?? 'artifacts/joint-layout-2026-10-09';
 const ownedPid=Number(process.env.ARKDOCK_TEST_PID ?? process.env.ARKDOCK_PROBE_PID);
 const debugPort=Number(process.env.ARKDOCK_TEST_PORT ?? process.env.ARKDOCK_PROBE_PORT ?? 9223);
@@ -61,6 +61,7 @@ async function bind(alreadyMaximized=false) {
   action('foreground',target.first);action('foreground',dockHandle);await pause(200);
   await activateOwnedHeader(view,dockHandle,action);
   const own=action('info',dockHandle),destination=action('info',target.first);
+  requireOwnedTargetEdge(action,target.first,destination);
   const button=await view.evaluate('(()=>{const r=document.querySelector(".drag").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio}})()');
   const x=Math.round(own.clientX+button.x*button.ratio),y=Math.round(own.clientY+button.y*button.ratio);
   action('drag',dockHandle,{X:x,Y:y,EndX:x+destination.frameRight-own.frameLeft,EndY:y+destination.frameTop-own.frameTop,OutlinePid:dockPid});
@@ -140,9 +141,11 @@ try {
     for(const key of ['left','top','right','bottom'])assert.equal(after[key],before.target[key],`User geometry ${key}`);
     await bind();action('close',target.first);const state=await until('target closed',state=>state.target===null);assert.equal(state.sessionId,null);assert.equal(state.project,null);assert.equal(state.pairLayout.state,'unbound');
   });
-} catch(error){try{if(target&&dockHandle)measurements.push({name:'failure-before-cleanup',...bounds()});}catch{/* An owned fixture may already be closed. */}checks.push({status:'FAIL',name:error.message});console.error(error);process.exitCode=1;}
+} catch(error){try{if(target&&dockHandle)measurements.push({name:'failure-before-cleanup',...bounds()});}catch{/* An owned fixture may already be closed. */}const blocked=error.blocked||error.message.includes('BLOCKED:');checks.push({status:blocked?'BLOCKED':'FAIL',name:error.message});console.error(error);process.exitCode=blocked?2:1;}
 finally {
   if(view){try{await invoke('detach');}catch{/* App may have restarted or exited. */}view.close();}
   if(host&&host.exitCode===null)host.kill();
-  mkdirSync(evidence,{recursive:true});writeFileSync(`${evidence}/joint-smoke.json`,JSON.stringify({capturedAt:new Date().toISOString(),status:checks.some(check=>check.status==='FAIL')?'FAIL':'PASS',platform:process.platform,dockPid,scope:'Actual independent Windows group layout; no HarmonyOS rendering assertions',checks,measurements},null,2)+'\n');
+  const status=checks.some(check=>check.status==='FAIL')?'FAIL':checks.some(check=>check.status==='BLOCKED')?'BLOCKED':'PASS';
+  mkdirSync(evidence,{recursive:true});writeFileSync(`${evidence}/joint-smoke.json`,JSON.stringify({capturedAt:new Date().toISOString(),status,platform:process.platform,dockPid,scope:'Actual independent Windows group layout; no HarmonyOS rendering assertions',checks,measurements},null,2)+'\n');
+  process.exitCode=status==='FAIL'?1:status==='BLOCKED'?2:0;
 }
