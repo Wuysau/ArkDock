@@ -6,7 +6,7 @@
   },
   "app": {
     "security": {
-      "devCsp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:1424 ws://127.0.0.1:1424; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'"
+      "devCsp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:1424 ws://127.0.0.1:1424; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'"
     }
   },
   "bundle": { "active": false }

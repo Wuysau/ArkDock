@@ -63,6 +63,8 @@ try {
   action('move', target.second, { X: 50, Y: 520, Width: 400, Height: 420 });
   action('move', dockHandle, { X: 1800, Y: 100, Width: 906, Height: 1320 });
   action('foreground', target.first);
+  const activatedTarget=action('info',target.first);
+  action('click',target.first,{X:activatedTarget.clientX+100,Y:activatedTarget.clientY+100});
   action('foreground', dockHandle);
   await pause(300);
   await activateOwnedHeader(view, dockHandle, action);
@@ -72,6 +74,22 @@ try {
   const startY = Math.round(before.clientY + button.y * button.ratio);
   const targetBefore = action('info', target.first);
   await view.evaluate('window.__arkdockPointer = []; document.addEventListener("pointerdown", e => window.__arkdockPointer.push({kind:e.type,x:e.clientX,y:e.clientY,target:e.target.className}), {once:true});');
+  await view.evaluate(`(async()=>{
+    const trace=window.__arkdockDockingSmoke={confirmations:[],ripples:[],animationStarts:[],seen:new Set()};
+    const animationStart=event=>{const ripple=event.target.closest?.('.dock-ripple');if(ripple)trace.animationStarts.push({bindingId:ripple.dataset.bindingId,side:ripple.dataset.side,name:event.animationName});};
+    document.addEventListener('animationstart',animationStart,true);
+    trace.cleanup=()=>{trace.off?.();document.removeEventListener('animationstart',animationStart,true);};
+    trace.off=await window.__TAURI__.event.listen('arkdock:state',({payload})=>{
+      const confirmation=payload.dockConfirmation;
+      if(!confirmation||trace.seen.has(confirmation.bindingId))return;
+      trace.seen.add(confirmation.bindingId);trace.confirmations.push(confirmation);
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        const ripple=document.querySelector('.dock-ripple');
+        if(ripple)trace.ripples.push({bindingId:ripple.dataset.bindingId,side:ripple.dataset.side,
+          animations:ripple.getAnimations({subtree:true}).map(animation=>({state:animation.playState,progress:animation.effect?.getComputedTiming().progress}))});
+      }));
+    });
+  })()`);
   const motionBefore = await invoke('get_motion_metrics');
   const dragged = action('drag', dockHandle, { X: startX, Y: startY, EndX: startX + targetBefore.frameRight - before.frameLeft, EndY: startY + targetBefore.frameTop - before.frameTop, OutlinePid: dock.Id, HoldMs: 1500, CaptureDir: resolve(evidence, 'particle-frames'), CaptureX: targetBefore.frameRight - 70, CaptureY: targetBefore.frameTop + 140 });
   const motionAfter = await invoke('get_motion_metrics');
@@ -85,6 +103,7 @@ try {
     await until('confirmed normal pair', (value) => value.target?.id === state.target.id && value.pairLayout?.state === 'paired');
     assertContact(action('info', target.first), action('info', dockHandle));
   });
+  const rippleStartsBeforeFollow=await view.evaluate('window.__arkdockDockingSmoke.animationStarts.length');
   await check('A1', '目标移动和缩放驱动外置跟随', async () => {
     const old = action('info', dockHandle);
     const identity = (await snapshot()).target;
@@ -98,6 +117,17 @@ try {
     assert.equal(state.target.id, identity.id);
     assert.deepEqual(state.target.process, identity.process);
     assert.equal(state.target.process.pid, target.pid);
+  });
+  const rippleState=await snapshot();
+  if(rippleState.motion.reduced||['off','light'].includes(rippleState.motion.intensity)){
+    checks.push({id:'A1-ripple',status:'SKIPPED',name:'当前减少动画或轻量偏好禁用水波，不能声称播放通过'});
+  }else await check('A1-ripple', '真实绑定确认触发水波动画，跟随缩放不重播', async()=>{
+    const trace=await view.evaluate('({confirmations:window.__arkdockDockingSmoke.confirmations,ripples:window.__arkdockDockingSmoke.ripples,animationStarts:window.__arkdockDockingSmoke.animationStarts})');
+    const matching=trace.ripples.filter(ripple=>ripple.bindingId===rippleState.dockConfirmation?.bindingId);
+    assert.equal(matching.length,1);assert.equal(matching[0].side,rippleState.dockConfirmation.side);
+    assert.ok(matching[0].animations.some(animation=>animation.state==='running'));
+    assert.ok(rippleStartsBeforeFollow>0);assert.equal(trace.animationStarts.length,rippleStartsBeforeFollow,'Following geometry must not start a new ripple animation');
+    writeFileSync(`${evidence}/windows-ripple.json`,`${JSON.stringify(trace,null,2)}\n`);
   });
   await check('B1', '当前目标实际选中 UIA 标签给出只读候选，唯一候选仍不自动关联', async () => {
     const state = await until('UIA candidate', (value) => value.candidates.some((item) => item.evidence.some((evidence) => evidence.source === 'uia')));
@@ -115,6 +145,8 @@ try {
     const layers = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-File', resolve('tests/native/surface-actions.ps1'), '-Action', 'list', '-ProcessId', String(dock.Id)], { encoding: 'utf8', windowsHide: true })).filter(item => item.class.startsWith('ArkDockMagneticParticles-'));
     assert.equal(layers.length, 1); assert.equal(layers[0].visible, false); assert.equal(layers[0].extended & 8, 0);
   });
+  if(motionAfter.frames>motionBefore.frames)await check('A1-particles','真实候选期间绘制原生粒子且无新增失败帧',async()=>{assert.equal(motionAfter.failedFrames,motionBefore.failedFrames);});
+  else checks.push({id:'A1-particles',status:'BLOCKED',name:'原生粒子未产生帧；四边轮廓降级不能证明粒子渲染'});
   await check('A3', '点击实际 ArkDock 后保持可见与自身焦点', async () => {
     const identity = (await snapshot()).target.id;
     const current = action('info', dockHandle);
@@ -249,9 +281,15 @@ try {
   checks.push({ status: blocked ? 'BLOCKED' : 'FAIL', name: error.message }); console.error(error);
   process.exitCode = blocked ? 2 : 1;
 } finally {
-  if (view) { try { await invoke('detach'); } catch { /* App may have exited. */ } view.close(); }
+  if (view) {
+    try { await view.evaluate('window.__arkdockDockingSmoke?.cleanup?.();delete window.__arkdockDockingSmoke;'); } catch { /* Preserve primary failure. */ }
+    try { await invoke('detach'); } catch { /* App may have exited. */ }
+    view.close();
+  }
   // Only the child process created by this driver is owned; never terminate by name.
   if (host && host.exitCode === null) host.kill();
   mkdirSync(evidence, { recursive: true });
-  writeFileSync(`${evidence}/windows-smoke.json`, `${JSON.stringify({ capturedAt: new Date().toISOString(), platform: process.platform, scope: 'A Windows desktop assertions only; no HarmonyOS preview assertions', checks }, null, 2)}\n`);
+  const status=checks.some(item=>item.status==='FAIL')?'FAIL':checks.some(item=>item.status==='BLOCKED')?'BLOCKED':'PASS';
+  writeFileSync(`${evidence}/windows-smoke.json`, `${JSON.stringify({ status, capturedAt: new Date().toISOString(), platform: process.platform, scope: 'A Windows desktop assertions only; no HarmonyOS preview assertions', checks }, null, 2)}\n`);
+  process.exitCode=status==='FAIL'?1:status==='BLOCKED'?2:0;
 }

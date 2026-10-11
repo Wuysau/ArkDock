@@ -56,7 +56,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, ...stage }: Pr
     observedPixels.current = frame;
   }, [frame, interactionMode]);
   useEffect(() => {
-    if (interactionMode !== 'inspect' || !frameIdentity || !current || !bridge.transfer) return;
+    if (stage.visible === false || interactionMode !== 'inspect' || !frameIdentity || !current || !bridge.transfer) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function query() {
@@ -80,7 +80,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, ...stage }: Pr
     }
     timer = setTimeout(() => void query(), 0);
     return () => { live = false; clearTimeout(timer); };
-  }, [interactionMode, frameIdentity, current, bridge, queryRevision, targetId, sessionId]);
+  }, [stage.visible, interactionMode, frameIdentity, current, bridge, queryRevision, targetId, sessionId]);
   useEffect(() => {
     if (interactionMode !== 'inspect' || !sessionId || !bridge.transfer) return;
     let live = true;

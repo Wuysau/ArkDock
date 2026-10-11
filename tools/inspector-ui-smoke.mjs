@@ -180,6 +180,7 @@ try {
     report.tree=tree;report.componentSelection=selection;await capture('component-selection');
   });
   await check('Original JPEG and crop image identities match selection and decode dimensions',async()=>{
+    await until('Selection image previews are allowed by the desktop CSP',()=>view.evaluate('(() => {const images=[...document.querySelectorAll(".selection-images img")];return images.length===2&&images.every(image=>image.complete&&image.naturalWidth>0);})()'));
     report.images=await view.evaluate(`(async()=>{
       const s=await window.__TAURI__.core.invoke('snapshot');const scope={targetId:s.target.id,sessionId:s.sessionId};const selected=window.__arkdockInspectorSmoke.selections.at(-1);
       const results=[];for(const crop of [false,true]){
@@ -191,6 +192,24 @@ try {
       }return results;
     })()`);
     for(const image of report.images){const metadata=image.crop?selection.crop:selection.screenshot;assert.equal(image.sha256,metadata.sha256);assert.equal(image.byteLength,metadata.byteLength);assert.equal(image.width,metadata.width);assert.equal(image.height,metadata.height);writeFileSync(join(evidence,image.crop?'crop.jpg':'native-preview.jpg'),Buffer.from(image.base64,'base64'));delete image.base64;}
+  });
+  await check('Orb and Hidden pause Inspector queries while preserving the native runtime',async()=>{
+    const queryCount=()=>view.evaluate('window.__arkdockInspectorSmoke.calls.filter(call=>call.command==="inspector_get_tree").length');
+    report.hiddenInspection=[];
+    for(const [hideCommand,mode,showCommand] of [['collapse_to_orb','orb','expand_from_orb'],['hide_to_tray','hidden','show_from_tray']]){
+      const before=await snapshot(),count=nativeCount();
+      await invoke(hideCommand,{requestId:before.display.requestId+1});
+      await until(`Native ${mode} acknowledged`,async()=>{const state=await snapshot();return state.display.mode===mode;});
+      await pause(1000);
+      const paused=await queryCount();await pause(1100);
+      assert.equal(await queryCount(),paused,'Hidden main surface must stop new Inspector queries');
+      const hidden=await snapshot();assert.equal(hidden.sessionId,before.sessionId);assert.deepEqual(hidden.build,before.build);assert.equal(hidden.phase,'running');assert.equal(nativeCount(),count);
+      await invoke(showCommand,{requestId:hidden.display.requestId+1});
+      await until('Native main surface restored',async()=>{const state=await snapshot();return state.display.mode==='expanded';});
+      await until('Inspector polling resumes after visibility restoration',async()=>await queryCount()>paused);
+      const restored=await snapshot();assert.equal(restored.sessionId,before.sessionId);assert.deepEqual(restored.build,before.build);assert.equal(nativeCount(),count);
+      report.hiddenInspection.push({mode,pausedQueryCount:paused,resumedQueryCount:await queryCount(),sessionPreserved:true});
+    }
   });
   await check('Bad build and wrong scope are rejected; Codex/Claude have no false submission',async()=>{
     const draft=await view.evaluate('window.__arkdockInspectorSmoke.creates.at(-1)');
