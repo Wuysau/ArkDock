@@ -25,6 +25,8 @@ jobs:
           components: rustfmt, clippy
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - if: matrix.os == 'windows-latest'
+        run: pnpm desktop:compile
       - if: always()
         uses: actions/upload-artifact@v4
         with:

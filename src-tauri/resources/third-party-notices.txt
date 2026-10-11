@@ -2,7 +2,7 @@ ArkDock 0.1.0 - Third-party notices
 
 Scope: locked Windows MSVC desktop normal-dependency graph, including procedural macro dependencies used during compilation. ArkDock's own source is licensed under Apache License 2.0; see the bundled LICENSE. Upstream third-party license and notice texts are reproduced below.
 
-MPL-2.0 source access: exact unmodified source archives for the listed MPL components accompany this delivery in third-party-source. Each component entry also gives its versioned upstream source archive URL and SHA256. Source archives preserve upstream notices and license headers. The MPL-2.0 license text is reproduced in the applicable entries.
+MPL-2.0 source access: each listed MPL component entry gives its exact unmodified upstream source archive URL and SHA256. Those source archives preserve upstream notices and license headers. The MPL-2.0 license text is reproduced in the applicable entries.
 
 HarmonyOS Command Line Tools, HarmonyOS SDK, Hvigor, and Previewer are external tools installed by the user and are not included in these resources. Microsoft Evergreen WebView2 Runtime is an external runtime obtained through Microsoft distribution; its terms are provided by Microsoft. SDK/loader notices below apply to the native loader code supplied by the WebView2 Rust binding package.
 

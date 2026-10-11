@@ -1,31 +1,6 @@
-# Previewer 协议核查与适配边界
+# Previewer 协议与适配边界
 
-核查日期：2026-10-09。官方源固定为 `ide_previewer@8b86305d7853d96aee92aeccab2c2daafa0d2f5b`、`arkui_ace_engine@21b150e7bb1d5308846f8e5be8ef0482fb433315`。以下结构由这些源码读取；商业 SDK26 的额外能力仍需二进制实测，不能自动准入。提交、许可与架构见 [官方架构](official-architecture.md)。
-
-## 本分支商业 SDK 实测路径
-
-具体配置为 Windows x64 Command Line Tools `26.0.0.851`、HarmonyOS SDK
-`26.0.0.105` / API 26、Hvigor `6.26.8`，来源、摘要与本次证据见
-[validation.md](validation.md)。仅 Stage 默认 product/target、`pages/Index`、
-360×640、点击与增量预览构建后新运行时进入本适配器；其他组合拒绝准入。
-
-实际任务为 `PreviewBuild --mode module -p module=entry@default
--p product=default -p buildMode=debug -p buildRoot=.preview
--p previewMode=true -p pageType=page --no-daemon`。产物位于
-`entry/.preview/default/intermediates/loader_out/default/ets/modules.abc`、
-`res/default` 和 `loader/default/loader.json`；不打包 HAP。
-任务会复用 Hvigor 增量缓存，源码保存仍串行启动一次任务。完成图回执与
-自然进程退出是不同事件；有新编译时 watch worker 可能继续存活，适配器
-在核验回执/产物后只关闭自有构建 Job。缓存命中自然退出时重新读取已刷新日志。
-
-Previewer 使用以上真实产物，`-pm Stage -av ACE_2_0 -device phone
--url pages/Index -or 360 640 -cr 360 640 -sd 160`，以及每次随机的
-`-s/-ts/-sid` 和自有回环端口。私有管道核验 Previewer PID，帧端口核验当前
-Previewer 所有权。消息为完整 JPEG40，鼠标为 `1.0.1` NUL 结束的 action JSON。
-官方 wire 帧无构建 ID；本分支以新 PID/管道/连接把每次新字节码与帧绑定，
-没有把旧进程缓存帧重新标记为新构建。原始 JPEG 对 Tauri 的封包见
-[frontend-contract.md](frontend-contract.md)。刷新会重置组件状态；一般源码
-的同进程状态保留热重载仍 BLOCKED。
+本文总结公开 OpenHarmony Previewer/ArkUI 源码中的协议行为，供实现者理解帧、输入和更新边界。源码研究不等于商业 HarmonyOS SDK 兼容认证；ArkDock 只启用经项目准入逻辑识别的工具链配置。通用产品范围见 [Compatibility](../compatibility.md)，源实现背景见 [官方架构](official-architecture.md)。
 
 ## 启动与双通道
 

@@ -1,6 +1,6 @@
 # 官方 Previewer 架构核查
 
-核查日期：2026-10-09。以下是源码证据，不是 SDK 兼容验收。没有构建或执行外部仓库代码，也没有复制社区实现。
+以下是对固定公开源码快照的技术说明，不是商业 SDK 兼容认证。没有构建或执行外部仓库代码，也没有复制社区实现。
 
 ## 固定来源与许可
 
@@ -52,9 +52,4 @@ Previewer 中的 mock 层适配输入和部分系统服务；这不把浏览器�
 
 只读参考 [previewer-frontend 的架构文档](https://github.com/ohosvscode/previewer-frontend/blob/0500394a67c6706e8a6d54859a0e19ca821ebc05/docs/architecture.md)，固定提交 `0500394a67c6706e8a6d54859a0e19ca821ebc05`（2026-06-24）。其 Launcher / CommandBridge / FrameRelay / Session 分层可用于理解职责。此快照根目录没有 `LICENSE`，GitHub 仓库许可字段为空；局部目录的许可不能自动覆盖全库。因此没有复制其 Rust、JS、协议文档或探针，也没有以其 lite/Linux 运行声明代替官方源码或 Windows 验收。
 
-## 核查状态
-
-- PASS：使用 GitHub API 固定提交，读取上述官方入口、编译选项、帧和输入源码；仅 HTTP/文件只读。
-- SKIPPED：外部仓库构建、下载执行、开源 SDK 原生运行。本次不把源代码阅读报告为运行通过。
-- BLOCKED（源码证据不足）：商业 SDK26 的通用 in-process reload、首张更新帧关联、状态保留、监听构建命令以及完整 IME 能力；须由另行真实实验解除。
-- 已有商业启动、点击、完整重建证据的范围保持独立；本文件没有扩大该范围。
+源码结构和协议行为应与具体安装工具链分开核验。阅读开源实现不能证明商业 Previewer 使用相同协议，也不能扩大 ArkDock 在 [Compatibility](../compatibility.md) 中声明的支持范围。

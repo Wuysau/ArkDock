@@ -20,7 +20,7 @@ function npmStep(name, script) {
 }
 run('repository-format', process.execPath, ['tools/check-format.mjs']);
 run('ipc-contract', process.execPath, ['tools/generate-ipc.mjs', '--check']);
-run('harness', process.execPath, ['tools/verify-harness.mjs']);
+run('public-tree', process.execPath, ['tools/check-public-tree.mjs'], [2]);
 run('boundaries', process.execPath, ['tools/check-boundaries.mjs']);
 run('portable-tests', process.execPath, ['--test', '--test-isolation=none', ...sourceFiles('tests/portable').filter((p) => p.endsWith('.test.mjs'))]);
 if (process.argv.includes('--release') && !existsSync('src-tauri/Cargo.lock')) {

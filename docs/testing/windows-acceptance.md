@@ -1,170 +1,37 @@
-# Windows 安装版验收指南
+# Windows acceptance guide
 
-本轮交付为 0.1.0 未签名 Windows x64 测试包。优先使用 NSIS `ArkDock_0.1.0_x64-setup.exe`；
-初版当前用户 NSIS 安装/启动/关闭/重启、缺 SDK 提示与卸载已实测。含 Apache-2.0 LICENSE 的更新版已构建并确认包内资源哈希，但窗口启动复测受另一个运行中的 ArkDock 实例影响，仍待空闲桌面验证。MSI 是系统级安装包，未执行安装验证。
-安装版的完整贴边和 React 原生首帧/点击/刷新仍须按下列步骤复核，不能由后端 CLI 的 T1–T7 PASS 替代。
+This guide describes checks for a Windows build; it is not a record that those checks have passed. Record results in your own issue or test report and remove private project details before sharing logs or screenshots.
 
-本页供测试者使用实际安装包，在 Windows 11 本地桌面验收 ArkDock。步骤是待执行的检查清单，不是本轮通过记录；安装包路径、SHA256、执行结果和截图应另行记录。已有证据与未验证范围见 [兼容性矩阵](../evidence/compatibility.md)，开发者命令见 [原生操作手册](../runbooks/windows-native-preview.md)。
+## Window behavior
 
-## 1. 准备与结果约定
+1. Start ArkDock and drag it beside an ordinary application or terminal.
+2. Move and resize the target and ArkDock. Confirm both remain independent windows and the target remains usable.
+3. Exercise the available docking, Orb, Hidden, restore, minimize, and tray actions.
+4. Check that closing or replacing the target invalidates its association and that stale state does not return when another window reuses the same title.
+5. If a layout action would resize the target, verify ArkDock requests consent before applying it.
 
-- 使用 Windows 11 x64、普通用户和可交互桌面。记录 Windows 版本、显示器数量、分辨率、每屏缩放比例与 WebView2 版本。
-- 使用本次交付的 NSIS `.exe` 安装包；记录文件名、版本、完整路径和 SHA256。开发目录的 debug `.exe`、浏览器页面与安装包分别记录。
-- 运行安装版界面不需要 Rust、Cargo、Node、pnpm、Vite 或开发服务器。WebView2 是桌面界面的运行依赖；原生预览另外需要用户合法取得的完整 HarmonyOS Command Line Tools。
-- 准备一个普通应用或终端作为贴边目标，以及自己可编辑、可执行构建的真实鸿蒙工程。窗口测试可先在没有 SDK、没有工程的环境执行。
-- 原生步骤关闭 DevEco Studio GUI。ArkDock 应独立完成预览构建和运行，不以 IDE 已显示的画面充当验收结果。
-- 对每项记录 `PASS`（实际达到预期）、`FAIL`（已执行但与预期不符）、`BLOCKED`（缺少环境或前置条件）、`SKIPPED`（未执行及原因）。SDK 缺失时，阻塞提示可通过负向检查，但真实预览项仍是 `BLOCKED`。
+## Project and trust behavior
 
-不要用截图样板、浏览器绘制的控件、mock 后端或只读发现 fixture 补齐原生结果。`tests/fixtures/harmony-app` 故意不可构建；它不能用于原生验收。
+1. Try a target with no project path, one weak candidate, and multiple candidates. Weak or ambiguous evidence must require explicit selection.
+2. Confirm that project association does not grant build trust.
+3. Before previewing, verify the selected path and project identity, then grant trust explicitly.
+4. Change or revoke trust and confirm the current preview session and input become invalid.
+5. Confirm WSL and remote paths retain their environment identity and are not silently converted into local Windows paths.
 
-## 2. 普通用户安装与独立启动
+## Native preview
 
-1. 退出此前启动的 ArkDock，双击实际交付的安装包，以当前普通用户安装；不选择“以管理员身份运行”。记录安装目标和是否出现权限提升请求。
-2. 从开始菜单或安装目录启动 ArkDock。关闭用于开发的 Shell、Vite 与 Node 进程后仍应能启动界面。
-3. 确认出现独立的 ArkDock 顶层窗口和可用的桌面桥接；无需打开浏览器、DevEco GUI 或其他 Agent 客户端。
-4. 在未关联窗口、未配置 SDK 时，确认显示引导或明确阻塞状态，没有示例 ArkUI 画面；打开“更多操作 → 运行日志”和“设备与原生工具链”应能查看状态。
-5. 切换浅色、深色、跟随系统及减少动画；关闭并重新启动，检查偏好是否保留。调整窗口宽度，检查导航、弹层和长路径可读、无横向溢出。
-6. 用右上角关闭按钮退出，再重新启动。不得自动复用上次目标的 HWND、PID 或预览会话；历史工程仍需核验当前窗口生命周期。
+Use a HarmonyOS Command Line Tools installation you are authorized to use. Configure its full root in ArkDock, select a real HarmonyOS project, and confirm the project trust separately.
 
-记录普通用户安装和首次启动的实际结果。若安装需要管理员权限、缺 WebView2 导致无法启动，或安装版仍要求 `pnpm dev`，保留错误并报告；启动开发版不能使这一项通过。卸载只通过 Windows“已安装的应用”操作 ArkDock，先保留必要证据。
+Verify that the visible page comes from the actual Previewer runtime. For a supported interactive sample, check a real control changes state, a source edit produces a new frame, a build error is shown honestly, and a repaired source can recover. Stop or detach and confirm ArkDock releases only the processes and resources it created.
 
-## 3. 贴边、移动、最小化与解除
+If the SDK is missing or its profile is unknown, the preview must stay blocked with a reason. Browser-only rendering, a screenshot, or a test fixture is not native-preview acceptance.
 
-按下面顺序使用自己允许测试的普通应用窗口；不需要工程执行信任。
+## Inspector and Agent delivery
 
-| 检查 | 操作 | 预期与记录 |
-| --- | --- | --- |
-| 选择目标 | 按住 ArkDock 顶部拖动区，靠近目标右侧，出现目标提示后松开 | 轮廓对应所选窗口；ArkDock 贴在目标外侧，仍是独立顶层窗口，不嵌入目标内容 |
-| 移动和尺寸 | 移动、缩放目标，再拖动或缩放已绑定的 ArkDock | 检查实际跟随、两个窗口边界和尺寸联动；目标内容正常交互，无持续抢焦点 |
-| 空间不足 | 将目标移至工作区右侧，查看布局提示 | 若提示调整目标布局，未勾选“同意调整目标窗口”前不能执行该操作；同意后检查实际布局 |
-| 共同最大化 | 若当前状态允许，使用 ArkDock 最大化/还原按钮 | 两个独立窗口保持右侧共同布局；记录状态、边界、还原结果，受限时应显示原因 |
-| 目标最小化 | 最小化目标，再从任务栏恢复 | 检查 ArkDock 随目标隐藏/恢复与绑定状态，不显示旧会话的新画面 |
-| ArkDock 最小化 | 使用 ArkDock 顶部“最小化窗口”，再从任务栏恢复 | 窗口可恢复，目标应用仍可使用；记录绑定状态 |
-| 解除绑定 | “更多操作”或“偏好设置 → 解除当前绑定” | 回到独立未绑定状态，清除当前工程/预览会话和输入，停止自有预览资源；之后移动目标不再带动 ArkDock |
-| 目标关闭 | 重新绑定后关闭目标 | 显示目标不可用或解除绑定，清除会话；重新打开的同名窗口必须重新绑定 |
+Check that inspection mode does not trigger the preview application's normal click handler, that component selection is associated with the displayed frame, and that old selection state cannot cross a project or session change.
 
-对两个同名窗口或同一应用的两个窗口再做一次选择，确认操作对象正确。若应用拒绝移动/缩放，应记录受限原因；不要通过提升权限、改目标配置或结束其他进程来“修复”验收。
+Sending to an active Agent conversation is currently unsupported. Do not count copied text, local files, a new conversation, or read-only MCP output as a successful send. A future send implementation must provide a verified current-session target and a matching submission receipt.
 
-只有仍满足原生命周期、已同意布局且用户未改变几何时，才可以安全恢复布局。目标已被用户移动、销毁或改变布局时，不应强行恢复旧位置。单屏通过不能证明多屏行为。
+## Reporting
 
-## 4. 工程发现与执行信任
-
-发现只读取工程线索，选择工程和允许其构建是两个步骤。候选应显示完整应用根、工作区根、Windows/WSL/远程环境、模块、来源和原因。
-
-| 场景 | 操作与检查 |
-| --- | --- |
-| 无工程线索 | 绑定没有鸿蒙工程路径的普通应用；应提示未发现可确认工程，并可“选择工程目录”。不得按应用名称猜出路径 |
-| 唯一弱候选 | 让目标标题、选中标签元数据、历史或弱会话登记提供一个实际工程线索；检查来源。即使只有一项，也应等待用户确认，不能自动授权构建 |
-| 多个候选 | 在含两个实际鸿蒙应用的工作区使用“更多操作 → 手动选择目录”，或检查目标提供的多个线索；应列出可搜索、可滚动的完整候选，由用户选择 |
-| 显式目录 | 选择实际鸿蒙工程根。只有一个有效应用时可完成显式关联；此时仍须独立确认执行信任 |
-| 非工程/不可用路径 | 选择普通目录或不可访问的路径；应显示原因，不将其变成有效工程 |
-| 环境身份 | 若出现 WSL 或远程候选，路径和环境必须保留，不改写为 Windows 同名路径；当前 Windows 本地后端应阻塞执行 |
-
-首次关联新的测试工程后，确认进入“工程信任”，显示应用根和“信任此工程”。在确认前应只读，不启动 Hvigor 或 Previewer。仅信任自己已检查且允许执行构建逻辑的工程；SDK 选择不会代替工程信任。
-
-确认后，在“工程 → 工程身份与路径”核对身份与“已信任当前构建配置”。执行以下回归：
-
-1. 点击“撤销工程信任”，应立即停止预览、清除当前输入，并回到只读状态。
-2. 再次信任后，仅在自己的测试工程中备份并修改根或模块构建配置，例如 `build-profile.json5` 或 `hvigorfile.ts`。重新识别/刷新时应重新要求信任，不能沿用旧配置指纹。
-3. 恢复修改；重新选择工程或重启 ArkDock 后仍核对路径与当前信任状态。信任历史不会证明目标窗口当前活动的工程。
-4. 识别进行中使用“取消关联”应使绑定会话失效；当前只读检查可能等返回后完成，但迟到结果不能重新绑定目标。
-
-没有构造出唯一弱候选或多个候选时，将对应项记为 `SKIPPED` 并说明实际来源；手动选择成功不能替代自动发现决策的测试。
-
-## 5. 选择 SDK 与真实原生预览
-
-在“更多操作 → 设备与原生工具链 → 指定 SDK 目录”选择**完整 Command Line Tools 根目录**。该目录应包含 `sdk/default`、`hvigor` 和 `tool/node`；示例为 `D:\CodingTools\HarmonyOS\command-line-tools`。不要选整个工具盘、仅 `sdk` 子目录或 `previewer/common/bin`。
-
-SDK 由用户从 [Huawei 官方命令行工具入口](https://developer.huawei.com/consumer/cn/download/command-line-tools-for-hmos) 合法获取，ArkDock 不分发 SDK、不代登录或接受许可。安装版使用 SDK 自带的构建 Node，无需为运行 ArkDock 另装前端开发 Node。
-
-当前已核验配置为 Command Line Tools **26.0.0.851**、HarmonyOS SDK/Previewer **26.0.0.105 / API 26**、Hvigor **6.26.8**，并校验工具摘要。原生适配范围是 **Windows 本地 x64、Stage 默认 product/target、`pages/Index`、360×640、点击与源码刷新**。其他 SDK 版本、摘要、平台或工程形态不能由本项推定兼容。
-
-没有保存 SDK 选择时，启动会只观察 `ARKDOCK_SDK`、`DEVECO_SDK_HOME`、`OHOS_SDK_HOME`、`HARMONYOS_SDK_HOME` 中的候选，并只选择已核验可用配置；不扫描全盘。测试者可以直接在界面选择，无需设置全局环境变量。已保存选择优先于自动探测。
-
-使用自己的符合当前范围的工程，或源码随交付提供的 [真实计数器示例](../../examples/native-counter)，执行：
-
-1. 关闭 DevEco GUI，绑定目标、显式选择实际工程、确认信任，再选择合法 SDK。检查 SDK 路径、版本和后端原因。
-2. 等待实际构建及原生首帧。构建状态不是预览成功；应看到真实工程的 `Index` 页面、可识别的应用内容及画面代次。
-3. 对计数器点击“Increment actual ArkUI state”，检查 `Count: 0` 变为 `Count: 1`。运行日志/原生日志应能对应当前构建，不能仅以鼠标事件发出作通过依据。
-4. 切换“适应窗口”、50%、100%、150% 显示缩放，点击真实按钮仍应命中正确控件。画面留白不应发送点击；显示缩放不改变 360×640 原生表面。
-5. 备份测试工程 `entry/src/main/ets/pages/Index.ets`，将计数器中的 `FIRST` 文案改为 `SECOND` 并保存。应触发源码构建并显示新文案及新代次；恢复文件后再检查一次。
-6. 点击工具栏“手动刷新”，应重建并重启真实运行时；计数器状态会重置。源码刷新同样会重置状态，当前不提供保留状态热更新。
-7. 点击“停止”，应清除画面并禁用点击；“预览能力 → 手动刷新”可在仍可信、SDK 可用时重新开始。解除绑定、切换工程、撤销信任或退出时，应释放 ArkDock 自有构建/Previewer 资源。
-
-**点击是当前可用输入。** 键盘输入、文字/IME、拖拽/滑动、旋转、页面切换、设备切换、鸿蒙应用主题切换、模拟器和真机尚不可用；“预览能力”应显示禁用原因。ArkDock 外壳主题不会改变鸿蒙应用主题。
-
-## 6. 错误与恢复
-
-只在自己的测试工程执行可恢复的修改；修改前保存原始字节，完成后还原。不按 Node、Previewer 或应用进程名称批量结束进程。
-
-| 场景 | 预期 | 恢复方式 |
-| --- | --- | --- |
-| 没有 SDK、选择错误目录 | 明确缺失/阻塞，无原生画面与可用输入 | 在设备页重新选择完整且合法的工具包根 |
-| SDK 版本或摘要未核验 | 明确协议/兼容性阻塞，不自动采用其他协议或替身 | 使用当前已核验配置，或提交独立核验需求 |
-| 未信任/撤销信任 | 工程只读，预览停止，点击不可用 | 核对路径和构建配置后显式信任 |
-| 编译错误 | 状态和日志显示失败；若保留上次画面，必须标明旧画面/旧代次并禁用点击 | 在测试 `.ets` 中撤销故意引入的语法错误，保存并等待恢复，必要时手动刷新 |
-| 构建/首帧超时或运行退出 | 显示实际失败原因，不无限显示“正在运行” | 先保存诊断和原生日志，停止，再手动刷新；再次失败则报告 |
-| 构建中停止、解除或换工程 | 旧会话不再接受画面/点击，迟到结果不能恢复旧工程 | 重新建立并确认当前工程会话 |
-| 保存配置失败 | 运行日志含 `SETTINGS_UNAVAILABLE`、具体设置错误或 `PERSISTENCE_UNAVAILABLE` | 先备份证据，再按下节退出并手动重置配置 |
-
-当前后端的单次构建期限为 120 秒，等待原生首帧期限为 15 秒；这些是故障判断边界，不是性能承诺。恢复项必须实际收到新构建画面，并验证点击；仅清掉错误文字不算恢复通过。
-
-## 7. 诊断、日志与安全重置
-
-点击底部状态条或“更多操作 → 运行日志”，查看后端原因、构建错误及带时间的 `PASS / FAIL / BLOCKED / SKIPPED` 记录。底部失败/阻塞数字统计当前保留的诊断记录，不等于编译器错误总数。“复制脱敏诊断”可复制分享文本；剪贴板不可用时可选择文字复制。
-
-当前界面诊断最多保留 128 条，位于内存中，退出后不保证保留；没有持久化的 `app.log` 或一键导出完整日志文件。退出或重试前先复制需要的诊断。
-
-| 内容 | Windows 实际位置与说明 |
-| --- | --- |
-| 原生配置目录 | Windows 漫游应用数据目录下的 `dev.arkdock.desktop`，通常为 `%APPDATA%\dev.arkdock.desktop`（如 `C:\Users\<用户>\AppData\Roaming\dev.arkdock.desktop`） |
-| SDK、信任与历史 | 上述目录中的 `settings.json`；写入时可能保留 `settings.json.bak`，并可能使用 `preferences\<序号>-<摘要>.json` 与 `.ready` 提交记录。journal 的最新完整记录可覆盖旧 `settings.json` |
-| 原生会话日志 | Windows 临时目录下的 `ArkDock-native\<32 位随机十六进制目录>\build.log` 和 `previewer.log`，通常为 `%TEMP%\ArkDock-native\...`。`BUILD_COMPLETED` 诊断会给出该次准确目录；失败发生在完成收据前时，按测试时间查找对应目录 |
-| 工程生成物 | 已信任工程的模块 `.preview/default/intermediates`，以及工程根 `.hvigor/arkdock-home`；它们不是全局 SDK 配置，也不是界面诊断文件 |
-| 外观与动画偏好 | WebView2 本地存储，键为 `arkdock:theme`、`arkdock:motion`；默认 WebView2 用户数据根在 `%LOCALAPPDATA%\dev.arkdock.desktop`。与上述原生设置分开，优先通过“偏好设置”调整，不手工修改浏览器数据文件 |
-
-临时目录可能被系统清理；报错后及时保留对应会话日志。不要将 SDK、整个工程、完整用户目录或所有临时目录打包上传。
-
-仅在配置损坏或确实需要清空 SDK 选择、工程信任和历史时重置：先退出所有自己启动的 ArkDock，备份必要诊断，再用普通 PowerShell 将**准确的原生配置目录重命名**。以下命令检查目标是当前用户漫游目录下的指定普通文件夹，并保留完整备份，不删除文件：
-
-```powershell
-$arkdockRoaming = [IO.Path]::GetFullPath([Environment]::GetFolderPath('ApplicationData')).TrimEnd('\')
-$arkdockConfig = [IO.Path]::GetFullPath((Join-Path $arkdockRoaming 'dev.arkdock.desktop'))
-$arkdockItem = Get-Item -LiteralPath $arkdockConfig -ErrorAction Stop
-if ([IO.Path]::GetDirectoryName($arkdockConfig) -ne $arkdockRoaming -or
-    [IO.Path]::GetFileName($arkdockConfig) -ne 'dev.arkdock.desktop' -or
-    -not $arkdockItem.PSIsContainer -or
-    ($arkdockItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-  throw '配置目录校验失败；不要移动此路径。'
-}
-$arkdockBackupName = 'dev.arkdock.desktop.backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
-$arkdockBackup = Join-Path $arkdockRoaming $arkdockBackupName
-if (Test-Path -LiteralPath $arkdockBackup) { throw '备份已存在；不要覆盖。' }
-Write-Output "配置：$arkdockConfig"
-Write-Output "备份：$arkdockBackup"
-Rename-Item -LiteralPath $arkdockConfig -NewName $arkdockBackupName -ErrorAction Stop
-```
-
-重新启动后重新选择 SDK、工程并确认信任。已有 SDK 环境变量仍可能触发只读自动探测；外观偏好也可能保留。只移动 `settings.json` 而留下 `preferences` 不能保证重置。保留备份，不手工改配置摘要或 `.ready` 标记；需恢复时先退出 ArkDock，将新配置另行备份后再恢复整个原目录，不合并两套 journal。
-
-## 8. 报告与未覆盖范围
-
-每次提交记录至少包含：安装包版本与 SHA256、Windows/WebView2 版本、普通用户安装情况、显示器与缩放、SDK/构建工具版本、用例编号、操作步骤、预期/实际行为、状态、发生时间、截图及对应日志位置。开发者门禁另外记录命令与退出码、环境和证据路径，不能用“打包成功”代替安装版或原生验收。
-
-Bug 报告优先使用“复制脱敏诊断”。分享前再人工检查截图与原生日志：隐藏用户名、完整本地/网络路径、窗口标题中的私有内容、工程源码、业务数据及密钥/令牌。原生日志和配置备份没有自动脱敏；不直接上传整个配置目录。保留错误码、时间、代次、版本和必要日志片段，便于对应实际失败。
-
-当前多屏、100%/150% 混合缩放、负坐标、跨屏 DPI、更高权限目标和 HWND 复用/事件积压压力仍需真桌面测试；没有设备时分别标 `BLOCKED` 或 `SKIPPED`。单屏截图、几何单测、便携测试及本页清单不能使这些项目通过。键盘/IME/滑动等未支持能力按禁用检查记录，不写成原生交互通过。
-
-可用以下格式附上本次结果；空项保持未执行：
-
-| 项目 | 状态 | 实际环境、步骤与证据 | 问题/下一步 |
-| --- | --- | --- | --- |
-| 普通用户安装与独立启动 | 未执行 | | |
-| 贴边/移动/最小化/解除 | 未执行 | | |
-| 无候选/唯一弱候选/多个候选 | 未执行 | | |
-| 关联与信任、撤销、配置变更 | 未执行 | | |
-| SDK 缺失与未核验配置阻塞 | 未执行 | | |
-| 真实首帧/点击/源码刷新 | 未执行 | | |
-| 编译失败/恢复/停止清理 | 未执行 | | |
-| 诊断与配置重置 | 未执行 | | |
-| 多屏/混合 DPI/权限/生命周期压力 | 未执行 | | |
+State the Windows version, display configuration, application build, selected SDK profile when used, exact action, expected and observed result, and whether the check was `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`. Sanitize user names, local paths, project content, window titles, and tokens before sharing diagnostics.

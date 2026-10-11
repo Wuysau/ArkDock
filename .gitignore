@@ -4,6 +4,9 @@ target/
 .local/
 artifacts/
 .playwright-cli/
+.playwright-mcp/
+.codex/
+.agents/
 src-tauri/gen/schemas/
 *.local.json
 *.log
@@ -14,3 +17,22 @@ examples/native-counter/entry/.preview/
 examples/native-counter/build/
 examples/native-counter/entry/build/
 examples/native-counter/oh_modules/
+
+# Developer-local Harness and machine-specific workflow notes. Keep them locally;
+# tools/check-public-tree.mjs prevents these paths from being tracked again.
+AGENTS.md
+CLAUDE.md
+ENVIRONMENT.md
+/docs/harness/
+/docs/plans/
+/docs/evidence/
+/docs/status.md
+/docs/design/agent-selection-delivery.md
+/docs/native-preview/design.md
+/docs/native-preview/plan.md
+/docs/native-preview/integration.md
+/docs/native-preview/validation.md
+/docs/native-preview/inspector-validation.md
+/docs/native-preview/windows-setup.md
+/docs/runbooks/windows-native-preview.md
+/tools/verify-harness.mjs

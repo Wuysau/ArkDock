@@ -56,7 +56,4 @@ Rust Windows 后端以 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 与
 升级为强登记需要独立完成并验证本地命名管道服务：同用户安全描述符、
 `GetNamedPipeClientProcessId` 获取真实客户端 PID、客户端/目标生命周期与授权范围、
 有界消息、TTL、撤销、活动标签证明、并发及假冒攻击原生测试。缺少其中证据时保持弱候选。
-本次环境缺 Cargo/Windows，helper 和生命周期测试未执行；当前证据见
-[发现验证记录](../evidence/discovery.md)。
-
-集成后的 arkdock-session 是源码开发工具，需 native-tools；Windows 安装包不包含它，基础贴边和目录选择不依赖它。
+`arkdock-session` 是通过 `native-tools` 启用的可选源码开发工具，Windows 安装包不包含它。基础贴边和目录选择不依赖该 helper。使用修改后的构建前，应先在 Windows 上运行公开质量检查。

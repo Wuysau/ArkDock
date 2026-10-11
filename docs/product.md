@@ -1,33 +1,26 @@
-# 产品与验收
+# Product overview
 
-ArkDock：鸿蒙外置贴边预览伴侣。用户在既有 Agent/CLI 对话中写代码，
-拖动独立窗口到其外侧，按证据关联当前工程，实际原生预览跟随源码更新。
-默认 Windows 11 本地；不承诺 WSL、远程或其他系统。无账号、云服务、聊天系统。
+ArkDock is an independent Windows desktop companion for people building HarmonyOS applications. It places a narrow preview window beside an ordinary application or terminal and can display pixels from a real, supported HarmonyOS Previewer runtime.
 
-默认旅程：拖动 → 边缘候选提示 → 松开绑定窗口 → 当前会话证据解析 →
-唯一可靠候选关联；歧义进入可搜索候选面板；无候选才显示目录兜底。
-未信任项目仅只读检查。历史确认不能代替当前会话核验。
-所有已发现候选可滚动查看，展示完整路径、环境、模块、来源、有效性与理由。
-随时可换工程、重新识别、解除绑定。顶部常驻目标/工程/模式。
+## User flow
 
-| ID | 验收 | 必要证据 |
-| --- | --- | --- |
-| A1 | Windows 真桌面拖动候选、释放吸附、跟随移动缩放 | 原生手测记录 |
-| A2 | 最小化恢复、关闭、HWND 复用与权限降级 | 原生手测 + 生命周期单测 |
-| A3 | 多 DPI/负坐标/工作区/窄屏、点击不隐藏或抢焦点 | 几何单测 + 双屏手测 |
-| A4 | 明确同意才并排；解除不覆盖用户新布局 | 布局单测 + 原生手测 |
-| B1 | 唯一可靠证据自动关联，弱/歧义不自动 | Rust 决策测试 |
-| B2 | 过期、错配、伪造登记拒绝；未知活动标签仍列候选 | 登记与决策测试 |
-| B3 | 只读根定位/模块/worktree/WSL/无全盘扫描 | 文件系统测试 |
-| B4 | 未信任不执行、可撤销信任、历史重新核验 | 信任测试 |
-| C1 | 多文件合并、单任务、中途变更下一代、旧任务拒绝 | 调度测试 |
-| C2 | 旧帧丢弃、失败保留且标旧、关闭清理自有资源 | 调度/帧测试 |
-| D1 | GUI 关闭、真实 ArkTS 构建、Previewer 原生画面 | SDK/命令/产物/帧证据 |
-| D2 | 原生点击状态改变、实际 .ets 修改驱动更新 | 原生录屏/带代次日志 |
-| D3 | 缺 SDK/未知协议明确 BLOCKED，无替身兜底 | 便携与 Rust 回归 |
-| E1 | 入口精简、路径和命令存在、IPC 单一来源 | Harness/契约检查 |
-| E2 | 基础、原生、发布门禁区分状态并可执行 | 脚本退出码与 CI |
-| E3 | 新 Agent 按入口、路由、计划继续 | 人工接续审查（待验证） |
+1. Drag ArkDock beside a target window. ArkDock remains a separate top-level window.
+2. Review project candidates discovered from read-only evidence, or select a project directory explicitly.
+3. Grant build trust separately from project association.
+4. Configure a legally obtained HarmonyOS toolchain and start a supported native preview.
+5. Inspect or select visible components when the runtime provides the required metadata.
 
-原生 Previewer、模拟器、真机与测试替身必须区分；不承诺全系统 API、
-所有交互、瞬时刷新或永久保留状态。不重新分发 SDK 与第三方工具二进制。
+Candidates are not execution permission. A weak or ambiguous candidate is never silently treated as the active project. A changed project, process, session, build, or frame invalidates stale actions and results.
+
+## Product boundaries
+
+- The target can be an ordinary desktop application or terminal; the basic window and project flow does not depend on a specific Agent brand, plugin, or MCP server.
+- ArkDock does not inject into or modify the target application and does not use `SetParent` to embed its window.
+- Project discovery is read-only. Build execution requires explicit trust and a supported toolchain.
+- Preview means actual ArkUI output from a HarmonyOS runtime. A browser-rendered imitation is not accepted as native preview.
+- Windows, WSL, and remote paths keep their environment identities. Unknown or unsupported environments fail explicitly.
+- The current Agent adapters do not support sending to an active Codex or Claude conversation. A copied prompt, local file, or read-only MCP response is not a submitted message.
+
+## Current scope
+
+The source includes window docking and motion effects, Orb/Hidden display modes, Inspector selection, binary frame transport, and native Previewer integration. Their merged behavior still requires integrated Windows acceptance; see [Compatibility](compatibility.md). ArkDock does not claim support for every SDK, device, page, input method, simulator, remote environment, or state-preserving hot reload.

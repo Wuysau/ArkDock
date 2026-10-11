@@ -85,7 +85,7 @@ JSON 元数据最多 4096 字节。SDK 的完整 JPEG40 消息最多 1 MiB，去
 
 ## 状态和帧的版本边界
 
-Windows WebView2 最小化时，`document.hidden` 本机实测仍可为 false。新增生成类型
+Windows WebView2 最小化时，`document.hidden` 可能仍为 false。新增生成类型
 `PreviewVisibility` 的 `arkdock:visibility` 为权威窗口门禁：后台只读取当前进程自有
 main HWND 的 IsWindowVisible 与 IsIconic，每 100 ms 核验，变化时通知，并每秒刷新一次
 以处理重新订阅；不在后台同步调用 WebView 线程 getter。前端结合原生 visible 与
@@ -131,11 +131,11 @@ PNG 兼容帧缺少 `workspaceId`，仍须通过当前快照的会话、构建�
 超过该保留窗口会保守拒绝并提示重新选择。源码重建、换工程、停止、撤销信任立即失效。
 `selection_update_instruction` 保持意见与 selectionId 关联；图片经专门二进制入口读取。
 
-Codex/Claude 的手工线程 ID 登记不会赋予写入权。当前适配器 UNSUPPORTED；只有实际
-写入通道和提交回执才可显示 SUBMITTED。复制、导出、受显式 grant 约束的只读 MCP
-均保留独立语义。具体契约见 [交付设计](../design/agent-selection-delivery.md)。
+手工填写的 Agent 线程 ID 不会赋予写入权。当前适配器不支持向活动 Codex/Claude
+会话发送；只有已授权的写入通道和匹配提交回执才可显示 `SUBMITTED`。复制、导出、
+受显式 grant 约束的只读 MCP 均保留独立语义。
 
 前端完成后，在实际 ArkDock WebView2 验证真实首帧、点击计数、源码变更、
 编译失败旧图、恢复和停止。CLI 的后端原生验收不等于前端点击坐标或布局验收。
 浏览器 UI 演示、静态截图和发现 fixture 均不能证明鸿蒙原生预览能力。
-本次后端证据和未完成的集成项见 `validation.md`、`integration.md`。
+集成后的能力范围和验证限制见 [Compatibility](../compatibility.md)。
