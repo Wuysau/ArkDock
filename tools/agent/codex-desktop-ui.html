@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArkDock Session Bridge</title>
+<style>body{font:14px system-ui;margin:20px;line-height:1.5;color:CanvasText;background:Canvas}button{font:inherit;padding:8px 14px;margin-right:8px}#status{white-space:pre-wrap}small{opacity:.7}</style>
+<h1>ArkDock Session Bridge</h1>
+<p>Connect this conversation to the workspace explicitly paired in ArkDock.</p>
+<button id="connect" disabled>Connect this conversation</button><button id="stop" disabled>Disconnect</button>
+<p id="status" role="status">Checking host capabilities…</p>
+<small>The phone preview stays in ArkDock. This panel only relays authorized selections.</small>
+<script type="module">
+const pending=new Map(), instance=crypto.randomUUID();let next=1,active=false,closed=false,hostOrigin=null;
+const status=document.getElementById('status'),connect=document.getElementById('connect'),stop=document.getElementById('stop');
+function request(method,params){if(closed)return Promise.reject(new Error('Bridge closed'));return new Promise((resolve,reject)=>{
+ const id=next++,timer=setTimeout(()=>{pending.delete(id);reject(new Error('Host response timeout; delivery outcome unknown'));},4000);
+ pending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},hostOrigin&&hostOrigin!=='null'?hostOrigin:'*');});}
+function notify(method,params){window.parent.postMessage({jsonrpc:'2.0',method,params},hostOrigin&&hostOrigin!=='null'?hostOrigin:'*');}
+async function tool(name,args={}){const result=await request('tools/call',{name,arguments:{uiInstance:instance,...args}});
+ if(result.isError)throw new Error(result.content?.[0]?.text??'Bridge blocked');return result.structuredContent??{};}
+async function disconnect(){if(!active)return;active=false;connect.disabled=true;stop.disabled=true;
+ try{await tool('arkdock.bridge_disconnect');}catch{}status.textContent='Disconnected. Create a fresh pairing before reconnecting.';}
+window.addEventListener('message',event=>{if(event.source!==window.parent||!event.data||event.data.jsonrpc!=='2.0')return;
+ if(hostOrigin!==null&&event.origin!==hostOrigin)return;
+ const message=event.data;
+ if(pending.has(message.id)){const item=pending.get(message.id);pending.delete(message.id);clearTimeout(item.timer);
+  if(hostOrigin===null)hostOrigin=event.origin;
+  if(message.error)item.reject(new Error('Host rejected the operation'));else item.resolve(message.result);}
+ else if(message.method==='ui/notifications/host-context-changed'&&active){disconnect();}
+ else if(message.method==='ui/resource-teardown'){disconnect().finally(()=>{
+  if(message.id!==undefined)window.parent.postMessage({jsonrpc:'2.0',id:message.id,result:{}},hostOrigin&&hostOrigin!=='null'?hostOrigin:'*');closed=true;});}
+});
+window.addEventListener('pagehide',()=>{disconnect();closed=true;});
+stop.onclick=()=>disconnect();
+connect.onclick=async()=>{connect.disabled=true;try{
+ await tool('arkdock.bridge_connect',{consent:true});active=true;stop.disabled=false;status.textContent='Connected to this conversation. Waiting for an explicitly sent ArkDock selection.';
+ while(active){const {deliveries=[]}=await tool('arkdock.bridge_poll');
+  for(const delivery of deliveries){if(!active)break;let success=false;
+   try{const result=await request('ui/message',{role:'user',content:[{type:'text',text:delivery.prompt}],_meta:{'openai/message':{target:'active',send:true}}});
+    if(result?.isError)throw new Error('Host message rejected');success=true;
+   }finally{await tool('arkdock.bridge_sent',{deliveryId:delivery.deliveryId,success});}
+   status.textContent='Host accepted the message. Agent acknowledgment and completion are reported separately.';
+  }await new Promise(resolve=>setTimeout(resolve,500));}
+ }catch(error){await disconnect();status.textContent=error.message;}};
+try{const host=await request('ui/initialize',{appInfo:{name:'ArkDock Session Bridge',version:'1.0.0'},protocolVersion:'2026-01-26',appCapabilities:{availableDisplayModes:['inline']}});
+ notify('ui/notifications/initialized',{});
+ if(host?.protocolVersion!=='2026-01-26'||!host?.hostCapabilities?.serverTools||!host?.hostCapabilities?.message?.text||!host?.hostCapabilities?.experimental?.['openai/message'])throw new Error('BLOCKED: This host does not advertise the supported conversation message and tool APIs.');
+ connect.disabled=false;status.textContent='Ready. Connecting checks host session metadata and the exact workspace root.';
+}catch(error){status.textContent=error.message;}
+</script></html>

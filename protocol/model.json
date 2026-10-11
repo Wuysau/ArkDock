@@ -81,7 +81,11 @@
     ],
     "AgentTransportKind": [
       "unsupported",
-      "explicitBridge"
+      "explicitBridge",
+      "claudeChannel",
+      "codexAppServer",
+      "assistedWindow",
+      "codexDesktopPlugin"
     ],
     "DeliveryState": [
       "READY",
@@ -90,7 +94,17 @@
       "SENDING",
       "SUBMITTED",
       "FAILED",
-      "EXPIRED"
+      "EXPIRED",
+      "TRANSPORT_ACCEPTED",
+      "AGENT_ACKNOWLEDGED",
+      "COMPLETED",
+      "FILLED_PENDING_USER_SEND",
+      "UNKNOWN"
+    ],
+    "DeliveryMode": [
+      "native",
+      "assisted",
+      "copy"
     ]
   },
   "structs": {
@@ -366,7 +380,11 @@
       "capabilities": "AgentCapabilities",
       "observedAt": "u64",
       "expiresAt": "u64",
-      "reason": "string"
+      "reason": "string",
+      "transportInstanceId": "string?",
+      "agentVersion": "string?",
+      "verifiedAt": "u64",
+      "bindingEvidence": "string"
     },
     "AgentBindingDraft": {
       "agentKind": "AgentKind",
@@ -375,7 +393,8 @@
     },
     "AgentSessionList": {
       "adapters": "AgentAdapterStatus[]",
-      "bindings": "AgentSessionBinding[]"
+      "bindings": "AgentSessionBinding[]",
+      "registrations": "AgentRegistration[]"
     },
     "AgentDelivery": {
       "requestId": "string",
@@ -387,7 +406,52 @@
       "receiptId": "string?",
       "reason": "string",
       "createdAt": "u64",
-      "updatedAt": "u64"
+      "updatedAt": "u64",
+      "idempotencyKey": "string",
+      "deliveryMode": "DeliveryMode",
+      "transportReceipt": "string?",
+      "agentAcknowledgment": "string?"
+    },
+    "AgentRegistration": {
+      "registrationId": "string",
+      "agentKind": "AgentKind",
+      "agentVersion": "string",
+      "transportKind": "AgentTransportKind",
+      "transportInstanceId": "string",
+      "agentSessionId": "string",
+      "conversationOrThreadId": "string",
+      "workspaceId": "string",
+      "workspaceRoot": "string",
+      "pid": "u32",
+      "capabilities": "AgentCapabilities",
+      "observedAt": "u64",
+      "expiresAt": "u64",
+      "busy": "bool",
+      "reason": "string"
+    },
+    "AgentPairing": {
+      "pairingId": "string",
+      "endpoint": "string",
+      "token": "string",
+      "agentKind": "AgentKind",
+      "workspaceId": "string",
+      "workspaceRoot": "string",
+      "expiresAt": "u64",
+      "configPath": "string?"
+    },
+    "AssistedOffer": {
+      "confirmationId": "string",
+      "targetId": "string",
+      "app": "string",
+      "pid": "u32",
+      "composerName": "string",
+      "expiresAt": "u64",
+      "reason": "string"
+    },
+    "AssistedFill": {
+      "state": "DeliveryState",
+      "receiptId": "string?",
+      "reason": "string"
     }
   },
   "commandResponses": {
@@ -477,6 +541,31 @@
       "error": "String"
     },
     "agent_delivery_status": {
+      "rust": "AgentDelivery",
+      "typescript": "AgentDelivery",
+      "error": "String"
+    },
+    "agent_pair_create": {
+      "rust": "AgentPairing",
+      "typescript": "AgentPairing",
+      "error": "String"
+    },
+    "agent_pair_revoke": {
+      "rust": "bool",
+      "typescript": "bool",
+      "error": "String"
+    },
+    "agent_registration_bind": {
+      "rust": "AgentSessionBinding",
+      "typescript": "AgentSessionBinding",
+      "error": "String"
+    },
+    "agent_assisted_inspect": {
+      "rust": "AssistedOffer",
+      "typescript": "AssistedOffer",
+      "error": "String"
+    },
+    "agent_assisted_fill": {
       "rust": "AgentDelivery",
       "typescript": "AgentDelivery",
       "error": "String"
@@ -639,6 +728,25 @@
     "agent_delivery_status": {
       "scope": "RequestScope",
       "requestId": "string"
+    },
+    "agent_pair_create": {
+      "scope": "RequestScope",
+      "agentKind": "AgentKind"
+    },
+    "agent_pair_revoke": {
+      "scope": "RequestScope"
+    },
+    "agent_registration_bind": {
+      "scope": "RequestScope",
+      "registrationId": "string"
+    },
+    "agent_assisted_inspect": {
+      "scope": "RequestScope"
+    },
+    "agent_assisted_fill": {
+      "scope": "RequestScope",
+      "confirmationId": "string",
+      "selectionId": "string"
     }
   }
 }

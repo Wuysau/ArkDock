@@ -60,6 +60,8 @@ async function bind(alreadyMaximized=false) {
   action('move',dockHandle,{X:1800,Y:100,Width:906,Height:1320});
   action('foreground',target.first);action('foreground',dockHandle);await pause(200);
   await activateOwnedHeader(view,dockHandle,action);
+  action('raise',target.first,{ProcessId:target.pid});
+  action('raise',dockHandle,{ProcessId:dockPid});
   const own=action('info',dockHandle),destination=action('info',target.first);
   requireOwnedTargetEdge(action,target.first,destination,dockPid);
   const button=await view.evaluate('(()=>{const r=document.querySelector(".drag").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio}})()');

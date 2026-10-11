@@ -17,6 +17,7 @@ use crate::scheduler::{
 use crate::windowing::{WindowController, WindowUpdate};
 use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
+mod agent_delivery;
 mod inspection;
 mod visibility;
 use inspection::{DataAction, DataResult, PendingInspection};
@@ -210,6 +211,10 @@ struct Engine {
     frames: Arc<Mutex<FrameDelivery>>,
     selections: Option<crate::selection::SelectionStore>,
     agents: crate::agent::AgentRouter,
+    assisted: Arc<Mutex<crate::agent::assisted::AssistedController>>,
+    assisted_busy: Arc<std::sync::atomic::AtomicBool>,
+    pending_assisted: Option<agent_delivery::PendingAssisted>,
+    assisted_offer_scope: Option<RequestScope>,
     inspection: Option<PendingInspection>,
     inspection_tree: Option<InspectorTree>,
     inspection_anchor: Option<BinaryFrame>,
@@ -1411,6 +1416,11 @@ pub fn run() {
             inspection::agent_delivery_prepare,
             inspection::agent_delivery_send,
             inspection::agent_delivery_status,
+            agent_delivery::agent_pair_create,
+            agent_delivery::agent_pair_revoke,
+            agent_delivery::agent_registration_bind,
+            agent_delivery::agent_assisted_inspect,
+            agent_delivery::agent_assisted_fill,
         ])
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
@@ -1470,6 +1480,12 @@ pub fn run() {
                     frames,
                     selections: None,
                     agents: crate::agent::AgentRouter::new(),
+                    assisted: Arc::new(Mutex::new(
+                        crate::agent::assisted::AssistedController::default(),
+                    )),
+                    assisted_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pending_assisted: None,
+                    assisted_offer_scope: None,
                     inspection: None,
                     inspection_tree: None,
                     inspection_anchor: None,
@@ -1518,8 +1534,12 @@ pub fn run() {
                             });
                             let _ = reply.send(result);
                         }
-                        Ok(Message::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Ok(Message::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            engine.cancel_assisted();
+                            break;
+                        }
                         Ok(Message::Action(scope, action, reply)) => {
+                            engine.cancel_assisted();
                             engine.drain_events();
                             let result = engine.handle(scope, action);
                             if let Err(error) = &result {
@@ -1540,6 +1560,8 @@ pub fn run() {
                     engine.drain_events();
                     engine.tick();
                     engine.poll_inspection();
+                    engine.poll_assisted();
+                    engine.agents.sync(&engine.snapshot, now());
                     if now().saturating_sub(engine.last_visibility_sync) >= 100 {
                         engine.last_visibility_sync = now();
                         engine.sync_visibility();

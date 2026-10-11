@@ -2,6 +2,7 @@
 
 - [Product overview](product.md)
 - [Architecture](architecture.md)
+- [Agent delivery and setup](agent-delivery/README.md)
 - [Compatibility and validation scope](compatibility.md)
 - [Windows development](building-windows.md)
 - [Windows acceptance guide](testing/windows-acceptance.md)

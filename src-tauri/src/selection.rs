@@ -15,13 +15,15 @@ pub const MAX_SELECTIONS: usize = 32;
 const MAX_CONTEXT_BYTES: usize = 256 * 1024;
 const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_INSTRUCTION_BYTES: usize = 16 * 1024;
-const OWN_FILES: [&str; 6] = [
+const OWN_FILES: [&str; 8] = [
     "context.json",
     "screenshot.jpg",
     "crop.jpg",
     "prompt.txt",
     "context.json.pending",
     "prompt.txt.pending",
+    "agent-grant.json",
+    "agent-grant.json.pending",
 ];
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -104,7 +106,11 @@ impl SelectionStore {
                 continue;
             };
             if context.selection_id == id && valid_context(&context) {
-                for name in ["context.json.pending", "prompt.txt.pending"] {
+                for name in [
+                    "context.json.pending",
+                    "prompt.txt.pending",
+                    "agent-grant.json.pending",
+                ] {
                     let path = store.root.join(&id).join(name);
                     if old_owned_file(&path, now) {
                         fs::remove_file(path).map_err(|_| "SELECTION_CLEANUP_FAILED")?;
@@ -321,6 +327,87 @@ impl SelectionStore {
         Ok(format_prompt(&self.get(snapshot, id, now)?))
     }
 
+    /// Called only by an explicitly confirmed native delivery. The grant has one
+    /// selection and is re-read by consumers; replacing/revoking it invalidates old holders.
+    pub fn authorize_delivery(
+        &mut self,
+        snapshot: &AppSnapshot,
+        id: &str,
+        delivery_id: &str,
+        now: u64,
+    ) -> Result<crate::agent::bridge::Attachments, String> {
+        let context = self.get(snapshot, id, now)?;
+        if !delivery_id.starts_with("delivery-")
+            || delivery_id.len() > 128
+            || !delivery_id
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || value == b'-' || value == b'_')
+        {
+            return Err("SELECTION_DELIVERY_ID_INVALID".into());
+        }
+        let context_bytes = self.read_owned(id, "context.json", MAX_CONTEXT_BYTES)?;
+        let stored: SelectionContext =
+            serde_json::from_slice(&context_bytes).map_err(|_| "SELECTION_CONTEXT_INVALID")?;
+        if stored != context {
+            return Err("SELECTION_CONTEXT_CHANGED".into());
+        }
+        let mut images = Vec::new();
+        let directory = self.own_directory(id)?;
+        for (crop, descriptor) in [(false, &context.screenshot), (true, &context.crop)] {
+            self.read_image(snapshot, id, crop, now)?;
+            images.push(crate::agent::bridge::ImageAttachment {
+                path: directory
+                    .join(&descriptor.artifact_id)
+                    .to_string_lossy()
+                    .into_owned(),
+                sha256: descriptor.sha256.clone(),
+                byte_length: descriptor.byte_length,
+                mime_type: "image/jpeg".into(),
+            });
+        }
+        let grant_id = format!(
+            "{delivery_id}-{now}-{}",
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        );
+        let grant = serde_json::json!({"version":1,"grantId":grant_id,"contextSha256":hex_digest(&context_bytes),"directory":self.root,
+            "workspaceId":context.workspace_id,"sessionId":context.session_id,"expiresAt":context.expires_at,
+            "selectionIds":[id],"allowedTools":["arkdock.get_selection","arkdock.get_selection_context","arkdock.get_selection_screenshot"]});
+        self.replace_owned(
+            id,
+            "agent-grant.json",
+            &serde_json::to_vec(&grant).map_err(|_| "SELECTION_GRANT_INVALID")?,
+        )?;
+        Ok(crate::agent::bridge::Attachments {
+            grant: Some(crate::agent::bridge::SelectionGrant {
+                grant_id,
+                directory: self.root.to_string_lossy().into_owned(),
+                capability_file: directory
+                    .join("agent-grant.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                workspace_id: context.workspace_id,
+                session_id: context.session_id,
+            }),
+            images,
+        })
+    }
+
+    pub fn revoke_delivery_grants(&self) -> Result<(), String> {
+        for id in self.contexts.keys() {
+            self.revoke_delivery_grant(id)?;
+        }
+        Ok(())
+    }
+
+    fn revoke_delivery_grant(&self, id: &str) -> Result<(), String> {
+        let path = self.own_directory(id)?.join("agent-grant.json");
+        match fs::symlink_metadata(path) {
+            Ok(_) => self.replace_owned(id, "agent-grant.json", b"{\"version\":1,\"expiresAt\":0}"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("SELECTION_PATH_UNSAFE".into()),
+        }
+    }
+
     pub fn update_instruction(
         &mut self,
         snapshot: &AppSnapshot,
@@ -332,6 +419,10 @@ impl SelectionStore {
             return Err("SELECTION_INSTRUCTION_INVALID".into());
         }
         let mut context = self.get(snapshot, id, now)?;
+        if context.user_instruction == instruction {
+            return Ok(context);
+        }
+        self.revoke_delivery_grant(id)?;
         context.user_instruction = instruction.to_owned();
         let bytes = serde_json::to_vec_pretty(&context).map_err(|_| "SELECTION_CONTEXT_INVALID")?;
         if bytes.len() > MAX_CONTEXT_BYTES {
@@ -439,11 +530,20 @@ impl SelectionStore {
     }
 
     fn replace_owned(&self, id: &str, file: &str, bytes: &[u8]) -> Result<(), String> {
-        if !["context.json", "prompt.txt"].contains(&file) {
+        if !["context.json", "prompt.txt", "agent-grant.json"].contains(&file) {
             return Err("SELECTION_ARTIFACT_INVALID".into());
         }
         let directory = self.own_directory(id)?;
         let path = directory.join(file);
+        if file == "agent-grant.json" {
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return self.write_new(id, file, bytes)
+                }
+                Err(_) => return Err("SELECTION_PATH_UNSAFE".into()),
+                Ok(_) => {}
+            }
+        }
         let actual = fs::canonicalize(&path).map_err(|_| "SELECTION_PATH_UNSAFE")?;
         if actual != path
             || unsafe_link(&fs::symlink_metadata(&path).map_err(|_| "SELECTION_PATH_UNSAFE")?)
@@ -1066,6 +1166,78 @@ mod tests {
             .join("selection-context-v1")
             .join(selection.selection_id)
             .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delivery_grants_create_replace_hash_and_revoke_on_instruction_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let native_frame = frame(now); // Persistence fixture, not native ArkUI evidence.
+        let state = snapshot();
+        let mut store = SelectionStore::open(temp.path()).unwrap();
+        let selection = store
+            .create(
+                &state,
+                &native_frame,
+                &SelectionDraft {
+                    frame: native_frame.metadata.clone(),
+                    bounds: InspectorBounds {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                    node_id: None,
+                    inspection_version: None,
+                    user_instruction: "First request".into(),
+                },
+                None,
+                now,
+            )
+            .unwrap();
+        let id = &selection.selection_id;
+        let first = store
+            .authorize_delivery(&state, id, "delivery-first", now)
+            .unwrap()
+            .grant
+            .unwrap();
+        let read_grant = || -> serde_json::Value {
+            serde_json::from_slice(&fs::read(&first.capability_file).unwrap()).unwrap()
+        };
+        let granted = read_grant();
+        assert_eq!(granted["grantId"], first.grant_id);
+        assert_eq!(
+            granted["contextSha256"],
+            hex_digest(
+                &store
+                    .read_owned(id, "context.json", MAX_CONTEXT_BYTES)
+                    .unwrap()
+            )
+        );
+        store
+            .update_instruction(&state, id, "First request", now)
+            .unwrap();
+        assert_eq!(
+            read_grant(),
+            granted,
+            "same-value UI save preserves an in-flight grant"
+        );
+        store
+            .update_instruction(&state, id, "Second request", now)
+            .unwrap();
+        assert_eq!(read_grant()["expiresAt"], 0);
+        let second = store
+            .authorize_delivery(&state, id, "delivery-second", now)
+            .unwrap()
+            .grant
+            .unwrap();
+        assert_ne!(first.grant_id, second.grant_id);
+        assert_ne!(read_grant()["contextSha256"], granted["contextSha256"]);
+        store.revoke_delivery_grants().unwrap();
+        assert_eq!(read_grant()["expiresAt"], 0);
+        store.cleanup(selection.expires_at).unwrap();
+        assert!(!std::path::Path::new(&first.capability_file).exists());
     }
 
     #[cfg(windows)]

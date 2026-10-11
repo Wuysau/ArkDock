@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "arkdock-session-bridge": {
+      "type": "stdio",
+      "command": "C:/ABSOLUTE/PATH/TO/node.exe",
+      "args": ["D:/ABSOLUTE/PATH/TO/ArkDock/tools/agent/codex-desktop-plugin.mjs", "--pairing-file", "C:/ABSOLUTE/PATH/TO/arkdock-pairing.json"]
+    }
+  }
+}

@@ -26,7 +26,7 @@ test('正式路径不能自动选择测试后端', () => {
 
 test('Rust 自定义命令的参数与单一 IPC 定义一致', () => {
   const definition = JSON.parse(readFileSync('protocol/model.json', 'utf8'));
-  const source = ['src-tauri/src/desktop.rs', 'src-tauri/src/desktop/inspection.rs'].map((path) => readFileSync(path, 'utf8')).join('\n');
+  const source = ['src-tauri/src/desktop.rs', 'src-tauri/src/desktop/inspection.rs', 'src-tauri/src/desktop/agent_delivery.rs'].map((path) => readFileSync(path, 'utf8')).join('\n');
   for (const [name, fields] of Object.entries(definition.commands)) {
     const response = definition.commandResponses?.[name] ?? { rust: 'AppSnapshot', error: 'String' };
     const result = `Result<${response.rust}, ${response.error}>`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

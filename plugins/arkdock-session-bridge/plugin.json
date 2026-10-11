@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "arkdock-session-bridge",
+  "version": "0.1.0",
+  "description": "Optional, explicitly paired ArkDock bridge for the current Codex desktop conversation. Requires supported host UI messaging, host session metadata, and exact workspace roots.",
+  "extensions": { "com.openai": { "interface": { "displayName": "ArkDock Session Bridge", "shortDescription": "Connect one authorized ArkDock workspace to this conversation" } } }
+}

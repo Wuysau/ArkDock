@@ -19,7 +19,7 @@ Candidates are not execution permission. A weak or ambiguous candidate is never 
 - Project discovery is read-only. Build execution requires explicit trust and a supported toolchain.
 - Preview means actual ArkUI output from a HarmonyOS runtime. A browser-rendered imitation is not accepted as native preview.
 - Windows, WSL, and remote paths keep their environment identities. Unknown or unsupported environments fail explicitly.
-- The current Agent adapters do not support sending to an active Codex or Claude conversation. A copied prompt, local file, or read-only MCP response is not a submitted message.
+- Agent sending requires an explicitly paired transport that proves its session and workspace. Managed Codex App Server, Claude Channel and an optional Desktop plugin have separate capability and acceptance limits; see [Agent delivery](agent-delivery/README.md). A copied prompt, filled input, local file or read-only MCP response is not a submitted message.
 
 ## Current scope
 

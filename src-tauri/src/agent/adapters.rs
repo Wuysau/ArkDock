@@ -1,4 +1,54 @@
+use super::bridge::{Attachments, SessionBridge, TransportUpdate};
 use crate::ipc::model::*;
+
+/// Transport ownership is independent of a desktop window or product label.
+/// Implementations must revalidate their owned host session at actual submission.
+pub trait AgentTransport {
+    fn discover_sessions(&self, now: u64) -> Vec<AgentRegistration>;
+    fn verify_session(
+        &self,
+        binding: &AgentSessionBinding,
+        now: u64,
+    ) -> Result<AgentRegistration, String>;
+    fn submit_message(
+        &self,
+        binding: &AgentSessionBinding,
+        delivery: &AgentDelivery,
+        selection: &SelectionContext,
+        attachments: Attachments,
+        now: u64,
+    ) -> Result<(), String>;
+    fn get_delivery_status(&self, id: &str, now: u64) -> Option<TransportUpdate>;
+    fn dispose(&self);
+}
+impl AgentTransport for SessionBridge {
+    fn discover_sessions(&self, now: u64) -> Vec<AgentRegistration> {
+        self.registrations(now)
+    }
+    fn verify_session(
+        &self,
+        binding: &AgentSessionBinding,
+        now: u64,
+    ) -> Result<AgentRegistration, String> {
+        self.verify(binding, now)
+    }
+    fn submit_message(
+        &self,
+        binding: &AgentSessionBinding,
+        delivery: &AgentDelivery,
+        selection: &SelectionContext,
+        attachments: Attachments,
+        now: u64,
+    ) -> Result<(), String> {
+        self.submit(binding, delivery, selection, attachments, now)
+    }
+    fn get_delivery_status(&self, id: &str, now: u64) -> Option<TransportUpdate> {
+        self.delivery_status(id, now)
+    }
+    fn dispose(&self) {
+        self.revoke();
+    }
+}
 
 pub(super) fn no_capabilities() -> AgentCapabilities {
     AgentCapabilities {

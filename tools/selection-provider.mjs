@@ -40,20 +40,26 @@ async function boundedFile(path, limit) {
 export class SelectionProvider {
   // A grant is explicit authorization for specific selections, not a discovery hint.
   // Loading this server never modifies any Agent or global MCP configuration.
-  static async open({ directory, workspaceId, sessionId, capabilityFile, now = Date.now }) {
+  static async open({ directory, workspaceId, sessionId, capabilityFile, grantId, now = Date.now }) {
     requireValue(isAbsolute(directory ?? '') && isAbsolute(capabilityFile ?? ''), 'ABSOLUTE_PATH_REQUIRED');
     const root = await realpath(directory);
     const grantPath = await realpath(capabilityFile);
     const grant = JSON.parse((await boundedFile(grantPath, 16 * 1024)).toString('utf8'));
     requireValue(grant.version === 1 && grant.workspaceId === workspaceId && grant.sessionId === sessionId,
       'GRANT_SCOPE_MISMATCH');
+    if (grant.grantId !== undefined || grantId !== undefined) {
+      requireValue(typeof grantId === 'string' && grantId === grant.grantId, 'GRANT_ID_MISMATCH');
+      requireValue(typeof grant.contextSha256 === 'string' && /^[a-f0-9]{64}$/.test(grant.contextSha256), 'GRANT_CONTEXT_INVALID');
+    }
     requireValue(isAbsolute(grant.directory ?? '') && await realpath(grant.directory) === root, 'GRANT_DIRECTORY_MISMATCH');
     requireValue(Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > now(), 'GRANT_EXPIRED');
     requireValue(Array.isArray(grant.allowedTools) && grant.allowedTools.length > 0
       && grant.allowedTools.every((name) => TOOLS.includes(name)), 'GRANT_TOOLS_INVALID');
     requireValue(Array.isArray(grant.selectionIds) && grant.selectionIds.length > 0 && grant.selectionIds.length <= 32
       && grant.selectionIds.every((id) => typeof id === 'string' && SAFE_ID.test(id)), 'GRANT_SELECTIONS_INVALID');
-    return new SelectionProvider(root, workspaceId, sessionId, grant, now);
+    const provider = new SelectionProvider(root, workspaceId, sessionId, grant, now);
+    provider.capabilityFile = grantPath;
+    return provider;
   }
 
   constructor(root, workspaceId, sessionId, grant, now) {
@@ -76,9 +82,16 @@ export class SelectionProvider {
   }
 
   async context(id) {
+    if (this.grant.grantId) {
+      const current = JSON.parse((await boundedFile(this.capabilityFile, 16 * 1024)).toString('utf8'));
+      requireValue(current.grantId === this.grant.grantId && current.expiresAt > this.now(), 'GRANT_REVOKED');
+    }
     requireValue(typeof id === 'string' && SAFE_ID.test(id), 'SELECTION_ID_INVALID');
     requireValue(this.grant.selectionIds.includes(id), 'SELECTION_NOT_AUTHORIZED');
-    const context = JSON.parse((await this.readOwn([id, 'context.json'], MAX_CONTEXT_BYTES)).toString('utf8'));
+    const contextBytes = await this.readOwn([id, 'context.json'], MAX_CONTEXT_BYTES);
+    if (this.grant.contextSha256) requireValue(createHash('sha256').update(contextBytes).digest('hex') === this.grant.contextSha256,
+      'GRANT_CONTEXT_CHANGED');
+    const context = JSON.parse(contextBytes.toString('utf8'));
     requireValue(context.selectionId === id && context.workspaceId === this.workspaceId
       && context.sessionId === this.sessionId, 'SELECTION_SCOPE_MISMATCH');
     requireValue(Number.isSafeInteger(context.createdAt) && context.createdAt <= this.now()
@@ -198,7 +211,7 @@ export async function runStdio(provider, input = process.stdin, output = process
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const options = {};
-    const names = { '--directory': 'directory', '--workspace': 'workspaceId', '--session': 'sessionId', '--capability': 'capabilityFile' };
+    const names = { '--directory': 'directory', '--workspace': 'workspaceId', '--session': 'sessionId', '--capability': 'capabilityFile', '--grant-id': 'grantId' };
     for (let i = 2; i < process.argv.length; i += 2) {
       requireValue(names[process.argv[i]] && process.argv[i + 1] && !options[names[process.argv[i]]], 'CONFIGURATION_INVALID');
       options[names[process.argv[i]]] = process.argv[i + 1];

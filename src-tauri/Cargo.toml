@@ -51,7 +51,7 @@ base64 = "=0.22.1"
 image = { version = "=0.25.8", default-features = false, features = ["jpeg", "png"] }
 tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
 getrandom = "=0.3.4"
-windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Accessibility"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Accessibility", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]

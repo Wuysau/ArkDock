@@ -12,6 +12,11 @@ pub(super) enum DataAction {
     SelectionImage(String, bool),
     AgentList,
     AgentBind(AgentBindingDraft),
+    PairCreate(AgentKind),
+    PairRevoke,
+    RegistrationBind(String),
+    AssistedInspect,
+    AssistedFill(String, String),
     DeliveryPrepare(String, Option<String>),
     DeliverySend(String),
     DeliveryStatus(String),
@@ -20,7 +25,7 @@ pub(super) enum DataResult {
     Json(serde_json::Value),
     Bytes(Vec<u8>),
 }
-fn json_result<T: serde::Serialize>(value: T) -> Result<DataResult, String> {
+pub(super) fn json_result<T: serde::Serialize>(value: T) -> Result<DataResult, String> {
     serde_json::to_value(value)
         .map(DataResult::Json)
         .map_err(|_| "DATA_SERIALIZE_FAILED".into())
@@ -35,7 +40,7 @@ pub(super) struct PendingInspection {
 }
 
 impl Engine {
-    fn validate_data_scope(&self, scope: &RequestScope) -> Result<(), String> {
+    pub(super) fn validate_data_scope(&self, scope: &RequestScope) -> Result<(), String> {
         validate_scope(&self.snapshot, scope)?;
         self.current_target()?;
         let project = self.snapshot.project.as_ref().ok_or("PROJECT_REQUIRED")?;
@@ -79,6 +84,13 @@ impl Engine {
         self.drain_events();
         let result = (|| {
             self.validate_data_scope(&scope)?;
+            if matches!(
+                &action,
+                DataAction::AssistedInspect | DataAction::AssistedFill(_, _)
+            ) {
+                self.start_assisted(scope.clone(), action, reply.clone())?;
+                return Ok(None);
+            }
             if let DataAction::InspectorTree(frame) = &action {
                 let anchor = self.validate_display_frame(frame)?;
                 if self.inspection.is_some() {
@@ -176,6 +188,25 @@ impl Engine {
                 DataAction::AgentBind(draft) => {
                     json_result(self.agents.bind(&self.snapshot, &draft, observed)?)
                 }
+                DataAction::PairCreate(kind) => {
+                    if let Some(store) = &self.selections {
+                        store.revoke_delivery_grants()?;
+                    }
+                    json_result(self.agents.create_pair(&self.snapshot, kind, observed)?)
+                }
+                DataAction::PairRevoke => {
+                    self.agents.revoke();
+                    if let Some(store) = &self.selections {
+                        store.revoke_delivery_grants()?;
+                    }
+                    json_result(true)
+                }
+                DataAction::RegistrationBind(id) => json_result(self.agents.bind_registration(
+                    &self.snapshot,
+                    &id,
+                    observed,
+                )?),
+                DataAction::AssistedInspect | DataAction::AssistedFill(_, _) => unreachable!(),
                 DataAction::DeliveryPrepare(id, binding) => {
                     let selection = self
                         .selections
@@ -194,6 +225,9 @@ impl Engine {
                 }
                 DataAction::DeliverySend(id) => {
                     let prepared = self.agents.status(&self.snapshot, &id, observed)?;
+                    if prepared.state != DeliveryState::Ready {
+                        return Ok(Some(json_result(prepared)?));
+                    }
                     let selection = self
                         .selections
                         .as_mut()
@@ -205,10 +239,17 @@ impl Engine {
                         .ok_or("SELECTION_STORAGE_UNAVAILABLE")?;
                     storage.read_image(&self.snapshot, &selection.selection_id, false, observed)?;
                     storage.read_image(&self.snapshot, &selection.selection_id, true, observed)?;
-                    json_result(self.agents.send_checked(
+                    let attachments = storage.authorize_delivery(
+                        &self.snapshot,
+                        &selection.selection_id,
+                        &id,
+                        observed,
+                    )?;
+                    json_result(self.agents.send_with_attachments(
                         &self.snapshot,
                         &selection,
                         &id,
+                        attachments,
                         observed,
                     )?)
                 }
@@ -261,7 +302,7 @@ impl Engine {
     }
 }
 
-async fn data_request(
+pub(super) async fn data_request(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
@@ -282,7 +323,7 @@ async fn data_request(
     .await
     .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
 }
-fn decode_data<T: serde::de::DeserializeOwned>(result: DataResult) -> Result<T, String> {
+pub(super) fn decode_data<T: serde::de::DeserializeOwned>(result: DataResult) -> Result<T, String> {
     match result {
         DataResult::Json(value) => {
             serde_json::from_value(value).map_err(|_| "DATA_REPLY_INVALID".into())

@@ -12,7 +12,7 @@ The current `dev` source includes magnetic docking effects, Orb/Hidden display m
 - Discovers project candidates as read-only evidence; project association and permission to run its build logic are separate decisions.
 - Uses a real HarmonyOS Previewer runtime for supported configurations. A browser mock is never presented as an ArkUI preview.
 - Provides component inspection and selection-context tools when the selected runtime exposes the required information.
-- Does not currently send a selection directly into the active Codex or Claude conversation. That capability remains unsupported; copying text or exposing read-only MCP context is not a successful send receipt.
+- Provides explicitly paired Agent transports and conservative Windows assisted-input fallback. Current-conversation sending depends on the host's verified interface and authorization; see [Agent delivery and its validation limits](docs/agent-delivery/README.md). Copying or filling text is not a send receipt.
 
 The supported native profile uses HarmonyOS SDK/Previewer 26.0.0.105 (API 26), verified tool fingerprints, a default Stage target, `pages/Index`, and a 360×640 surface. It can build and run Previewer without opening DevEco Studio GUI. Preview rebuilds restart the runtime and reset component state; they are not state-preserving hot reload.
 

@@ -131,9 +131,12 @@ PNG 兼容帧缺少 `workspaceId`，仍须通过当前快照的会话、构建�
 超过该保留窗口会保守拒绝并提示重新选择。源码重建、换工程、停止、撤销信任立即失效。
 `selection_update_instruction` 保持意见与 selectionId 关联；图片经专门二进制入口读取。
 
-手工填写的 Agent 线程 ID 不会赋予写入权。当前适配器不支持向活动 Codex/Claude
-会话发送；只有已授权的写入通道和匹配提交回执才可显示 `SUBMITTED`。复制、导出、
-受显式 grant 约束的只读 MCP 均保留独立语义。
+手工填写的 Agent 线程 ID 不会赋予写入权。`agent_pair_create/revoke` 建立或撤销显式配对，
+`agent_registration_bind` 绑定活跃登记实例。每次交付重新核验工程、会话、心跳与授权截图。
+`agent_assisted_inspect/fill` 使用一次性输入框确认，填写后状态为 `FILLED_PENDING_USER_SEND`。
+传输接受、正式提交、Agent 显式消费和执行结果分别报告；只有匹配官方提交事件才显示
+`SUBMITTED`。复制、导出及只读 MCP 保留独立语义。完整状态和宿主限制见
+[Agent delivery](../agent-delivery/README.md)。
 
 前端完成后，在实际 ArkDock WebView2 验证真实首帧、点击计数、源码变更、
 编译失败旧图、恢复和停止。CLI 的后端原生验收不等于前端点击坐标或布局验收。

@@ -2,11 +2,11 @@
 // This driver neither supplies native frames nor sends any Agent message.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { connectWebview } from './webview-driver.mjs';
-import { requireOwnedTargetEdge } from './window-input.mjs';
+import { activateOwnedHeader, requireOwnedTargetEdge } from './window-input.mjs';
 
 const ownedPid = Number(process.env.ARKDOCK_PROBE_PID);
 const port = Number(process.env.ARKDOCK_PROBE_PORT ?? 9447);
@@ -14,10 +14,16 @@ const url = process.env.ARKDOCK_PROBE_URL ?? 'http://127.0.0.1:1420/';
 const project = resolve('examples/native-counter');
 const normalizedPath = (path) => path.replaceAll('\\','/').replace(/^\/\/\?\//,'').toLowerCase();
 const evidence = resolve(process.env.ARKDOCK_INSPECTOR_EVIDENCE ?? 'artifacts/inspector-ui');
+const appId = process.env.ARKDOCK_TEST_APP_ID ?? 'dev.arkdock.desktop';
+if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]{1,100}$/.test(appId)) throw new Error('Invalid explicit test application identifier');
 const checks = [];
 const report = {capturedAt:new Date().toISOString(),platform:process.platform,sdkVersion:'26.0.0.105',checks};
+if(process.env.ARKDOCK_DELIVERY_ONLY==='1') {
+  if(process.env.ARKDOCK_HOLD_FOR_DELIVERY!=='1')throw new Error('Delivery-only setup requires explicit held-fixture lifecycle');
+  report.scope='Actual native selection setup only; full Inspector assertions are recorded separately';
+}
 const pause = (ms) => new Promise((done) => setTimeout(done,ms));
-let view, host, dockHandle, originalWindow, projectId, originalTrust = false, nativeLog;
+let view, host, dockHandle, originalWindow, projectId, originalTrust = false, nativeLog, keepFixture = false;
 function blocked(message) { const error = new Error(message); error.blocked = true; throw error; }
 function action(kind, handle, values = {}) {
   const args=['-NoProfile','-File',resolve('tests/native/window-actions.ps1'),'-Action',kind,'-Handle',String(handle)];
@@ -55,7 +61,7 @@ async function capture(name) {
 }
 async function verifyMcp(selection) {
   if (!process.env.APPDATA) blocked('Explicit Windows APPDATA unavailable; selection store was not scanned');
-  const directory=join(process.env.APPDATA,'dev.arkdock.desktop','selection-context-v1');
+  const directory=join(process.env.APPDATA,appId,'selection-context-v1');
   if(!existsSync(join(directory,selection.selectionId,'context.json'))) blocked('Expected task selection artifact unavailable in own selection subdirectory; no scan performed');
   const capability=join(evidence,'mcp-grant.json');
   const grant={version:1,directory,workspaceId:selection.workspaceId,sessionId:selection.sessionId,
@@ -131,6 +137,9 @@ try {
   action('restore',dockHandle);action('move',target.first,{X:40,Y:400,Width:700,Height:700});
   action('move',target.second,{X:50,Y:520,Width:400,Height:420});action('move',dockHandle,{X:1000,Y:400,Width:1000,Height:1250});
   action('foreground',target.first);await pause(200);action('foreground',dockHandle);await pause(250);
+  await activateOwnedHeader(view,dockHandle,action);
+  action('raise',target.first,{ProcessId:target.pid});
+  action('raise',dockHandle,{ProcessId:ownedPid});
   const before=action('info',dockHandle),destination=action('info',target.first);
   requireOwnedTargetEdge(action,target.first,destination,ownedPid);
   const drag=await view.evaluate('(() => {const r=document.querySelector(".drag").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio};})()');
@@ -155,14 +164,15 @@ try {
     await clickControl('document.querySelector("[data-testid=inspector-toggle]")');
   await view.evaluate(`(() => {
     const originalBridge=window.__TAURI__,original=originalBridge.core.invoke;
-    const smoke=window.__arkdockInspectorSmoke={trees:[],selections:[],creates:[],calls:[],errors:[]};
+    const smoke=window.__arkdockInspectorSmoke={trees:[],selections:[],creates:[],calls:[],errors:[],pairFiles:[]};
     window.__TAURI__={...originalBridge,core:{...originalBridge.core,invoke:async(command,args)=>{
       smoke.calls.push({command,at:performance.now()});
-      try {const result=await original(command,args);if(command==='inspector_get_tree')smoke.trees.push(result);if(command==='selection_create'){smoke.selections.push(result);smoke.creates.push(args.draft);}return result;}
+      try {const result=await original(command,args);if(command==='inspector_get_tree')smoke.trees.push(result);if(command==='selection_create'){smoke.selections.push(result);smoke.creates.push(args.draft);}if(command==='agent_pair_create')smoke.pairFiles.push(result.configPath);return result;}
       catch(error){smoke.errors.push({command,error:String(error)});throw error;}
     }}};smoke.cleanup=()=>{window.__TAURI__=originalBridge;};
   })()`);
   let tree,selection;
+  if(process.env.ARKDOCK_DELIVERY_ONLY!=='1') {
   await check('Actual SDK inspector tree, overlay hover and component pick do not trigger native onClick',async()=>{
     const count=nativeCount();
     await clickControl('document.querySelector("[data-testid=inspector-toggle]")');
@@ -233,10 +243,55 @@ try {
     // any external submission, even if a future adapter becomes available.
     report.delivery=await invoke('agent_delivery_status',{requestId:prepared.requestId});
     assert.equal(report.delivery.state,'UNSUPPORTED');assert.equal(report.delivery.receiptId,null);
-    assert.equal(await view.evaluate('[...document.querySelectorAll(".selection-actions button")].find(b=>b.textContent.includes("发送到当前 Agent"))?.disabled'),true);
+    assert.deepEqual(await view.evaluate('(() => {const panel=document.querySelector(".agent-delivery");const button=panel?.querySelector(".selection-primary");return {label:button?.textContent,disabled:button?.disabled,clipboardWarning:panel?.textContent.includes("复制会覆盖系统剪贴板"),unverified:panel?.textContent.includes("尚未绑定可写会话")};})()'),
+      {label:'复制修改要求',disabled:false,clipboardWarning:true,unverified:true});
+    // Exercise the real component and native prompt construction while keeping
+    // the user's system clipboard untouched. This proves UI routing only.
+    await view.evaluate('(() => {const smoke=window.__arkdockInspectorSmoke;smoke.originalClipboardWrite=navigator.clipboard.writeText;navigator.clipboard.writeText=async(text)=>{smoke.copiedPrompt=text;};})()');
+    try {
+      await clickControl('document.querySelector(".agent-delivery .selection-primary")');
+      await until('Explicit copy confirmation',()=>view.evaluate('document.querySelector(".agent-delivery")?.textContent.includes("修改要求已复制")'));
+      const copied=await view.evaluate('window.__arkdockInspectorSmoke.copiedPrompt');
+      assert.ok(copied.includes(selection.selectionId));assert.ok(copied.includes(selection.userInstruction));
+      assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.command==="agent_delivery_send").length'),0);
+      report.copyFallback={nativePromptVerified:true,uiRouteVerified:true,systemClipboardWritten:false,agentMessagesSent:0};
+      await capture('delivery-copy-fallback');
+    } finally { await view.evaluate('navigator.clipboard.writeText=window.__arkdockInspectorSmoke.originalClipboardWrite'); }
+    await clickControl('[...document.querySelectorAll(".agent-delivery button")].find(b=>b.textContent==="检查当前目标输入框")');
+    await until('Unknown owned fixture safely refuses assisted fill',()=>view.evaluate('document.querySelector(".agent-delivery output")?.textContent.includes("请复制修改要求")'));
+    assert.equal(await view.evaluate('document.querySelector(".agent-delivery .selection-primary")?.textContent'),'复制修改要求');
+    report.assistedFallback={unknownOwnedFixtureRefused:true,externalWindowWrites:0};
   });
   await check('Real saved native context and JPEGs are readable through explicitly scoped stdio MCP',async()=>{
     report.mcp=await verifyMcp(selection);
+  });
+  await check('Pairing UI saves only an explicitly selected local file and revokes without installing a host connection',async()=>{
+    if(!process.env.ARKDOCK_DESKTOP_EXE) blocked('Explicit owned desktop executable required for native save-dialog validation');
+    const pairingDirectory=resolve('.local/agent-delivery');mkdirSync(pairingDirectory,{recursive:true});
+    const pairingPath=join(pairingDirectory,`ui-pairing-${Date.now()}.json`);
+    const beforePairing=await snapshot();
+    assert.equal(existsSync(pairingPath),false);
+    try {
+      await clickControl('document.querySelector(".agent-delivery details summary")');
+      await clickControl('[...document.querySelectorAll(".agent-delivery button")].find(b=>b.textContent==="保存本次配对文件")');
+      const saved=JSON.parse(execFileSync('pwsh',['-NoProfile','-File',resolve('tests/native/pairing-save.ps1'),'-OwnerPid',String(ownedPid),'-OwnerExe',resolve(process.env.ARKDOCK_DESKTOP_EXE),'-Destination',pairingPath],{encoding:'utf8',windowsHide:true,timeout:20000}));
+      assert.equal(saved.ownerPid,ownedPid);
+      await until('Native pairing file returned through UI',()=>view.evaluate(`window.__arkdockInspectorSmoke.pairFiles.includes(${JSON.stringify(pairingPath)})`));
+      assert.equal(existsSync(pairingPath),true);
+      assert.equal(await view.evaluate('document.querySelector(".agent-delivery")?.textContent.includes("这一步尚未发送任何组件")'),true);
+      const paired=await invoke('agent_session_list');assert.equal(paired.bindings.length,0);assert.equal(paired.registrations.length,0);
+      await capture('delivery-pairing-created');
+      await clickControl('[...document.querySelectorAll(".agent-delivery button")].find(b=>b.textContent==="撤销连接与授权")');
+      await until('Pairing revoke confirmation',()=>view.evaluate('document.querySelector(".agent-delivery")?.textContent.includes("已撤销会话连接与截图读取授权")'));
+      const revoked=await invoke('agent_session_list');assert.equal(revoked.bindings.length,0);assert.equal(revoked.registrations.length,0);
+      const afterPairing=await snapshot();assert.equal(afterPairing.sessionId,beforePairing.sessionId);assert.equal(afterPairing.build.buildId,beforePairing.build.buildId);assert.equal(afterPairing.phase,'running');
+      assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.command==="agent_delivery_send").length'),0);
+      report.pairingUi={nativeSaveDialog:true,explicitLocalFile:true,revoked:true,hostInstalled:false,agentMessagesSent:0,previewSessionPreserved:true};
+      await capture('delivery-pairing-revoked');
+    } finally {
+      await invoke('agent_pair_revoke');
+      if(existsSync(pairingPath))unlinkSync(pairingPath);
+    }
   });
   await check('Native window resize retains accurate component hit coordinates',async()=>{
     await clickControl('document.querySelector("button[aria-label=关闭组件详情]")');
@@ -265,6 +320,25 @@ try {
     await until('Real ArkUI onClick after Esc',()=>nativeCount()===count+1);
     const state=await snapshot();assert.equal(state.sessionId,running.sessionId);assert.equal(state.build.buildId,running.build.buildId);assert.equal(state.build.generation,running.build.generation);await capture('normal-click-restored');
   });
+  }
+  if(process.env.ARKDOCK_HOLD_FOR_DELIVERY==='1') {
+    await clickControl('document.querySelector("[data-testid=inspector-toggle]")');
+    if(await view.evaluate('!!document.querySelector("button[aria-label=关闭组件详情]")'))await clickControl('document.querySelector("button[aria-label=关闭组件详情]")');
+    const previousTrees=await view.evaluate('window.__arkdockInspectorSmoke.trees.length');
+    await clickControl('[...document.querySelectorAll(".inspection-status button")].find(b=>b.textContent==="刷新树")');
+    const currentTree=await until('Fresh Inspector tree and component overlay for explicitly authorized delivery',()=>view.evaluate(`window.__arkdockInspectorSmoke.trees.length>${previousTrees}&&document.querySelector('.inspection-status span')?.textContent.includes('元素选择')&&window.__arkdockInspectorSmoke.trees.at(-1)`));
+    const button=currentTree.nodes.find((node)=>node.componentType==='Button');assert.ok(button?.bounds);
+    const previous=await view.evaluate('window.__arkdockInspectorSmoke.selections.length');
+    await clickPoint(await framePoint(button.bounds.x+button.bounds.width/2,button.bounds.y+button.bounds.height/2));
+    await until('Retained actual native selection',()=>view.evaluate(`window.__arkdockInspectorSmoke.selections.length>${previous}`));
+    const selected=await view.evaluate('window.__arkdockInspectorSmoke.selections.at(-1)');
+    const saved=await invoke('selection_update_instruction',{selectionId:selected.selectionId,userInstruction:'请确认收到所选组件和截图，不修改源码'});
+    assert.equal(saved.selectionKind,'component');assert.equal(saved.selectedNode.componentType,'Button');
+    report.retained={desktopPid:ownedPid,fixturePid:host.pid,workspaceId:saved.workspaceId,sessionId:saved.sessionId,selectionId:saved.selectionId,projectId,originalTrust,workspacePath:project,releaseFile:join(evidence,'release-held-fixture')};
+    keepFixture=true;
+    checks.push({status:'PASS',name:'Actual SDK Button selection and screenshot retained with a live owned fixture for explicitly authorized delivery'});
+    await capture('native-selection-retained-for-delivery');
+  }
 } catch(error) {
   checks.push({status:error.blocked?'BLOCKED':'FAIL',name:error.message});process.exitCode=error.blocked?2:1;
   if(view){try{report.failureSnapshot=await snapshot();report.failureDom=await view.evaluate('document.body.innerText');report.driverErrors=await view.evaluate('window.__arkdockInspectorSmoke?.errors');report.failureTree=await view.evaluate('window.__arkdockInspectorSmoke?.trees.at(-1)');await capture('failure');}catch{/* Keep primary failure. */}}
@@ -272,15 +346,15 @@ try {
   if(view){
     const cleanup=async(name,task)=>{try{await task();}catch(error){checks.push({status:'FAIL',name:`Owned fixture cleanup ${name}: ${error.message}`});process.exitCode=1;}};
     await cleanup('instrumentation',()=>view.evaluate('window.__arkdockInspectorSmoke?.cleanup()'));
-    if(projectId){
+    if(projectId&&!keepFixture){
       await cleanup('selection',async()=>{const current=await snapshot();if(current.trusted&&current.sessionId)await invoke('selection_clear',{selectionId:null});});
       if(!originalTrust)await cleanup('trust',()=>invoke('set_trust',{projectId,trusted:false}));
     }
-    if(host)await cleanup('detach',()=>invoke('detach'));
-    view.close();
+    if(host&&!keepFixture)await cleanup('detach',()=>invoke('detach'));
+    if(!keepFixture)view.close();
   }
-  if(host&&host.exitCode===null)host.kill();
-  if(dockHandle&&originalWindow){
+  if(host&&host.exitCode===null&&!keepFixture)host.kill();
+  if(dockHandle&&originalWindow&&!keepFixture){
     try {
       const current=action('info',dockHandle);
       if(current.processId===ownedPid)action('move',dockHandle,{X:originalWindow.left,Y:originalWindow.top,Width:originalWindow.right-originalWindow.left,Height:originalWindow.bottom-originalWindow.top});
@@ -290,4 +364,10 @@ try {
   report.status=checks.some((check)=>check.status==='FAIL')?'FAIL':checks.some((check)=>check.status==='BLOCKED')?'BLOCKED':'PASS';
   mkdirSync(evidence,{recursive:true});writeFileSync(join(evidence,'report.json'),`${JSON.stringify(report,null,2)}\n`);
   console.log(`${report.status} real SDK Inspector UI: ${JSON.stringify(checks)}`);
+  if(keepFixture) {
+    console.log(`HELD owned fixture ${host.pid}; explicit release file ${report.retained.releaseFile}`);
+    const deadline=Date.now()+15*60_000;
+    while(Date.now()<deadline&&!existsSync(report.retained.releaseFile)&&host.exitCode===null)await pause(500);
+    try {await invoke('agent_pair_revoke');await invoke('selection_clear',{selectionId:null});await invoke('set_trust',{projectId,trusted:false});await invoke('detach');} finally {view.close();if(host.exitCode===null)host.kill();}
+  }
 }

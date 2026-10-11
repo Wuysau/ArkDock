@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('find','info','probe','move','minimize','restore','maximize','close','click','drag','foreground','pause','cursor')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('find','info','probe','move','minimize','restore','maximize','close','click','drag','foreground','raise','pause','cursor')][string]$Action,
   [long]$Handle, [int]$ProcessId, [int]$OutlinePid, [int]$X, [int]$Y, [int]$Width, [int]$Height, [int]$EndX, [int]$EndY,
   [ValidateRange(0,2000)][int]$HoldMs=150, [string]$CaptureDir, [int]$CaptureX, [int]$CaptureY
 )
@@ -90,6 +90,14 @@ try {
       # test window (not TOPMOST); the subsequent real mouse action can then activate it normally.
       if (-not [ArkDockWindowTest]::SetWindowPos($windowHandle,[IntPtr]::Zero,0,0,0,0,0x53)) { throw 'Cannot raise requested test window' }
       [ArkDockWindowTest]::SetForegroundWindow($windowHandle) | Out-Null
+    }
+    'raise' {
+      [uint32]$raiseOwner=0
+      [ArkDockWindowTest]::GetWindowThreadProcessId($windowHandle,[ref]$raiseOwner) | Out-Null
+      if($ProcessId -le 0 -or $raiseOwner -ne $ProcessId){throw 'Only the explicit owned PID may be raised'}
+      # HWND_TOP, no activation, no move/resize, no TOPMOST. Used after our
+      # desktop receives its own activation acknowledgement, never on an Agent.
+      if(-not [ArkDockWindowTest]::SetWindowPos($windowHandle,[IntPtr]::Zero,0,0,0,0,0x53)){throw 'Cannot raise owned fixture'}
     }
     'pause' { [ArkDockWindowTest]::PostMessage($windowHandle,0x8001,[IntPtr]::new(2000),[IntPtr]::Zero) | Out-Null; @{queued=$true} | ConvertTo-Json -Compress; return }
     'cursor' { [ArkDockWindowTest]::SetCursorPos($X,$Y) | Out-Null; @{moved=$true} | ConvertTo-Json -Compress; return }

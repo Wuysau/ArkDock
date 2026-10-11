@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -134,4 +134,23 @@ test('MCP negotiates a supported version for newer clients and waits for initial
   assert.equal(outputs[0].result.protocolVersion,'2025-06-18');
   assert.equal(outputs[1].error.message,'NOT_INITIALIZED');
   assert.equal(outputs[2].result.tools.length,4);
+});
+
+test('delivery grant identity and context digest prevent replacement and changed instruction reads', async (t) => {
+  const f = await fixture(t);
+  f.grant.grantId = 'delivery-first-101';
+  f.grant.contextSha256 = createHash('sha256').update(await readFile(f.contextPath)).digest('hex');
+  await writeFile(f.capabilityFile, JSON.stringify(f.grant));
+  await assert.rejects(SelectionProvider.open(f.options), /GRANT_ID_MISMATCH/);
+  await assert.rejects(SelectionProvider.open({ ...f.options, grantId: 'delivery-other-101' }), /GRANT_ID_MISMATCH/);
+  const provider = await SelectionProvider.open({ ...f.options, grantId: f.grant.grantId });
+  await provider.call('arkdock.get_selection', { selectionId: f.id });
+  await writeFile(f.contextPath, JSON.stringify({ ...f.context, userInstruction: 'A later unsent instruction' }));
+  await assert.rejects(provider.call('arkdock.get_selection', { selectionId: f.id }), /GRANT_CONTEXT_CHANGED/);
+  await writeFile(f.contextPath, JSON.stringify(f.context));
+  await writeFile(f.capabilityFile, JSON.stringify({ ...f.grant, grantId: 'delivery-second-102' }));
+  await assert.rejects(provider.call('arkdock.get_selection', { selectionId: f.id }), /GRANT_REVOKED/);
+  await assert.rejects(SelectionProvider.open({ ...f.options, grantId: 'delivery-first-101' }), /GRANT_ID_MISMATCH/);
+  await writeFile(f.capabilityFile, JSON.stringify({ version: 1, expiresAt: 0 }));
+  await assert.rejects(provider.call('arkdock.get_selection_screenshot', { selectionId: f.id }), /GRANT_REVOKED/);
 });

@@ -1,4 +1,6 @@
 use super::adapters;
+use super::bridge::{Attachments, SessionBridge};
+use super::AgentTransport;
 use crate::ipc::model::*;
 use crate::selection::{format_prompt, validate_selection};
 use sha2::{Digest, Sha256};
@@ -18,6 +20,7 @@ pub struct AgentRouter {
     bindings: BTreeMap<String, AgentSessionBinding>,
     deliveries: BTreeMap<String, DeliveryRecord>,
     serial: u64,
+    bridge: Option<SessionBridge>,
     #[cfg(test)]
     verified_adapter: Option<Box<dyn adapters::VerifiedAdapter>>,
 }
@@ -28,19 +31,58 @@ impl AgentRouter {
     }
 
     pub fn list(&mut self, snapshot: &AppSnapshot, now: u64) -> AgentSessionList {
+        self.sync(snapshot, now);
         self.cleanup(now);
-        let bindings = self
+        let registrations = self
+            .bridge
+            .as_ref()
+            .map(|bridge| bridge.discover_sessions(now))
+            .unwrap_or_default();
+        let bindings: Vec<AgentSessionBinding> = self
             .bindings
             .values()
             .filter(|binding| validate_binding(snapshot, binding, now).is_ok())
             .cloned()
+            .map(|mut binding| {
+                if binding.transport_instance_id.is_some() {
+                    if let Some(registration) = registrations.iter().find(|r| {
+                        Some(&r.transport_instance_id) == binding.transport_instance_id.as_ref()
+                    }) {
+                        binding.verified_at = registration.observed_at;
+                    } else {
+                        binding.writable = false;
+                        binding.reason = "连接已失效，需要重新配对。".into();
+                    }
+                }
+                binding
+            })
             .collect();
         AgentSessionList {
-            adapters: vec![
-                adapters::status(AgentKind::Codex),
-                adapters::status(AgentKind::Claude),
-            ],
+            adapters: [AgentKind::Codex, AgentKind::Claude]
+                .into_iter()
+                .map(|kind| {
+                    registrations
+                        .iter()
+                        .find(|r| r.agent_kind == kind)
+                        .map(|r| AgentAdapterStatus {
+                            agent_kind: kind.clone(),
+                            capabilities: r.capabilities.clone(),
+                            status: if bindings.iter().any(|b| {
+                                b.writable
+                                    && b.transport_instance_id.as_ref()
+                                        == Some(&r.transport_instance_id)
+                            }) {
+                                DeliveryState::Ready
+                            } else {
+                                DeliveryState::SessionUnverified
+                            },
+                            reason: r.reason.clone(),
+                        })
+                        .unwrap_or_else(|| adapters::status(kind))
+                })
+                .collect(),
             bindings,
+            registrations,
         }
     }
 
@@ -77,6 +119,10 @@ impl AgentRouter {
             agent_session_id: draft.agent_session_id.clone(),
             conversation_or_thread_id: draft.conversation_or_thread_id.clone(),
             transport_kind: AgentTransportKind::Unsupported,
+            transport_instance_id: None,
+            agent_version: None,
+            verified_at: now,
+            binding_evidence: "手动声明，不构成宿主授权".into(),
             writable: false,
             capabilities: adapters::no_capabilities(),
             observed_at: now,
@@ -112,21 +158,29 @@ impl AgentRouter {
         };
         // The deterministic request includes the immutable selection, instruction
         // and precise target thread. Repeated clicks get the same status/receipt.
-        let identity =
-            serde_json::to_vec(&(selection, &binding)).map_err(|_| "AGENT_CONTEXT_INVALID")?;
+        let identity = serde_json::to_vec(&(
+            &selection.selection_id,
+            &selection.workspace_id,
+            format!(
+                "{:x}",
+                Sha256::digest(selection.user_instruction.as_bytes())
+            ),
+            binding.as_ref().map(|b| {
+                (
+                    &b.agent_kind,
+                    &b.agent_session_id,
+                    &b.conversation_or_thread_id,
+                )
+            }),
+            DeliveryMode::Native,
+        ))
+        .map_err(|_| "AGENT_CONTEXT_INVALID")?;
         let request_id = format!("delivery-{:x}", Sha256::digest(identity));
         if let Some(existing) = self.deliveries.get(&request_id) {
             return Ok(existing.delivery.clone());
         }
         if self.deliveries.len() >= MAX_DELIVERIES {
-            let id = self
-                .deliveries
-                .values()
-                .filter(|record| record.delivery.state != DeliveryState::Sending)
-                .min_by_key(|record| record.delivery.created_at)
-                .map(|record| record.delivery.request_id.clone())
-                .ok_or("AGENT_DELIVERY_LIMIT")?;
-            self.deliveries.remove(&id);
+            return Err("AGENT_DELIVERY_LIMIT_WAIT_FOR_SELECTION_EXPIRY".into());
         }
         let (state, reason) = availability(binding.as_ref());
         let delivery = AgentDelivery {
@@ -140,6 +194,10 @@ impl AgentRouter {
             reason,
             created_at: now,
             updated_at: now,
+            idempotency_key: request_id.clone(),
+            delivery_mode: DeliveryMode::Native,
+            transport_receipt: None,
+            agent_acknowledgment: None,
         };
         self.deliveries.insert(
             request_id,
@@ -157,28 +215,79 @@ impl AgentRouter {
         request_id: &str,
         now: u64,
     ) -> Result<AgentDelivery, String> {
+        self.sync(snapshot, now);
         let record = self
             .deliveries
             .get_mut(request_id)
             .ok_or("AGENT_DELIVERY_NOT_FOUND")?;
         // No metadata or prompt from a previous workspace is returned.
         validate_delivery_scope(snapshot, &record.selection)?;
-        if validate_selection(snapshot, &record.selection, now).is_err() {
+        if let Some(update) = self
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.get_delivery_status(request_id, now))
+        {
+            record.delivery.state = update.state;
+            record.delivery.reason = update.reason;
+            record.delivery.receipt_id = update.receipt_id.clone();
+            record.delivery.transport_receipt = update.transport_receipt;
+            record.delivery.agent_acknowledgment = update.agent_acknowledgment;
+            record.delivery.updated_at = now;
+        }
+        if matches!(
+            record.delivery.state,
+            DeliveryState::Ready
+                | DeliveryState::Unsupported
+                | DeliveryState::SessionUnverified
+                | DeliveryState::Expired
+        ) && validate_selection(snapshot, &record.selection, now).is_err()
+        {
             record.delivery.state = DeliveryState::Expired;
             record.delivery.reason = "选择已过期、构建已改变或预览已失效；请重新选择。".into();
             record.delivery.updated_at = now;
         }
         if let Some(binding) = &record.delivery.target {
+            if matches!(
+                binding.transport_kind,
+                AgentTransportKind::ClaudeChannel
+                    | AgentTransportKind::CodexAppServer
+                    | AgentTransportKind::CodexDesktopPlugin
+            ) && self
+                .bridge
+                .as_ref()
+                .is_none_or(|bridge| bridge.verify_session(binding, now).is_err())
+            {
+                if record.delivery.state == DeliveryState::Sending {
+                    record.delivery.state = DeliveryState::Unknown;
+                    record.delivery.reason = "连接已失效，提交结果未知；不会自动重发。".into();
+                } else if record.delivery.state == DeliveryState::Ready {
+                    record.delivery.state = DeliveryState::SessionUnverified;
+                    record.delivery.reason = "通道心跳或授权已失效，请重新配对。".into();
+                }
+            }
             if !self
                 .bindings
                 .get(&binding.binding_id)
                 .is_some_and(|current| current == binding)
                 || validate_binding(snapshot, binding, now).is_err()
             {
-                if record.delivery.state == DeliveryState::Expired {
+                if !matches!(
+                    record.delivery.state,
+                    DeliveryState::Ready
+                        | DeliveryState::Unsupported
+                        | DeliveryState::SessionUnverified
+                        | DeliveryState::Sending
+                ) {
                     return Ok(record.delivery.clone());
                 }
-                record.delivery.state = DeliveryState::SessionUnverified;
+                record.delivery.state = if matches!(
+                    record.delivery.state,
+                    DeliveryState::Sending | DeliveryState::Unknown
+                ) {
+                    DeliveryState::Unknown
+                } else {
+                    DeliveryState::SessionUnverified
+                };
                 record.delivery.reason = "绑定已过期、线程已切换或目标进程生命周期已改变。".into();
                 record.delivery.updated_at = now;
             }
@@ -193,14 +302,7 @@ impl AgentRouter {
         now: u64,
     ) -> Result<AgentDelivery, String> {
         let current = self.status(snapshot, request_id, now)?;
-        if matches!(
-            current.state,
-            DeliveryState::Submitted
-                | DeliveryState::Sending
-                | DeliveryState::Expired
-                | DeliveryState::SessionUnverified
-                | DeliveryState::Failed
-        ) {
+        if current.state != DeliveryState::Ready {
             return Ok(current);
         }
         let Some(binding) = current.target.as_ref() else {
@@ -214,8 +316,15 @@ impl AgentRouter {
         record.delivery.state = state;
         record.delivery.reason = reason;
         record.delivery.updated_at = now;
-        // There is intentionally no production submit path before an actual
-        // current-session transport is implemented and independently verified.
+        if matches!(
+            binding.transport_kind,
+            AgentTransportKind::ClaudeChannel
+                | AgentTransportKind::CodexAppServer
+                | AgentTransportKind::CodexDesktopPlugin
+        ) {
+            record.delivery.state = DeliveryState::SessionUnverified;
+            record.delivery.reason = "必须经 send_with_attachments 校验附件后提交。".into();
+        }
         #[cfg(test)]
         if record.delivery.state == DeliveryState::Ready {
             if let Some(adapter) = &self.verified_adapter {
@@ -271,11 +380,223 @@ impl AgentRouter {
         self.send(snapshot, request_id, now)
     }
 
+    pub fn sync(&mut self, snapshot: &AppSnapshot, now: u64) {
+        if let Some(bridge) = &self.bridge {
+            bridge.sync(snapshot, now);
+        }
+    }
+
+    pub fn create_pair(
+        &mut self,
+        snapshot: &AppSnapshot,
+        kind: AgentKind,
+        now: u64,
+    ) -> Result<AgentPairing, String> {
+        self.revoke();
+        if self.bridge.is_none() {
+            self.bridge = Some(SessionBridge::start()?);
+        }
+        self.bridge
+            .as_ref()
+            .ok_or("AGENT_BRIDGE_UNAVAILABLE")?
+            .pair(snapshot, kind, now)
+    }
+
+    pub fn revoke(&mut self) {
+        if let Some(bridge) = &self.bridge {
+            bridge.revoke();
+        }
+        self.bindings.clear();
+    }
+
+    pub fn bind_registration(
+        &mut self,
+        snapshot: &AppSnapshot,
+        id: &str,
+        now: u64,
+    ) -> Result<AgentSessionBinding, String> {
+        self.sync(snapshot, now);
+        let registration = self
+            .bridge
+            .as_ref()
+            .ok_or("AGENT_PAIR_REQUIRED")?
+            .registrations(now)
+            .into_iter()
+            .find(|r| r.registration_id == id)
+            .ok_or("AGENT_REGISTRATION_EXPIRED")?;
+        let draft = AgentBindingDraft {
+            agent_kind: registration.agent_kind.clone(),
+            agent_session_id: registration.agent_session_id.clone(),
+            conversation_or_thread_id: registration.conversation_or_thread_id.clone(),
+        };
+        if let Some(binding) = self.bindings.values().find(|binding| {
+            binding.transport_instance_id.as_ref() == Some(&registration.transport_instance_id)
+                && binding.agent_session_id == registration.agent_session_id
+                && binding.conversation_or_thread_id == registration.conversation_or_thread_id
+                && validate_binding(snapshot, binding, now).is_ok()
+        }) {
+            return Ok(binding.clone());
+        }
+        let mut binding = self.bind(snapshot, &draft, now)?;
+        binding.transport_kind = registration.transport_kind;
+        binding.transport_instance_id = Some(registration.transport_instance_id);
+        binding.agent_version = Some(registration.agent_version);
+        binding.writable = true;
+        binding.capabilities = registration.capabilities;
+        binding.expires_at = now.saturating_add(8 * 60 * 60 * 1000);
+        binding.verified_at = registration.observed_at;
+        binding.binding_evidence="用户确认配对的专用通道实例、工程根和会话；每次提交由通道再次核验。窗口身份不证明会话 ID。".into();
+        binding.reason = registration.reason;
+        self.bindings
+            .insert(binding.binding_id.clone(), binding.clone());
+        Ok(binding)
+    }
+
+    pub fn send_with_attachments(
+        &mut self,
+        snapshot: &AppSnapshot,
+        selection: &SelectionContext,
+        id: &str,
+        attachments: Attachments,
+        now: u64,
+    ) -> Result<AgentDelivery, String> {
+        validate_selection(snapshot, selection, now)?;
+        let current = self.status(snapshot, id, now)?;
+        let record = self.deliveries.get(id).ok_or("AGENT_DELIVERY_NOT_FOUND")?;
+        if &record.selection != selection {
+            return Err("AGENT_SELECTION_CHANGED".into());
+        }
+        if current.state != DeliveryState::Ready {
+            return Ok(current);
+        }
+        let binding = current.target.as_ref().ok_or("AGENT_BINDING_REQUIRED")?;
+        let result = self
+            .bridge
+            .as_ref()
+            .ok_or("AGENT_TRANSPORT_UNAVAILABLE")?
+            .submit_message(binding, &current, selection, attachments, now);
+        let record = self
+            .deliveries
+            .get_mut(id)
+            .ok_or("AGENT_DELIVERY_NOT_FOUND")?;
+        match result {
+            Ok(()) => {
+                record.delivery.state = DeliveryState::Sending;
+                record.delivery.reason = "通道正在核验目标会话；尚未取得提交回执。".into();
+            }
+            Err(reason) => {
+                // Busy rejects before queueing; caller may explicitly retry after the active turn.
+                record.delivery.state = if reason == "AGENT_BUSY_RETRY_AFTER_CURRENT_TURN" {
+                    DeliveryState::Ready
+                } else {
+                    DeliveryState::SessionUnverified
+                };
+                record.delivery.reason = reason;
+            }
+        }
+        record.delivery.updated_at = now;
+        Ok(record.delivery.clone())
+    }
+
+    pub fn assisted_delivery(
+        &mut self,
+        snapshot: &AppSnapshot,
+        selection: &SelectionContext,
+        result: Option<AssistedFill>,
+        now: u64,
+    ) -> Result<AgentDelivery, String> {
+        validate_selection(snapshot, selection, now)?;
+        if selection.user_instruction.trim().is_empty() {
+            return Err("AGENT_INSTRUCTION_REQUIRED".into());
+        }
+        let target = snapshot.target.as_ref().ok_or("AGENT_TARGET_REQUIRED")?;
+        let identity = serde_json::to_vec(&(
+            &selection.selection_id,
+            &selection.user_instruction,
+            &target.id,
+            &target.process,
+            DeliveryMode::Assisted,
+        ))
+        .map_err(|_| "AGENT_CONTEXT_INVALID")?;
+        let id = format!("delivery-{:x}", Sha256::digest(identity));
+        if let Some(record) = self.deliveries.get_mut(&id) {
+            if let Some(result) = result {
+                if record.delivery.state == DeliveryState::Sending {
+                    record.delivery.state = result.state;
+                    record.delivery.reason = result.reason;
+                    record.delivery.updated_at = now;
+                }
+            }
+            return Ok(record.delivery.clone());
+        }
+        if self.deliveries.len() >= MAX_DELIVERIES {
+            return Err("AGENT_DELIVERY_LIMIT_WAIT_FOR_SELECTION_EXPIRY".into());
+        }
+        let delivery = AgentDelivery {
+            request_id: id.clone(),
+            selection_id: selection.selection_id.clone(),
+            binding_id: None,
+            state: DeliveryState::Sending,
+            prompt: format_prompt(selection),
+            target: None,
+            receipt_id: None,
+            reason: "等待目标输入框填写结果；不会自动提交。".into(),
+            created_at: now,
+            updated_at: now,
+            idempotency_key: id.clone(),
+            delivery_mode: DeliveryMode::Assisted,
+            transport_receipt: None,
+            agent_acknowledgment: None,
+        };
+        self.deliveries.insert(
+            id,
+            DeliveryRecord {
+                delivery: delivery.clone(),
+                selection: selection.clone(),
+            },
+        );
+        Ok(delivery)
+    }
+
+    pub fn finish_assisted(
+        &mut self,
+        id: &str,
+        result: AssistedFill,
+        now: u64,
+    ) -> Result<AgentDelivery, String> {
+        let record = self
+            .deliveries
+            .get_mut(id)
+            .ok_or("AGENT_DELIVERY_NOT_FOUND")?;
+        if record.delivery.delivery_mode != DeliveryMode::Assisted
+            || record.delivery.state != DeliveryState::Sending
+        {
+            return Ok(record.delivery.clone());
+        }
+        record.delivery.state = result.state;
+        record.delivery.reason = result.reason;
+        record.delivery.updated_at = now;
+        Ok(record.delivery.clone())
+    }
+
     fn cleanup(&mut self, now: u64) {
         self.bindings
             .retain(|_, binding| binding.expires_at > now && binding.observed_at <= now);
         self.deliveries.retain(|_, record| {
-            record.selection.expires_at > now && record.selection.created_at <= now
+            // A successful edit may rebuild immediately; keep its receipt history
+            // independently of the ten-minute image/context grant.
+            let retain_until = if matches!(
+                record.delivery.state,
+                DeliveryState::Ready
+                    | DeliveryState::Unsupported
+                    | DeliveryState::SessionUnverified
+                    | DeliveryState::Expired
+            ) {
+                record.selection.expires_at
+            } else {
+                record.delivery.created_at.saturating_add(60 * 60 * 1000)
+            };
+            retain_until > now && record.selection.created_at <= now
         });
     }
 }
@@ -546,6 +867,31 @@ mod tests {
     }
 
     #[test]
+    fn submitted_history_survives_expected_rebuild_and_image_expiration() {
+        let (mut router, id, calls) = verified_router("thread", "thread");
+        let selection = context(100);
+        let prepared = router
+            .prepare(&snapshot(), &selection, Some(&id), 101)
+            .unwrap();
+        router
+            .send_checked(&snapshot(), &selection, &prepared.request_id, 102)
+            .unwrap();
+        // Simulate an Agent edit rebuilding the same preview. Image access expires,
+        // but the independently obtained delivery receipt remains truthful.
+        let mut changed = snapshot();
+        changed.build.generation += 1;
+        let receipt = router.status(&changed, &prepared.request_id, 103).unwrap();
+        assert_eq!(receipt.state, DeliveryState::Submitted);
+        assert_eq!(receipt.receipt_id.as_deref(), Some("test-only-receipt"));
+        router.cleanup(selection.expires_at + 1);
+        assert!(router.deliveries.contains_key(&prepared.request_id));
+        assert!(router
+            .send_checked(&changed, &selection, &prepared.request_id, 104)
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn wrong_receipt_and_requirement_change_never_report_submitted() {
         let (mut router, id, calls) = verified_router("thread", "other-thread");
         let selection = context(100);
@@ -583,7 +929,128 @@ mod tests {
                 .status(&snapshot(), &prepared.request_id, selection.expires_at)
                 .unwrap()
                 .state,
-            DeliveryState::Expired
+            DeliveryState::Failed
+        );
+    }
+
+    #[test]
+    fn rapid_real_bridge_receipts_survive_first_status_rebuild_and_selection_expiry() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+        fn post(pair: &AgentPairing, route: &str, body: serde_json::Value) -> serde_json::Value {
+            let address = pair.endpoint.strip_prefix("http://").unwrap();
+            let bytes = body.to_string();
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(stream, "POST {route} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{bytes}", pair.token, bytes.len()).unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                assert!(headers.len() < 8192);
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(
+                headers.starts_with("HTTP/1.1 200"),
+                "Fixture HTTP request was rejected"
+            );
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(length <= 128 * 1024);
+            let mut bytes = vec![0u8; length];
+            stream.read_exact(&mut bytes).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let now = crate::selection::now_ms();
+        let mut state = snapshot();
+        state.project.as_mut().unwrap().workspace_root =
+            directory.path().to_string_lossy().into_owned();
+        let mut router = AgentRouter::new();
+        let pair = router.create_pair(&state, AgentKind::Claude, now).unwrap();
+        let registration = post(
+            &pair,
+            "/v1/register",
+            serde_json::json!({
+            "transportKind":"claude-channel","instanceId":"router-fixture","agentKind":"claude",
+            "agentVersion":"fixture","sessionId":"host-session","conversationId":"host-session",
+            "workspaceRoot":pair.workspace_root,"pid":std::process::id(),"capabilities":{"images":true}}),
+        );
+        let binding = router
+            .bind_registration(
+                &state,
+                registration["registrationId"].as_str().unwrap(),
+                now,
+            )
+            .unwrap();
+        let selection = context(now);
+        let prepared = router
+            .prepare(&state, &selection, Some(&binding.binding_id), now)
+            .unwrap();
+        router
+            .send_with_attachments(
+                &state,
+                &selection,
+                &prepared.request_id,
+                Attachments::default(),
+                now,
+            )
+            .unwrap();
+        let poll = post(
+            &pair,
+            "/v1/poll",
+            serde_json::json!({"instanceId":"router-fixture",
+            "sessionId":"host-session","conversationId":"host-session","workspaceRoot":pair.workspace_root,"busy":false}),
+        );
+        assert_eq!(poll["deliveries"][0]["deliveryId"], prepared.request_id);
+        for (state, receipt) in [
+            ("TRANSPORT_ACCEPTED", "transport-fixture"),
+            ("AGENT_ACKNOWLEDGED", "ack-fixture"),
+            ("COMPLETED", "complete-fixture"),
+        ] {
+            assert_eq!(
+                post(
+                    &pair,
+                    "/v1/receipt",
+                    serde_json::json!({"instanceId":"router-fixture",
+                "sessionId":"host-session","conversationId":"host-session","deliveryId":prepared.request_id,
+                "state":state,"receiptId":receipt,"reason":"Protocol fixture only"})
+                )["accepted"],
+                true
+            );
+        }
+        let result = router
+            .status(&state, &prepared.request_id, crate::selection::now_ms())
+            .unwrap();
+        assert_eq!(result.state, DeliveryState::Completed);
+        assert_eq!(
+            result.transport_receipt.as_deref(),
+            Some("transport-fixture")
+        );
+        assert_eq!(result.agent_acknowledgment.as_deref(), Some("ack-fixture"));
+        assert_eq!(result.receipt_id.as_deref(), Some("complete-fixture"));
+        state.build.generation += 1;
+        state.build.stale = true;
+        let after_rebuild = router
+            .status(&state, &prepared.request_id, crate::selection::now_ms())
+            .unwrap();
+        assert_eq!(after_rebuild.state, DeliveryState::Completed);
+        router.list(&state, selection.expires_at + 1);
+        let after_expiry = router
+            .status(&state, &prepared.request_id, selection.expires_at + 1)
+            .unwrap();
+        assert_eq!(after_expiry.state, DeliveryState::Completed);
+        assert_eq!(
+            after_expiry.agent_acknowledgment.as_deref(),
+            Some("ack-fixture")
         );
     }
 }
