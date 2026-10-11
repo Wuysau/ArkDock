@@ -61,7 +61,7 @@ async function bind(alreadyMaximized=false) {
   action('foreground',target.first);action('foreground',dockHandle);await pause(200);
   await activateOwnedHeader(view,dockHandle,action);
   const own=action('info',dockHandle),destination=action('info',target.first);
-  requireOwnedTargetEdge(action,target.first,destination);
+  requireOwnedTargetEdge(action,target.first,destination,dockPid);
   const button=await view.evaluate('(()=>{const r=document.querySelector(".drag").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio}})()');
   const x=Math.round(own.clientX+button.x*button.ratio),y=Math.round(own.clientY+button.y*button.ratio);
   action('drag',dockHandle,{X:x,Y:y,EndX:x+destination.frameRight-own.frameLeft,EndY:y+destination.frameTop-own.frameTop,OutlinePid:dockPid});

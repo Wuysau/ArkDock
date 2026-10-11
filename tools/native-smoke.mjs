@@ -119,7 +119,7 @@ try {
   assert.equal(destination.minimized,false,'Owned fixture must not be minimized');
   assert.equal(await view.evaluate('!!document.querySelector("[inert]") || !!document.querySelector("dialog")'),false,'Owned drag must not be blocked by a modal');
   await activateOwnedHeader(view, dockHandle, action);
-  requireOwnedTargetEdge(action,target.first,destination);
+  requireOwnedTargetEdge(action,target.first,destination,dock.Id);
   const button = await view.evaluate('(() => { const r=document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio }; })()');
   const x = Math.round(before.clientX + button.x*button.ratio); const y = Math.round(before.clientY + button.y*button.ratio);
   const dragged = action('drag', dockHandle, { X:x,Y:y,EndX:x+destination.frameRight-before.frameLeft,EndY:y+destination.frameTop-before.frameTop,OutlinePid:dock.Id });

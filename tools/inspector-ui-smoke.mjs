@@ -132,7 +132,7 @@ try {
   action('move',target.second,{X:50,Y:520,Width:400,Height:420});action('move',dockHandle,{X:1000,Y:400,Width:1000,Height:1250});
   action('foreground',target.first);await pause(200);action('foreground',dockHandle);await pause(250);
   const before=action('info',dockHandle),destination=action('info',target.first);
-  requireOwnedTargetEdge(action,target.first,destination);
+  requireOwnedTargetEdge(action,target.first,destination,ownedPid);
   const drag=await view.evaluate('(() => {const r=document.querySelector(".drag").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio};})()');
   const x=Math.round(before.clientX+drag.x*drag.ratio),y=Math.round(before.clientY+drag.y*drag.ratio);
   report.drag=action('drag',dockHandle,{X:x,Y:y,EndX:x+destination.right-before.left,EndY:y+destination.top-before.top,OutlinePid:ownedPid});

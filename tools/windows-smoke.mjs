@@ -71,7 +71,7 @@ try {
   const startX = Math.round(before.clientX + button.x * button.ratio);
   const startY = Math.round(before.clientY + button.y * button.ratio);
   const targetBefore = action('info', target.first);
-  requireOwnedTargetEdge(action,target.first,targetBefore);
+  requireOwnedTargetEdge(action,target.first,targetBefore,dock.Id);
   await view.evaluate('window.__arkdockPointer = []; document.addEventListener("pointerdown", e => window.__arkdockPointer.push({kind:e.type,x:e.clientX,y:e.clientY,target:e.target.className}), {once:true});');
   await view.evaluate(`(async()=>{
     const trace=window.__arkdockDockingSmoke={confirmations:[],ripples:[],animationStarts:[],seen:new Set()};

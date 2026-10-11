@@ -104,7 +104,7 @@ try {
     assert.deepEqual([settled.left,settled.top,settled.right,settled.bottom],[before.left,before.top,before.right,before.bottom]);
   } else before = stable;
   const destination = action('info', target.first);
-  requireOwnedTargetEdge(action,target.first,destination);
+  requireOwnedTargetEdge(action,target.first,destination,ownedPid);
   assert.equal(destination.visible,true); assert.equal(destination.minimized,false);
   const drag = await view.evaluate('(() => {const r=document.querySelector(".drag").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio};})()');
   const x = Math.round(before.clientX + drag.x * drag.ratio), y = Math.round(before.clientY + drag.y * drag.ratio);
