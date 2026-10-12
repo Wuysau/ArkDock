@@ -1034,7 +1034,17 @@ impl Native {
         if let Some(target) = &mut self.target {
             target.info.title = current_title;
         }
-        if unsafe { IsIconic(target_hwnd) } != 0 || !visible(target_hwnd) {
+        let Some(target_visible) = (match visibility_status(target_hwnd) {
+            VisibilityStatus::Visible => Some(true),
+            VisibilityStatus::Hidden => Some(false),
+            // DWM inspection failure is unknown, not evidence that the target was hidden.
+            VisibilityStatus::Unavailable => None,
+        }) else {
+            self.hint =
+                Some("Target visibility is unavailable; waiting for Windows observation".into());
+            return;
+        };
+        if !target_visible {
             self.layout = None;
             self.arrangement = None;
             if !self.expanded_while_target_hidden
@@ -1173,7 +1183,9 @@ impl Native {
         }
         if self.layout.is_none()
             && self.hint.as_deref().is_some_and(|hint| {
-                hint.starts_with("Target is minimized") || hint.starts_with("No external space")
+                hint.starts_with("Target is minimized")
+                    || hint.starts_with("No external space")
+                    || hint.starts_with("Target visibility is unavailable")
             })
         {
             self.hint = None;

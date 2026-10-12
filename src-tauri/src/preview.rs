@@ -312,6 +312,14 @@ impl NativePreviewer {
     pub fn runtime_messages(&mut self) -> Vec<String> {
         #[cfg(windows)]
         if let Some(runtime) = &self.runtime {
+            if let Some(failure) = runtime
+                .failure
+                .lock()
+                .ok()
+                .and_then(|mut failure| failure.take())
+            {
+                return vec![failure];
+            }
             return runtime.messages.try_iter().take(16).collect();
         }
         Vec::new()

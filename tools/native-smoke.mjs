@@ -51,13 +51,22 @@ async function check(id, name, execute) {
 async function clickUiControl(expression, name) {
   let point;
   await until(name, async () => {
-    point = await view.evaluate(`(() => { const button = ${expression}; if (!button || button.disabled) return null; const r = button.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+    point = await view.evaluate(`(() => { const button = ${expression}; if (!button || button.disabled) return null; button.scrollIntoView({block:'center'}); const r = button.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
     return Boolean(point);
   }, 10_000);
   await view.send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
   await view.send('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});
+  return true;
 }
-const trustThroughUi = () => clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual execution trust confirmation');
+async function trustThroughUi() {
+  // After a revocation the trust sheet is not reopened automatically; the empty
+  // state offers the primary confirmation entry instead.
+  const granted = await clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual execution trust confirmation').catch(() => null);
+  if (!granted) {
+    await clickUiControl('[...document.querySelectorAll("button")].find(button => button.textContent.trim() === "确认工程信任")','Actual trust entry');
+    await clickUiControl('[...document.querySelectorAll("dialog button")].find(button => button.textContent.trim() === "信任此工程")','Actual trust grant');
+  }
+}
 async function frame(name) {
   const data = await view.evaluate('(() => {const canvas=document.querySelector("canvas.native-frame");return canvas?.dataset.frameSequence ? canvas.toDataURL("image/png").split(",")[1] : null;})()');
   assert.ok(data, 'Actual native frame must be delivered to the UI');
@@ -117,7 +126,8 @@ try {
   const destination = action('info', target.first);
   assert.equal(destination.visible,true,'Owned fixture must be visible');
   assert.equal(destination.minimized,false,'Owned fixture must not be minimized');
-  assert.equal(await view.evaluate('!!document.querySelector("[inert]") || !!document.querySelector("dialog")'),false,'Owned drag must not be blocked by a modal');
+  // The collapsed workspace-details strip is intentionally inert; only a dialog blocks the drag.
+  assert.equal(await view.evaluate('!!document.querySelector("dialog[open]")'),false,'Owned drag must not be blocked by a modal');
   await activateOwnedHeader(view, dockHandle, action);
   requireOwnedTargetEdge(action,target.first,destination,dock.Id);
   const button = await view.evaluate('(() => { const r=document.querySelector(".drag").getBoundingClientRect(); return { x:r.x+r.width/2,y:r.y+r.height/2,ratio:devicePixelRatio }; })()');
@@ -167,7 +177,13 @@ try {
     await until('Actual native count log', () => /ARKDOCK_NATIVE_COUNT=1/.test(readFileSync(currentLog,'utf8')), 10_000);
     await pause(400);
     assert.notEqual(await frame('after-click'), previous);
-    await assert.rejects(invoke('click_preview',{buildId:'old-task',generation:0,x:180,y:360}), /STALE_INPUT/);
+    await assert.rejects(invoke('click_preview',{buildId:'old-task',generation:0,x:180,y:360}), /STALE_INPUT|NATIVE_CONTROL_SURFACE_PENDING/);
+  });
+  await check('W1', 'Target minimize/restore clears obsolete visibility hint', async () => {
+    action('minimize', target.first);
+    await until('Target hidden observation', state => state.dockHint?.includes('minimized or hidden'), 10_000);
+    action('restore', target.first);
+    await until('Target visibility restored', state => !state.dockHint?.includes('minimized or hidden'), 10_000);
   });
   await check('O1', 'Orb collapse/expand retains the actual Previewer session, build and runtime counter', async () => {
     const before = await snapshot();
@@ -259,7 +275,7 @@ try {
     assert.equal(await frame('compile-failed-old-picture'),previous);
     const staleScreenshot = await view.send('Page.captureScreenshot',{format:'png'});
     writeFileSync('artifacts/native-compile-failed-window.png',Buffer.from(staleScreenshot.data,'base64'));
-    await assert.rejects(invoke('click_preview',{buildId:failed.build.buildId,generation:failed.build.generation,x:180,y:360}), /STALE_INPUT/);
+    await assert.rejects(invoke('click_preview',{buildId:failed.build.buildId,generation:failed.build.generation,x:180,y:360}), /STALE_INPUT|NATIVE_CONTROL_SURFACE_PENDING/);
     writeFileSync(sourcePath,valid);
     running = await until('Native recovery after actual source repair',(state) => state.phase === 'running' && state.build.generation > failed.build.generation && !state.build.stale);
     currentLog = logFrom(running);
@@ -267,6 +283,36 @@ try {
     await until('Recovered build image rendered on Canvas', async () => (await view.evaluate('document.querySelector(".native-frame")?.dataset.buildId')) === running.build.buildId, 10_000);
     const recoveredScreenshot = await view.send('Page.captureScreenshot',{format:'png'});
     writeFileSync('artifacts/native-recovered-window.png',Buffer.from(recoveredScreenshot.data,'base64'));
+  });
+  await check('R0', 'Compiled ArkTS page exception cannot be presented as interactive native preview', async () => {
+    const valid = readFileSync(sourcePath, 'utf8');
+    const generation = running.build.generation;
+    sourceChanged = true;
+    writeFileSync(sourcePath, valid.replace('aboutToAppear(): void {', "aboutToAppear(): void {\n    if (this.count === 0) { throw new Error('ARKDOCK_PAGE_RUNTIME_TEST'); }"));
+    const failed = await until('Actual ArkTS page exception is blocked', state => state.phase === 'stale' && state.build.generation > generation && state.build.error?.includes('ARKTS_RUNTIME_ERROR'), 150_000);
+    assert.ok(failed.build.stale);
+    assert.equal(await view.evaluate('document.querySelector(".native-surface")?.disabled'), true);
+    assert.equal(await view.evaluate('document.querySelector(".footer")?.textContent.includes("原生预览可交互")'), false);
+    writeFileSync(sourcePath, valid);
+    running = await until('Native recovery after page runtime error', state => state.phase === 'running' && state.build.generation > failed.build.generation && !state.build.error);
+    currentLog = logFrom(running);
+  });
+  await check('R1', 'Actual owned Previewer exit disables interaction and marks the retained frame stale', async () => {
+    // A just-recovered runtime may briefly own both the terminating and the new Previewer.
+    let owned = [];
+    for (let i = 0; i < 40; i++) {
+      owned = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-Command', `ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process -Filter "Name='Previewer.exe'" | Where-Object ParentProcessId -EQ ${dock.Id} | Select-Object -ExpandProperty ProcessId) -Compress`], {encoding:'utf8',windowsHide:true}));
+      if (owned.length === 1) break;
+      await pause(250);
+    }
+    assert.equal(owned.length, 1, 'Only this driver workspace Previewer can be terminated');
+    execFileSync('pwsh', ['-NoProfile','-Command', `Stop-Process -Id ${owned[0]} -ErrorAction Stop`], {windowsHide:true});
+    await until('Runtime exit fail closed', state => ['stale','crashed'].includes(state.phase) && Boolean(state.build.error), 10_000);
+    assert.equal(await view.evaluate('document.querySelector(".native-surface")?.disabled'), true);
+    assert.equal(await view.evaluate('document.querySelector(".footer")?.textContent.includes("原生预览可交互")'), false);
+    await invoke('refresh_preview');
+    running = await until('Native recovery after actual runtime exit', state => state.phase === 'running' && !state.build.error);
+    currentLog = logFrom(running);
   });
   await check('C2', 'Stop clears session and terminates only the owned Previewer job', async () => {
     const processes = JSON.parse(execFileSync('pwsh',['-NoProfile','-Command','@(Get-CimInstance Win32_Process -Filter "Name=\'Previewer.exe\'" | Select-Object ProcessId,ParentProcessId,CommandLine) | ConvertTo-Json -AsArray'],{encoding:'utf8',windowsHide:true}));

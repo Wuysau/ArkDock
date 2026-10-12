@@ -657,7 +657,17 @@ impl Native {
         }
         let hwnd = target.identity.handle as HWND;
         let own_hwnd = self.own.identity.handle as HWND;
-        if unsafe { IsIconic(hwnd) } != 0 || !visible(hwnd) {
+        let Some(target_visible) = (match visibility_status(hwnd) {
+            VisibilityStatus::Visible => Some(true),
+            VisibilityStatus::Hidden => Some(false),
+            // DWM inspection failure is unknown, not evidence that the target was hidden.
+            VisibilityStatus::Unavailable => None,
+        }) else {
+            self.hint =
+                Some("Target visibility is unavailable; waiting for Windows observation".into());
+            return true;
+        };
+        if !target_visible {
             if !self.expanded_while_target_hidden
                 && !self.hidden_by_us
                 && unsafe { IsIconic(own_hwnd) } == 0
@@ -671,6 +681,17 @@ impl Native {
         }
         self.expanded_while_target_hidden = false;
         self.show_own();
+        // This hint describes the previous visibility observation, not a layout failure.
+        // Clear it as soon as the target is visible, even when no geometry changes follow.
+        if matches!(
+            self.hint.as_deref(),
+            Some(
+                "Target is minimized or hidden; companion waits for restore"
+                    | "Target visibility is unavailable; waiting for Windows observation"
+            )
+        ) {
+            self.hint = None;
+        }
         let Some(actual) = observed_pair(hwnd, own_hwnd) else {
             return true;
         };

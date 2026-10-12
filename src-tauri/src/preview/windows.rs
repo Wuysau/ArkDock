@@ -13,7 +13,7 @@ use crate::ipc::model::{NativeControlAction, NativeControlPhase, NativeControlRe
 use crate::scheduler::BuildTask;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
@@ -177,6 +177,7 @@ pub(super) struct Runtime {
     pub completed: mpsc::Receiver<Completed>,
     pub frames: Arc<Mutex<BinaryFrameMailbox>>,
     pub messages: mpsc::Receiver<String>,
+    pub failure: Arc<Mutex<Option<String>>>,
 }
 impl Runtime {
     pub fn launch(sdk: PathBuf, project: ProjectRef, task: BuildTask) -> Self {
@@ -186,6 +187,8 @@ impl Runtime {
         let (inspections, inspection_receiver) = mpsc::sync_channel(2);
         let (completed_tx, completed) = mpsc::sync_channel(2);
         let (message_tx, messages) = mpsc::sync_channel(16);
+        let failure = Arc::new(Mutex::new(None));
+        let worker_failure = failure.clone();
         let worker_stop = stop.clone();
         let worker_frames = frames.clone();
         let controls = Arc::new(Mutex::new(ControlMailbox::default()));
@@ -216,7 +219,9 @@ impl Runtime {
             if let Err(error) = outcome {
                 if !worker_stop.load(Ordering::Acquire) {
                     if reported {
-                        let _ = message_tx.try_send(format!("RUNTIME_FAILED: {error}"));
+                        if let Ok(mut failure) = worker_failure.lock() {
+                            *failure = Some(format!("RUNTIME_FAILED: {error}"));
+                        }
                     } else {
                         let _ = completed_tx.try_send((task, Err(error)));
                     }
@@ -245,6 +250,7 @@ impl Runtime {
             completed,
             frames,
             messages,
+            failure,
         }
     }
     pub fn click(&self, point: NativePoint) -> Result<(), String> {
@@ -762,6 +768,8 @@ fn run(
     let mut inspection_poisoned = false;
     let mut query_id = 0u64;
     let mut held_navigation_frame: Option<(BinaryFrame, u64)> = None;
+    let mut runtime_log_offset = 0u64;
+    let mut runtime_log_tail = String::new();
     let outcome = (|| -> Result<(), String> {
     while !stop.load(Ordering::Acquire) {
         if let Some(code) = previewer.exit_code()? {
@@ -770,6 +778,7 @@ fn run(
         if previewer.log_size() > LOG_LIMIT {
             return Err("PREVIEWER_LOG_LIMIT".into());
         }
+        inspect_runtime_log(&runtime_log, &mut runtime_log_offset, &mut runtime_log_tail)?;
         for message in command.receive(previewer.pid)? {
             if message
                 .get("command")
@@ -916,9 +925,59 @@ fn run(
     outcome
 }
 
+// Native pixels can contain a partially rendered page after an ArkTS exception.
+// Read the owned runtime log incrementally; SDK bootstrap warnings are not page errors.
+fn inspect_runtime_log(path: &Path, offset: &mut u64, tail: &mut String) -> Result<(), String> {
+    let mut file = File::open(path).map_err(|e| format!("RUNTIME_LOG_READ: {e}"))?;
+    file.seek(SeekFrom::Start(*offset))
+        .map_err(|e| format!("RUNTIME_LOG_SEEK: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("RUNTIME_LOG_READ: {e}"))?;
+    *offset += bytes.len() as u64;
+    tail.push_str(&String::from_utf8_lossy(&bytes));
+    if let Some(index) = tail.find("[Engine Log]Error message:") {
+        return Err(format!(
+            "ARKTS_RUNTIME_ERROR: {}",
+            tail[index..]
+                .lines()
+                .next()
+                .unwrap_or("ArkTS page exception")
+        ));
+    }
+    // Preserve a split log marker without keeping application logs in memory.
+    if tail.len() > 1024 {
+        let mut start = tail.len() - 1024;
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        *tail = tail[start..].to_owned();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preview::frames::parse_jpeg40;
+    #[test]
+    fn arkts_page_error_split_across_log_reads_is_fatal_but_sdk_warning_is_not() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("previewer.log");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "[ArkCompiler] Throw error: undefined is not callable").unwrap();
+        let mut offset = 0;
+        let mut tail = String::new();
+        assert!(inspect_runtime_log(&path, &mut offset, &mut tail).is_ok());
+        write!(file, "[Engine Log]Error mes").unwrap();
+        assert!(inspect_runtime_log(&path, &mut offset, &mut tail).is_ok());
+        writeln!(file, "sage: Cannot read property length of undefined").unwrap();
+        assert!(inspect_runtime_log(&path, &mut offset, &mut tail)
+            .unwrap_err()
+            .starts_with("ARKTS_RUNTIME_ERROR:"));
+    }
     #[test]
     fn each_build_has_private_structured_cache_environment_without_project_cache_repair() {
         let sdk = Path::new("C:/SDK space & literal");
