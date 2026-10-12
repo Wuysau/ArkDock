@@ -2,7 +2,7 @@ import { useId, useState } from 'react';
 import type { AppSnapshot } from './ipc/model.ts';
 import { deriveUiState } from './view-state.ts';
 import { pairControl } from './pair-layout.ts';
-import { hasDockCandidate } from './request-state.ts';
+import { dockingStatus, hasDockCandidate } from './request-state.ts';
 import { Icon } from './Icon.tsx';
 import { displayPath } from './path-display.ts';
 
@@ -26,6 +26,10 @@ export function WorkspaceStrip({ snapshot, busy, cancelling, openProject, openCa
         : project && !snapshot?.backend.available ? '工具链不可用' : snapshot?.phase === 'building' ? '正在构建' : ui.workspaceLabel;
   const status = project && !snapshot?.trusted && ui.workspaceLabel !== baseStatus ? `${baseStatus} · 等待信任` : baseStatus;
   const reason = snapshot?.build.error || (project && !snapshot?.backend.available ? snapshot?.backend.reason : null) || status;
+  const docking = dockingStatus(snapshot?.dockHint);
+  if (!snapshot?.target && docking) return <output className={`state-strip docking-status${hasDockCandidate(snapshot?.dockHint) ? ' working' : ''}`} aria-label="贴附状态">
+    <Icon name="link" size={14} /><span title={docking.detail}>{docking.label}</span>
+  </output>;
   return <section className="workspace-card" aria-label="当前工程" data-expanded={expanded}>
     <div className="workspace-compact">
       <button className="workspace-main" aria-label="工程" onClick={openProject} title={project ? `${project.name}\n${displayPath(project.appRoot)}` : '查看工程候选'}>

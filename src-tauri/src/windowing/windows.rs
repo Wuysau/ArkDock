@@ -642,6 +642,9 @@ impl Native {
                         // Moving the companion is a user layout change. Never
                         // enqueue a restore that could arrive during its drag.
                         self.detach(false);
+                        // An end event drained for a previous gesture in this batch must not
+                        // cancel the newly armed gesture before start_dragging is called.
+                        released = false;
                         self.dragging = true;
                         self.move_started = false;
                         self.armed_at = Some(Instant::now());
@@ -689,6 +692,15 @@ impl Native {
             self.advance_display();
             self.restore_cancelled();
             if self.dragging {
+                // Only an explicitly armed docking gesture can reach this branch.
+                // A move-start WinEvent can be missed or delivered late; positive
+                // native move-loop ownership is independent evidence that our
+                // main window really started moving. Never infer it from bounds.
+                let move_loop_active = self.own_move_loop_active();
+                if !self.move_started && move_loop_active {
+                    self.move_started = true;
+                    self.armed_at = None;
+                }
                 if self
                     .armed_at
                     .is_some_and(|time| time.elapsed() > Duration::from_secs(3))
@@ -697,7 +709,9 @@ impl Native {
                     self.dragging = false;
                     self.armed_at = None;
                     self.hint = Some("Native drag did not start; binding remains detached".into());
-                } else if released || self.move_started && !self.own_move_loop_active() {
+                } else if (released || self.move_started) && !move_loop_active {
+                    // A delayed END must not finish a newer main-window move loop
+                    // that is still active; the guard above checks current ownership.
                     self.release();
                 } else if self.move_started && self.last_sample.elapsed() >= SAMPLE_INTERVAL {
                     self.detect();
@@ -724,6 +738,7 @@ impl Native {
         info.cbSize = size_of::<GUITHREADINFO>() as u32;
         (unsafe { GetGUIThreadInfo(self.own.identity.thread_id, &mut info) }) != 0
             && info.flags & GUI_INMOVESIZE != 0
+            && info.hwndMoveSize == self.own.identity.handle as HWND
     }
 
     fn valid(&self, window: &TrackedWindow) -> bool {
@@ -767,29 +782,58 @@ impl Native {
             .is_some_and(|candidate| self.valid(&candidate.window));
         let Some(own) = visible_bounds(self.own.identity.handle as HWND) else {
             self.cancel_effects();
-            self.hint = Some("Dock bounds are unavailable".into());
+            self.hint = Some(
+                "Dock bounds are unavailable (ArkDock native frame inspection failed); no binding will be made".into(),
+            );
             return;
         };
         let mut handles = Vec::<isize>::with_capacity(WINDOW_LIMIT);
         let result =
             unsafe { EnumWindows(Some(enumerate), &mut handles as *mut Vec<isize> as isize) };
         if result == 0 {
+            let enumeration_error = unsafe { GetLastError() };
             self.cancel_effects();
-            self.hint = Some("Desktop enumeration was incomplete; no binding will be made".into());
+            let reason = if handles.len() >= WINDOW_LIMIT {
+                format!("window limit {WINDOW_LIMIT} reached")
+            } else {
+                format!("Win32 error {enumeration_error}")
+            };
+            self.hint = Some(format!(
+                "Desktop enumeration was incomplete; no binding will be made ({reason}; enumerated {})",
+                handles.len(),
+            ));
             return;
         }
+        // Per-sample counts stay bounded by WINDOW_LIMIT and contain no foreign
+        // titles, process metadata or UI content. They explain where a gesture
+        // stopped without retaining a desktop-wide window inventory.
+        let enumerated_count = handles.len();
+        let mut visible_count = 0usize;
+        let mut eligible_count = 0usize;
+        let mut nearby_count = 0usize;
+        let mut occluded_count = 0usize;
+        let mut unreadable_count = 0usize;
+        let mut lifecycle_rejected_count = 0usize;
+        let mut track_failed_count = 0usize;
         for handle in handles {
             if handle == self.own.identity.handle {
                 continue;
             }
             let hwnd = handle as HWND;
-            if !visible(hwnd) {
-                continue;
+            match visibility_status(hwnd) {
+                VisibilityStatus::Visible => visible_count += 1,
+                VisibilityStatus::Hidden => continue,
+                VisibilityStatus::Unavailable => {
+                    unreadable_count += 1;
+                    continue;
+                }
             }
             let Some(bounds) = visible_bounds(hwnd) else {
+                unreadable_count += 1;
                 continue;
             };
             if eligible(hwnd, self.own_pid) {
+                eligible_count += 1;
                 let threshold = scaled(hwnd, 40);
                 let proximity = edge_score(own, bounds, threshold).or_else(|| {
                     // At a full-width maximized edge Windows clamps the cursor; the grabbed
@@ -808,6 +852,7 @@ impl Native {
                         .then_some(distance as i32)
                 });
                 if let Some(distance) = proximity {
+                    nearby_count += 1;
                     // EnumWindows identifies candidates. Explicit GW_HWNDPREV
                     // checks z order; don't rely on undocumented enum ordering.
                     if let Some((z_index, higher)) = higher_windows(
@@ -820,6 +865,7 @@ impl Native {
                         if edge_visible(bounds, own, &higher) {
                             if let Ok(mut window) = track(handle, self.epoch(handle)) {
                                 if !self.valid(&window) {
+                                    lifecycle_rejected_count += 1;
                                     continue;
                                 }
                                 if let Some(previous) = &previous_candidate {
@@ -843,8 +889,14 @@ impl Native {
                                 if better {
                                     self.candidate = Some(candidate);
                                 }
+                            } else {
+                                track_failed_count += 1;
                             }
+                        } else {
+                            occluded_count += 1;
                         }
+                    } else {
+                        unreadable_count += 1;
                     }
                 }
             }
@@ -854,7 +906,9 @@ impl Native {
                 "Release to bind {} ({} physical px from its edge)",
                 candidate.window.info.title, candidate.distance
             ),
-            None => "No unobscured ordinary window edge is close enough".into(),
+            None => format!(
+                "No unobscured ordinary window edge is close enough (enumerated={enumerated_count}, visible={visible_count}, eligible={eligible_count}, nearby={nearby_count}, occluded={occluded_count}, unreadable={unreadable_count}, lifecycleRejected={lifecycle_rejected_count}, trackFailed={track_failed_count})",
+            ),
         });
         if let Some(candidate) = &self.candidate {
             if let Some(bounds) = visible_bounds(candidate.window.identity.handle as HWND) {
@@ -919,6 +973,7 @@ impl Native {
         self.dragging = false;
         self.move_started = false;
         self.armed_at = None;
+        let detection_reason = self.hint.take();
         if let Some(candidate) = self.candidate.take() {
             if self.valid(&candidate.window)
                 && eligible(candidate.window.identity.handle as HWND, self.own_pid)
@@ -931,8 +986,17 @@ impl Native {
                 self.follow();
                 return;
             }
+            self.hint = Some(
+                "No live eligible target at release; binding remains detached (candidate lifecycle or eligibility changed before release)".into(),
+            );
+        } else {
+            self.hint = Some(match detection_reason {
+                Some(reason) => format!(
+                    "No live eligible target at release; binding remains detached · {reason}",
+                ),
+                None => "No live eligible target at release; binding remains detached".into(),
+            });
         }
-        self.hint = Some("No live eligible target at release; binding remains detached".into());
     }
 
     fn follow(&mut self) {
@@ -1599,9 +1663,15 @@ fn track(handle: isize, destruction_epoch: u64) -> Result<TrackedWindow, String>
     })
 }
 
-fn visible(hwnd: HWND) -> bool {
+enum VisibilityStatus {
+    Visible,
+    Hidden,
+    Unavailable,
+}
+
+fn visibility_status(hwnd: HWND) -> VisibilityStatus {
     if unsafe { IsWindowVisible(hwnd) } == 0 || unsafe { IsIconic(hwnd) } != 0 {
-        return false;
+        return VisibilityStatus::Hidden;
     }
     let mut cloaked = 0u32;
     // Failed DWM visibility inspection is excluded rather than guessed visible.
@@ -1613,7 +1683,17 @@ fn visible(hwnd: HWND) -> bool {
             size_of::<u32>() as u32,
         )
     };
-    status >= 0 && cloaked == 0
+    if status < 0 {
+        VisibilityStatus::Unavailable
+    } else if cloaked != 0 {
+        VisibilityStatus::Hidden
+    } else {
+        VisibilityStatus::Visible
+    }
+}
+
+fn visible(hwnd: HWND) -> bool {
+    matches!(visibility_status(hwnd), VisibilityStatus::Visible)
 }
 
 fn eligible(hwnd: HWND, own_pid: u32) -> bool {

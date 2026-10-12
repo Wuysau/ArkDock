@@ -159,6 +159,8 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .app[data-binding="unbound"] .state-strip,
 .app[data-binding="candidate"] .workspace-card,
 .app[data-binding="candidate"] .preview-toolbar { display: none; }
+.app[data-binding="unbound"] .docking-status,
+.app[data-binding="candidate"] .docking-status { display: flex; margin: 4px 12px 2px; flex-shrink: 0; animation: none; }
 .app[data-binding="unbound"] .stage-caption,
 .app[data-binding="candidate"] .stage-caption { visibility: hidden; }
 .welcome-state .welcome-art { margin-bottom: 28px; width: 188px; height: 166px; }
