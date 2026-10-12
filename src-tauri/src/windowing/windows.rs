@@ -1778,7 +1778,18 @@ fn higher_windows(
         {
             // A visible higher window with unreadable bounds is an unknown
             // occluder, so reject the candidate rather than assume it is clear.
-            rectangles.push(visible_bounds(cursor)?);
+            match visible_bounds_read(cursor)? {
+                BoundsRead::Drawable(bounds) => rectangles.push(bounds),
+                BoundsRead::Empty => {
+                    // Some visible system windows have no pixel footprint.
+                    // Skip only when both independent geometry reads succeed
+                    // with empty, well-ordered rectangles; inconsistent bounds
+                    // still block the candidate.
+                    if !matches!(outer_bounds_read(cursor)?, BoundsRead::Empty) {
+                        return None;
+                    }
+                }
+            }
         }
     }
     None
@@ -1787,15 +1798,41 @@ fn higher_windows(
 fn from_native(rect: RECT) -> Option<Rect> {
     Rect::new(rect.left, rect.top, rect.right, rect.bottom)
 }
-fn outer_bounds(hwnd: HWND) -> Option<Rect> {
+
+enum BoundsRead {
+    Drawable(Rect),
+    Empty,
+}
+
+fn classify_bounds(rect: RECT) -> Option<BoundsRead> {
+    let width = rect.right.checked_sub(rect.left)?;
+    let height = rect.bottom.checked_sub(rect.top)?;
+    if width < 0 || height < 0 {
+        return None;
+    }
+    if width == 0 || height == 0 {
+        Some(BoundsRead::Empty)
+    } else {
+        Some(BoundsRead::Drawable(from_native(rect)?))
+    }
+}
+
+fn outer_bounds_read(hwnd: HWND) -> Option<BoundsRead> {
     let mut rect: RECT = unsafe { zeroed() };
     if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
         return None;
     }
-    from_native(rect)
+    classify_bounds(rect)
 }
 
-fn visible_bounds(hwnd: HWND) -> Option<Rect> {
+fn outer_bounds(hwnd: HWND) -> Option<Rect> {
+    match outer_bounds_read(hwnd)? {
+        BoundsRead::Drawable(bounds) => Some(bounds),
+        BoundsRead::Empty => None,
+    }
+}
+
+fn visible_bounds_read(hwnd: HWND) -> Option<BoundsRead> {
     let mut rect: RECT = unsafe { zeroed() };
     if unsafe {
         DwmGetWindowAttribute(
@@ -1808,7 +1845,10 @@ fn visible_bounds(hwnd: HWND) -> Option<Rect> {
     {
         return None;
     }
-    let frame = from_native(rect)?;
+    let frame = match classify_bounds(rect)? {
+        BoundsRead::Drawable(bounds) => bounds,
+        BoundsRead::Empty => return Some(BoundsRead::Empty),
+    };
     if unsafe { IsZoomed(hwnd) } != 0 {
         let outer = outer_bounds(hwnd)?;
         // Some custom-frame apps return the maximized invisible sizing border as
@@ -1824,16 +1864,24 @@ fn visible_bounds(hwnd: HWND) -> Option<Rect> {
                 let right = (frame.right - origin.x - client.right).max(0);
                 let top = (origin.y - frame.top).max(0).min(left.max(right));
                 let bottom = (frame.bottom - origin.y - client.bottom).max(0);
-                return Rect::new(
+                let corrected = Rect::new(
                     frame.left + left,
                     frame.top + top,
                     frame.right - right,
                     frame.bottom - bottom,
-                );
+                )?;
+                return Some(BoundsRead::Drawable(corrected));
             }
         }
     }
-    Some(frame)
+    Some(BoundsRead::Drawable(frame))
+}
+
+fn visible_bounds(hwnd: HWND) -> Option<Rect> {
+    match visible_bounds_read(hwnd)? {
+        BoundsRead::Drawable(bounds) => Some(bounds),
+        BoundsRead::Empty => None,
+    }
 }
 
 fn work_area(hwnd: HWND) -> Option<Rect> {

@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AppSnapshot, Diagnostic } from './ipc/model.ts';
 import { diagnosticText } from './diagnostics.ts';
+import { dockingStatus } from './request-state.ts';
 import { Icon } from './Icon.tsx';
 import './runtime-logs.css';
 
@@ -168,6 +169,7 @@ export function RuntimeLogs({ snapshot }: { snapshot: AppSnapshot | null }) {
   const [copyStatus, setCopyStatus] = useState('');
   const [copying, setCopying] = useState(false);
   const diagnostics = snapshot?.diagnostics ?? emptyDiagnostics;
+  const docking = dockingStatus(snapshot?.dockHint);
 
   async function copyDiagnostics() {
     if (copying) return;
@@ -195,6 +197,7 @@ export function RuntimeLogs({ snapshot }: { snapshot: AppSnapshot | null }) {
     </div>
     <div className="runtime-log-context">
       <p>{snapshot?.backend.reason ?? '桌面后端未连接。'}</p>
+      {docking && <p>贴附诊断：{docking.detail}</p>}
       {snapshot?.build.error && <p className="build-error">{snapshot.build.error}</p>}
     </div>
     {copyStatus && <p className="runtime-log-copy-status" role="status">{copyStatus}</p>}
