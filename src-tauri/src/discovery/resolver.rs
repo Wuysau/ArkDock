@@ -131,6 +131,7 @@ pub fn resolve_with_sources(
     candidates.sort_by(|a, b| {
         b.auto_eligible
             .cmp(&a.auto_eligible)
+            .then_with(|| history_only(a).cmp(&history_only(b)))
             .then_with(|| b.valid.cmp(&a.valid))
             .then_with(|| a.project.app_root.cmp(&b.project.app_root))
             .then_with(|| a.project.module.cmp(&b.project.module))
@@ -146,12 +147,7 @@ pub fn automatic_candidate(
     target: &TargetInfo,
     now: u64,
 ) -> Option<String> {
-    if candidates.iter().any(|candidate| {
-        candidate
-            .reasons
-            .iter()
-            .any(|reason| reason == SOURCE_INCOMPLETE_REASON)
-    }) {
+    if !resolution_complete(candidates) {
         return None;
     }
     let mut eligible = candidates.iter().filter(|candidate| {
@@ -167,17 +163,33 @@ pub fn automatic_candidate(
         return None;
     }
     // A second current source claiming the active scope is a conflict even if its authentication
-    // is incomplete. Weak title/history observations do not claim an active scope.
+    // is incomplete. Weak title/history observations and explicit manual choices do not claim a
+    // host active scope.
     if candidates.iter().any(|other| {
         other.id != candidate.id
             && other
                 .evidence
                 .iter()
-                .any(|evidence| evidence.active_scope && current_target(evidence, target, now))
+                .any(|evidence| {
+                    active_workspace_source(&evidence.source)
+                        && evidence.active_scope
+                        && current_target(evidence, target, now)
+                })
     }) {
         return None;
     }
     Some(candidate.id.clone())
+}
+
+/// A partial collection cannot establish that another source has no conflicting active scope.
+/// Keep the workspace summary and the automatic decision on the same completeness gate.
+pub fn resolution_complete(candidates: &[Candidate]) -> bool {
+    !candidates.iter().any(|candidate| {
+        candidate
+            .reasons
+            .iter()
+            .any(|reason| reason == SOURCE_INCOMPLETE_REASON)
+    })
 }
 
 fn current_target(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
@@ -188,11 +200,20 @@ fn current_target(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
         })
 }
 
-fn strong(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
+fn active_workspace_source(source: &EvidenceSource) -> bool {
     matches!(
-        evidence.source,
-        EvidenceSource::Registration | EvidenceSource::Uia | EvidenceSource::ProcessArguments
-    ) && evidence.verifiable
+        source,
+        EvidenceSource::HostWorkspace
+            | EvidenceSource::CodexProjectMetadata
+            | EvidenceSource::Registration
+            | EvidenceSource::Uia
+            | EvidenceSource::ProcessArguments
+    )
+}
+
+fn strong(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
+    active_workspace_source(&evidence.source)
+        && evidence.verifiable
         && evidence.active_scope
         && current_target(evidence, target, now)
         && matches!(evidence.environment, Environment::WindowsLocal)
@@ -202,12 +223,29 @@ fn strong(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
             .is_some_and(|session| !session.is_empty() && session.len() <= 128)
 }
 
+/// Current native workspace proof, independent of an Agent conversation. `session_id` is a
+/// bounded source scope token (UIA can synthesize one); it is not a chat/conversation ID.
+/// Reuse the automatic decision's lifecycle, environment and freshness gates on refresh.
+pub fn current_active_evidence(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
+    strong(evidence, target, now)
+}
+
+fn history_only(candidate: &Candidate) -> bool {
+    !candidate.evidence.is_empty()
+        && candidate
+            .evidence
+            .iter()
+            .all(|evidence| evidence.source == EvidenceSource::History)
+}
+
 fn explain_evidence(candidate: &mut Candidate, target: &TargetInfo, now: u64) {
     let has_strong = candidate
         .evidence
         .iter()
         .any(|evidence| strong(evidence, target, now));
-    let reason = if candidate.auto_eligible {
+    let reason = if history_only(candidate) {
+        "Historical project only; a previous association does not identify this window's current workspace"
+    } else if candidate.auto_eligible {
         "Unique current verifiable active-scope evidence matches target token and process lifetime"
     } else if has_strong {
         "Multiple or conflicting active-scope candidates require explicit selection"
@@ -223,10 +261,12 @@ fn explain_evidence(candidate: &mut Candidate, target: &TargetInfo, now: u64) {
         candidate.reasons.push("Expired, future-dated, or excessive-TTL evidence cannot authorize automatic association".into());
     }
     if candidate.evidence.iter().any(|evidence| {
-        evidence.target_id.as_deref() != Some(target.id.as_str())
-            || !evidence.process.as_ref().is_some_and(|process| {
-                process.pid == target.process.pid && process.started_at == target.process.started_at
-            })
+        evidence.source != EvidenceSource::History
+            && (evidence.target_id.as_deref() != Some(target.id.as_str())
+                || !evidence.process.as_ref().is_some_and(|process| {
+                    process.pid == target.process.pid
+                        && process.started_at == target.process.started_at
+                }))
     }) {
         candidate.reasons.push(
             "Evidence target token or process lifetime does not match the current target".into(),

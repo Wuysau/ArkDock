@@ -21,6 +21,8 @@
       "unsupported"
     ],
     "EvidenceSource": [
+      "hostWorkspace",
+      "codexProjectMetadata",
       "registration",
       "uia",
       "processArguments",
@@ -30,6 +32,11 @@
     ],
     "NativeFrameFormat": [
       "jpeg"
+    ],
+    "WorkspaceStatus": [
+      "unknown",
+      "suggested",
+      "verified"
     ],
     "CheckStatus": [
       "PASS",
@@ -207,6 +214,13 @@
       "autoEligible": "bool",
       "reasons": "string[]"
     },
+    "WorkspaceObservation": {
+      "status": "WorkspaceStatus",
+      "projectName": "string?",
+      "activePath": "string?",
+      "reason": "string",
+      "observedAt": "u64"
+    },
     "Diagnostic": {
       "code": "string",
       "message": "string",
@@ -248,6 +262,7 @@
       "target": "TargetInfo?",
       "project": "ProjectRef?",
       "candidates": "Candidate[]",
+      "workspaceObservation": "WorkspaceObservation?",
       "trusted": "bool",
       "sessionId": "string?",
       "backend": "BackendStatus",
@@ -696,6 +711,10 @@
     },
     "select_directory": {
       "scope": "RequestScope"
+    },
+    "inspect_directory_path": {
+      "scope": "RequestScope",
+      "path": "string"
     },
     "detach": {
       "scope": "RequestScope"

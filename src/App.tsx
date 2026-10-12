@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { AppSnapshot, Candidate, CommandArgs, InteractionMode } from './ipc/model.ts';
+import type { AppSnapshot, Candidate, CommandArgs, Evidence, InteractionMode } from './ipc/model.ts';
 import { nativeBridge } from './ipc/client.ts';
 import type { UiBridge } from './ipc/client.ts';
-import { applySnapshot, deriveUiState, filterCandidates, needsDirectoryFallback } from './view-state.ts';
+import { applySnapshot, deriveUiState, filterCandidates } from './view-state.ts';
 import { createFrameStore } from './frame-store.ts';
 import type { FrameStore } from './frame-store.ts';
 import { BinaryFrameController } from './preview/BinaryFrameController.ts';
@@ -34,8 +34,11 @@ import './preview/preview-controls.css';
 
 type Panel = 'projects' | 'sdk' | 'trust' | 'path' | 'settings' | 'menu' | 'controls' | 'diagnostics' | 'help' | null;
 const environments = { windowsLocal: 'Windows 本地', wsl: 'WSL · 预览未支持', remote: '远程 · 预览未支持' };
-const sources = { registration: '来自当前会话', uia: '窗口选中标签', processArguments: '进程启动参数', history: '曾关联此窗口', title: '窗口标题 · 路径待确认', manual: '手动目录选择' };
-const panelNames = { projects: '选择当前工程', sdk: '设备与原生工具链', trust: '工程信任', path: '工程身份与路径', settings: '偏好设置', menu: '更多操作', controls: '预览能力', diagnostics: '运行日志', help: '使用帮助' };
+const sources = { hostWorkspace: '宿主工作区接口', codexProjectMetadata: 'Codex 项目元数据', registration: '已登记工程线索', uia: '窗口标签线索', processArguments: '进程启动参数', history: '历史关联记录', title: '窗口标题 · 路径待确认', manual: '手动指定目录' };
+const panelNames = { projects: '选择关联工程', sdk: '设备与原生工具链', trust: '工程信任', path: '工程身份与路径', settings: '偏好设置', menu: '更多操作', controls: '预览能力', diagnostics: '运行日志', help: '使用帮助' };
+type CandidateCategory = 'current' | 'suggested' | 'manual' | 'history';
+const categoryNames: Record<CandidateCategory, string> = { current: '当前工作区工程候选', suggested: '建议候选 · 需要确认', manual: '指定目录 · 验证结果', history: '历史工程 · 不代表当前工作区' };
+
 
 function previewStateKey(state: AppSnapshot | null): string {
   // Diagnostic/revision-only snapshots do not redraw the preview component tree.
@@ -51,11 +54,34 @@ const StableInspectorPreview = memo(InspectorPreview, (previous, next) => previo
   && previous.actions === next.actions && previous.onProblem === next.onProblem && previous.onError === next.onError
   && previewStateKey(previous.snapshot) === previewStateKey(next.snapshot));
 
-function CandidateItem({ candidate, select, busy }: { candidate: Candidate; select: (id: string) => void; busy: boolean }) {
-  return <li className={`candidate ${candidate.autoEligible ? 'reliable' : ''}`}><button data-candidate-id={candidate.id} disabled={busy || !candidate.valid || candidate.project.environment !== 'windowsLocal'} onClick={() => select(candidate.id)}>
-    <span className="candidate-heading"><span className="candidate-icon"><Icon name="folder" /></span><strong>{candidate.project.name}</strong><span className={`badge ${candidate.valid ? '' : 'invalid'}`}>{candidate.valid ? candidate.autoEligible ? '证据可靠' : '需要确认' : '目录不可用'}</span><Icon name="chevron" size={16} /></span>
+function currentEvidence(evidence: Evidence, snapshot: AppSnapshot | null, now: number): boolean {
+  const target = snapshot?.target;
+  return Boolean(target && evidence.source !== 'history' && evidence.source !== 'manual'
+    && evidence.targetId === target.id && evidence.process?.pid === target.process.pid
+    && evidence.process.startedAt === target.process.startedAt
+    && evidence.observedAt <= now && now < evidence.expiresAt
+    && evidence.expiresAt > evidence.observedAt && evidence.expiresAt - evidence.observedAt <= 120_000);
+}
+
+function candidateCategory(candidate: Candidate, snapshot: AppSnapshot | null, now: number): CandidateCategory {
+  const current = candidate.evidence.filter((evidence) => currentEvidence(evidence, snapshot, now));
+  if ((!snapshot?.workspaceObservation || (snapshot.workspaceObservation.status === 'verified'
+    && snapshot.workspaceObservation.observedAt <= now && now - snapshot.workspaceObservation.observedAt < 15_000))
+    && current.some((evidence) => ['hostWorkspace', 'codexProjectMetadata', 'registration', 'uia', 'processArguments'].includes(evidence.source)
+    && evidence.verifiable && evidence.activeScope && evidence.environment === 'windowsLocal'
+    && candidate.project.environment === 'windowsLocal'
+    && Boolean(evidence.sessionId && evidence.sessionId.length <= 128))) return 'current';
+  if (current.length) return 'suggested';
+  if (candidate.evidence.some((evidence) => evidence.source === 'manual')) return 'manual';
+  return candidate.evidence.some((evidence) => evidence.source === 'history') ? 'history' : 'suggested';
+}
+
+function CandidateItem({ candidate, category, select, busy }: { candidate: Candidate; category: CandidateCategory; select: (id: string) => void; busy: boolean }) {
+  const reliable = category === 'current' && candidate.autoEligible;
+  return <li className={`candidate ${reliable ? 'reliable' : ''}`}><button data-candidate-id={candidate.id} disabled={busy || !candidate.valid || candidate.project.environment !== 'windowsLocal'} onClick={() => select(candidate.id)}>
+    <span className="candidate-heading"><span className="candidate-icon"><Icon name="folder" /></span><strong>{candidate.project.name}</strong><span className={`badge ${candidate.valid ? '' : 'invalid'}`}>{candidate.valid ? category === 'history' ? '历史工程' : reliable ? '证据可靠' : '需要确认' : '目录不可用'}</span><Icon name="chevron" size={16} /></span>
     <code className="path">{displayPath(candidate.project.appRoot)}</code><span>{environments[candidate.project.environment]} · {candidate.project.module} · {candidate.project.variant}</span><span>工作区：{displayPath(candidate.project.workspaceRoot)}</span>
-    <span className="evidence-tags">{Array.from(new Set(candidate.evidence.map((item) => sources[item.source]))).map((source) => <span key={source}>{source}</span>)}</span><span className="candidate-reason">{candidate.reasons.join('；') || '请选择与目标窗口对应的实际工程。'}</span>
+    <span className="evidence-tags">{Array.from(new Set(candidate.evidence.map((item) => sources[item.source]))).map((source) => <span key={source}>{source}</span>)}</span><span className="candidate-reason">{category === 'history' ? '这是之前关联过的工程；当前窗口的活动工作区尚需另行核验。' : category === 'manual' && candidate.valid ? '指定目录已执行只读检查。确认这是当前工程后，点击此项关联。' : candidate.reasons.join('；') || '请选择与目标窗口对应的实际工程。'}</span>
   </button></li>;
 }
 
@@ -106,7 +132,10 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const [panel, setPanel] = useState<Panel>(null);
   const panelAnchor = useRef<HTMLElement | null>(null);
   const navigationRevision = useRef(0);
+  const automaticPanels = useRef<{ projects: string | null; trust: string | null }>({ projects: null, trust: null });
   const [search, setSearch] = useState('');
+  const [directoryPath, setDirectoryPath] = useState('');
+  const [observationTime, setObservationTime] = useState(Date.now);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
@@ -150,7 +179,8 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     }
     if (!sameTarget(stateRef.current?.target, updated.target)) {
       const lost = Boolean(stateRef.current?.target && !updated.target);
-      setPanel(null); setSearch(''); setError(null); setFeedback(null); setLayoutConsent(false);
+      automaticPanels.current = { projects: null, trust: null };
+      setPanel(null); setSearch(''); setDirectoryPath(''); setError(null); setFeedback(null); setLayoutConsent(false);
       if (lost && !cancelRequested.current && activeCommand.current !== 'detach') setFeedback('目标窗口不可用，已解除绑定。');
     }
     if (updated.display.mode !== 'expanded') setPanel(null);
@@ -244,9 +274,24 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   }, [connected, nativeReady, motionTargetKey, state?.sessionId, orbAutoHide]);
   useEffect(() => {
     if (cancelRequested.current) return;
-    if (state?.phase === 'selectProject') setPanel('projects');
-    else if (state?.phase === 'untrusted') setPanel('trust');
-  }, [state?.phase, state?.sessionId]);
+    const target = state?.target;
+    if (!state || !target || state.display.mode !== 'expanded') return;
+    const lifecycle = `${target.id}:${target.process.pid}:${target.process.startedAt}`;
+    if (state.phase === 'selectProject' && automaticPanels.current.projects !== lifecycle) {
+      automaticPanels.current.projects = lifecycle; setPanel('projects');
+    } else if (state.phase === 'untrusted' && state.sessionId && automaticPanels.current.trust !== state.sessionId) {
+      automaticPanels.current.trust = state.sessionId; setPanel('trust');
+    }
+  }, [state?.phase, state?.sessionId, state?.target, state?.display.mode]);
+  useEffect(() => {
+    const now = Date.now();
+    const deadlines = (state?.candidates ?? []).flatMap((candidate) => candidate.evidence.map((evidence) => evidence.expiresAt));
+    if (state?.workspaceObservation) deadlines.push(state.workspaceObservation.observedAt + 15_000);
+    const next = Math.min(...deadlines.filter((deadline) => Number.isFinite(deadline) && deadline > now));
+    if (!Number.isFinite(next)) return;
+    const timeout = window.setTimeout(() => setObservationTime(Date.now()), next - now + 1);
+    return () => window.clearTimeout(timeout);
+  }, [state, observationTime]);
   async function act<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>): Promise<boolean> {
     if (pendingRef.current) return false;
     pendingRef.current = true; activeCommand.current = command; setPending(command); setError(null); setFeedback(null);
@@ -290,6 +335,14 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     const target = stateRef.current?.target?.id;
     if (await act('select_candidate', { candidateId: id }) && stateRef.current?.target?.id === target) setPanel(stateRef.current?.phase === 'untrusted' ? 'trust' : null);
   }
+  async function inspectPath() {
+    const path = directoryPath.trim();
+    if (!path) return;
+    if (await act('inspect_directory_path', { path })) {
+      setSearch('');
+      setFeedback('目录只读验证已完成。请确认对应候选工程后，点击关联。');
+    }
+  }
   async function changeDisplay(command: 'collapse_to_orb' | 'expand_from_orb' | 'hide_to_tray' | 'show_from_tray') {
     try {
       displayRequestId.current = nextDisplayRequestId(displayRequestId.current, stateRef.current?.display);
@@ -321,6 +374,14 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     finally { inputPending.current = false; }
   }, [bridge, receive, interactionMode]);
   const candidates = filterCandidates(state?.candidates ?? [], search);
+  const now = Math.max(observationTime, Date.now());
+  const grouped = Object.fromEntries((['current', 'suggested', 'manual', 'history'] as const).map((category) => [category,
+    candidates.filter((candidate) => candidateCategory(candidate, state, now) === category)])) as Record<CandidateCategory, Candidate[]>;
+  const observation = state?.workspaceObservation;
+  const observationFresh = Boolean(state?.target && observation && observation.observedAt <= now && now - observation.observedAt < 15_000);
+  const activePath = observationFresh && observation?.status === 'verified' ? observation.activePath : null;
+  const suggestedName = observationFresh && observation?.status === 'suggested' ? observation.projectName : null;
+
   const busy = pending !== null;
   const displayBusy = busy || displayTransitioning(state?.display);
   const trayReason = !connected ? '桌面桥接未连接' : state?.display.reason ?? '系统托盘尚未就绪';
@@ -363,7 +424,28 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       {state?.layoutRequired && <aside className="layout-notice"><Icon name="monitor" size={18} /><div><p>右侧空间不足。并排布局会调整目标窗口。</p><label><input type="checkbox" checked={layoutConsent} onChange={(event) => setLayoutConsent(event.target.checked)} />同意调整目标窗口</label></div><button disabled={!layoutConsent || busy} onClick={() => { void act('arrange_side_by_side', { consent: true }); setLayoutConsent(false); }}>应用布局</button></aside>}
     </div>
     {panel && <Sheet key={panel} returnFocus={panelAnchor.current} title={panelNames[panel]} kind={panel === 'diagnostics' ? 'diagnostics' : panel} close={() => navigate(null)}>
-      {panel === 'projects' && <><p className="muted">确认与当前窗口对应的工程。关联不授予构建权限。</p><label className="search-box"><Icon name="search" size={17} /><input data-autofocus aria-label="搜索工程" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索工程、路径或模块" /></label><div className="results-summary"><span>发现 {state?.candidates.length ?? 0} 项 · 匹配 {candidates.length} 项</span><button disabled={!state?.target || busy} onClick={() => void act('rediscover', {})}>重新识别</button></div><ul className="candidate-list">{candidates.map((candidate) => <CandidateItem key={candidate.id} candidate={candidate} busy={busy} select={(id) => { void select(id); }} />)}</ul>{!candidates.length && <div className="no-results"><Icon name="folder" size={30} /><h3>{search ? '没有匹配的工程' : '未发现可确认的工程'}</h3><p>{search ? '试试完整路径或模块名。' : '当前窗口没有提供可靠路径。请选择实际工程目录。'}</p></div>}{needsDirectoryFallback(state?.candidates ?? []) && <div className="fallback"><button className="primary-button" disabled={!connected || busy} onClick={async () => { if (await act('select_directory', {})) navigate(stateRef.current?.phase === 'untrusted' ? 'trust' : null); }}><Icon name="folder" size={16} />选择工程目录</button></div>}</>}
+      {panel === 'projects' && <>
+        <p className="muted">确认与目标窗口对应的实际工程。关联不授予构建权限。</p>
+        <section className="workspace-observation" aria-label="当前活动工作区">
+          <div className="results-summary"><h3>当前活动工作区</h3><button disabled={!state?.target || busy} onClick={() => void act('rediscover', {})}>{state?.phase === 'discovering' ? '正在识别…' : '重新识别'}</button></div>
+          <strong>{activePath ? observation?.projectName ?? '已可靠识别' : '尚未可靠识别'}</strong>
+          {activePath && <code className="path">{displayPath(activePath)}</code>}
+          {suggestedName && <p className="muted">项目名称线索：{suggestedName}。名称不能证明当前路径或活动归属。</p>}
+          <p className="muted">{observationFresh ? observation?.reason : observation ? '活动工作区证据已过期，请重新识别。' : '目标窗口尚未提供可靠的当前工作区路径。'}</p>
+          {!activePath && <p className="muted">建议操作：重新识别或选择工程目录。Codex 用户主动打开项目信息后，可再次识别其中可访问的项目元数据。</p>}
+        </section>
+        <div className="directory-fallback">
+          <button className="primary-button" disabled={!connected || busy} onClick={async () => { if (await act('select_directory', {})) navigate(stateRef.current?.phase === 'untrusted' ? 'trust' : null); }}><Icon name="folder" size={16} />手动选择工程目录</button>
+          <form className="directory-input" onSubmit={(event) => { event.preventDefault(); void inspectPath(); }}>
+            <label htmlFor="project-directory">或输入绝对工程目录</label><input id="project-directory" aria-label="绝对工程目录" value={directoryPath} onChange={(event) => setDirectoryPath(event.target.value)} placeholder="输入完整目录路径" autoComplete="off" spellCheck={false} />
+            <button disabled={!connected || busy || !directoryPath.trim()} type="submit">只读验证目录</button><p className="muted">验证只读取指定目录；验证结果需另行选择后才关联。</p>
+          </form>
+        </div>
+        <label className="search-box"><Icon name="search" size={17} /><input data-autofocus aria-label="筛选已列出的工程候选" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="筛选候选：工程、路径或模块" /></label>
+        <div className="results-summary"><span>工作区候选 {grouped.current.length} · 建议 {grouped.suggested.length} · 指定目录 {grouped.manual.length} · 历史 {grouped.history.length}{search ? '（筛选后）' : ''}</span></div>
+        {(['current', 'suggested', 'manual', 'history'] as const).filter((category) => grouped[category].length > 0).map((category) => <section className="candidate-group" key={category} aria-label={categoryNames[category]}><h3>{categoryNames[category]} · {grouped[category].length}</h3><ul className="candidate-list">{grouped[category].map((candidate) => <CandidateItem key={candidate.id} candidate={candidate} category={category} busy={busy} select={(id) => { void select(id); }} />)}</ul></section>)}
+        {!candidates.length && <div className="no-results"><Icon name="folder" size={30} /><h3>{search ? '没有匹配的工程候选' : '尚无可选择的鸿蒙工程'}</h3><p>{search ? '筛选仅作用于已列出的候选。指定目录请使用上方独立输入框。' : activePath ? '已取得工作区路径，但尚未确认可预览的实际鸿蒙工程。可指定应用根目录执行只读验证。' : '当前窗口没有提供可靠工程路径。可重新识别或手动指定目录。'}</p></div>}
+      </>}
       {panel === 'trust' && (state?.project ? <div className="settings-card"><span className="section-icon"><Icon name="shield" size={27} /></span><h3>允许这个工程执行构建？</h3><p>发现和关联只读取工程信息。信任后才允许工程的构建逻辑运行。</p><code className="path">{displayPath(state.project.appRoot)}</code><p className="muted">构建配置改变时将再次确认。可随时撤销信任。</p><div className="panel-actions"><button className="primary-button" disabled={busy} onClick={async () => { if (await act('set_trust', { projectId: state.project!.id, trusted: true })) navigate(null); }}>信任此工程</button><button onClick={() => navigate('projects')}>换一个工程</button></div></div> : <p>当前没有待信任工程。</p>)}
       {panel === 'sdk' && <div className="settings-card"><span className="section-icon"><Icon name="device" size={27} /></span><h3>连接真实原生运行时</h3><p>使用合法安装的 HarmonyOS SDK 与构建工具，无需启动 DevEco GUI。</p><dl className="details-list"><div><dt>SDK 目录</dt><dd className="path">{state?.backend.sdkPath ? displayPath(state.backend.sdkPath) : '未配置'}</dd></div><div><dt>工具链版本</dt><dd>{state?.backend.sdkVersion ?? '尚未检测'}</dd></div></dl><p className="info-note">{state?.backend.reason ?? '桌面桥接未连接，浏览器页面无法探测 SDK。'}</p><button className="primary-button" disabled={!connected || busy} onClick={() => void act('configure_sdk', {})}><Icon name="folder" size={16} />指定 SDK 目录</button><p className="muted">原生基线为 Stage 工程的 Phone 画面。新增控制在预览能力中显式启用，实际 SDK 行为等待用户核验；其他设备 Profile 保留具体阻塞原因。</p></div>}
       {panel === 'path' && (state?.project ? <div className="settings-card"><h3>{state.project.name}</h3><dl className="details-list"><div><dt>应用根</dt><dd className="path">{displayPath(state.project.appRoot)}</dd></div><div><dt>工作区根</dt><dd className="path">{displayPath(state.project.workspaceRoot)}</dd></div><div><dt>环境</dt><dd>{environments[state.project.environment]}</dd></div><div><dt>模块 · 变体</dt><dd>{state.project.module} · {state.project.variant}</dd></div><div><dt>执行信任</dt><dd>{state.trusted ? '已信任当前构建配置' : '未信任 · 只读'}</dd></div></dl><div className="panel-actions"><button onClick={() => void copy(displayPath(state.project!.appRoot), '工程路径')}>复制完整路径</button><button onClick={() => navigate('projects')}>切换工程</button><button disabled={!state.trusted || busy} onClick={() => void act('set_trust', { projectId: state.project!.id, trusted: false })}>撤销工程信任</button></div></div> : <button onClick={() => navigate('projects')}>查看工程候选</button>)}

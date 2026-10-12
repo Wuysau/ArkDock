@@ -8,7 +8,8 @@ pub(crate) mod windows_tabs;
 
 pub use inspector::{inspect_directory, path_environment, project_id};
 pub use resolver::{
-    automatic_candidate, resolve, resolve_with_sources, TitleResolver, WorkspaceResolver,
+    automatic_candidate, current_active_evidence, resolution_complete, resolve, resolve_with_sources,
+    TitleResolver, WorkspaceResolver,
 };
 
 use crate::ipc::model::{Environment, Evidence};

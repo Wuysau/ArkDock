@@ -48,7 +48,7 @@ export async function readPreviewFrame(scope: RequestScope, protocolVersion: num
   return bytes;
 }
 
-export type DataCommand = Exclude<keyof CommandArgs, 'read_preview_frame' | 'enable_binary_preview_frames' | 'disable_binary_preview_frames' | 'click_preview' | 'snapshot' | 'minimize_window' | 'close_window' | 'maximize_pair' | 'restore_pair' | 'begin_drag' | 'rediscover' | 'select_candidate' | 'select_directory' | 'detach' | 'set_trust' | 'configure_sdk' | 'refresh_preview' | 'stop_preview' | 'arrange_side_by_side'>;
+export type DataCommand = Exclude<keyof CommandArgs, 'read_preview_frame' | 'enable_binary_preview_frames' | 'disable_binary_preview_frames' | 'click_preview' | 'snapshot' | 'minimize_window' | 'close_window' | 'maximize_pair' | 'restore_pair' | 'begin_drag' | 'rediscover' | 'select_candidate' | 'select_directory' | 'inspect_directory_path' | 'detach' | 'set_trust' | 'configure_sdk' | 'refresh_preview' | 'stop_preview' | 'arrange_side_by_side'>;
 
 /** Typed data replies use the same validated desktop entry, outside AppSnapshot. */
 export async function transfer<K extends DataCommand>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope: RequestScope): Promise<CommandResults[K]> {

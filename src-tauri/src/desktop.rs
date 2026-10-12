@@ -1,7 +1,10 @@
 //! A single backend worker owns sessions. Hooks/watchers only enqueue lightweight messages.
 #[cfg(not(windows))]
 use crate::discovery::resolve;
-use crate::discovery::{automatic_candidate, inspect_directory, path_environment};
+use crate::discovery::{
+    automatic_candidate, current_active_evidence, inspect_directory, path_environment,
+    resolution_complete,
+};
 #[cfg(windows)]
 use crate::discovery::{
     registration::RegistrationRegistry, resolve_with_sources, windows_tabs::WindowsTabResolver,
@@ -26,7 +29,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 enum Action {
@@ -34,6 +37,7 @@ enum Action {
     Rediscover,
     Select(String),
     Directory(PathBuf),
+    InspectDirectory(PathBuf),
     Detach,
     Trust(String, bool),
     Sdk(PathBuf),
@@ -228,7 +232,18 @@ struct Engine {
     last_visibility_sync: u64,
     last_visibility_emit: u64,
     own_handle: isize,
+    associated_manually: bool,
+    next_workspace_probe: Instant,
 }
+
+#[derive(Clone, Copy)]
+enum DiscoveryMode {
+    Explicit,
+    Lightweight,
+}
+
+const WORKSPACE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const WORKSPACE_OBSERVATION_TTL_MS: u64 = 15_000;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -256,6 +271,7 @@ fn initial(backend: BackendStatus) -> AppSnapshot {
         target: None,
         project: None,
         candidates: Vec::new(),
+        workspace_observation: None,
         trusted: false,
         session_id: None,
         session_ref: None,
@@ -313,6 +329,114 @@ fn execution_gate(
     ExecutionGate { phase, trusted }
 }
 
+fn normalized_workspace_path(path: &str) -> String {
+    let value = path.replace('/', "\\");
+    let value = value.strip_prefix("\\\\?\\UNC\\")
+        .map(|unc| format!("\\\\{unc}"))
+        .or_else(|| value.strip_prefix("\\\\?\\").map(str::to_owned))
+        .unwrap_or(value);
+    value.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+fn workspace_path_matches(project: &ProjectRef, raw_path: &str) -> bool {
+    if path_environment(Path::new(raw_path)) != project.environment {
+        return false;
+    }
+    // Canonicalization is read-only and only applies to already identified Windows paths.
+    // WSL and remote identities are never opened as, or converted to, local filesystem paths.
+    let resolved = if project.environment == Environment::WindowsLocal {
+        Path::new(raw_path).canonicalize().ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .unwrap_or_else(|| raw_path.to_owned())
+    } else {
+        raw_path.to_owned()
+    };
+    let active = normalized_workspace_path(&resolved);
+    let app = normalized_workspace_path(&project.app_root);
+    let workspace = normalized_workspace_path(&project.workspace_root);
+    active == workspace || active == app || active.starts_with(&format!("{app}\\"))
+}
+
+fn workspace_observation(
+    candidates: &[Candidate],
+    target: &TargetInfo,
+    observed: u64,
+    host_observation: Option<WorkspaceObservation>,
+) -> WorkspaceObservation {
+    if !resolution_complete(candidates) {
+        return WorkspaceObservation {
+            status: WorkspaceStatus::Suggested,
+            project_name: host_observation.and_then(|observation| observation.project_name),
+            active_path: None,
+            reason: "Workspace evidence collection is incomplete; the current workspace cannot be reliably resolved".into(),
+            observed_at: observed,
+        };
+    }
+    let mut active_paths = Vec::new();
+    for evidence in candidates.iter().flat_map(|candidate| &candidate.evidence) {
+        if current_active_evidence(evidence, target, observed)
+            && !active_paths.iter().any(|path: &String| {
+                normalized_workspace_path(path) == normalized_workspace_path(&evidence.raw_path)
+            })
+        {
+            active_paths.push(evidence.raw_path.clone());
+        }
+    }
+    if active_paths.len() > 1 {
+        return WorkspaceObservation {
+            status: WorkspaceStatus::Suggested,
+            project_name: host_observation.and_then(|observation| observation.project_name),
+            active_path: None,
+            reason: "Current workspace sources disagree; automatic association is suspended".into(),
+            observed_at: observed,
+        };
+    }
+    if let Some(path) = active_paths.pop() {
+        return WorkspaceObservation {
+            status: WorkspaceStatus::Verified,
+            project_name: host_observation.as_ref().and_then(|observation| observation.project_name.clone()),
+            active_path: Some(path),
+            reason: "Current workspace path is supported by lifecycle-verified active-scope evidence".into(),
+            observed_at: observed,
+        };
+    }
+    host_observation.unwrap_or(WorkspaceObservation {
+        status: WorkspaceStatus::Unknown,
+        project_name: None,
+        active_path: None,
+        reason: "The current active workspace has not been reliably identified; history is only a suggestion".into(),
+        observed_at: observed,
+    })
+}
+
+fn absolute_directory_input(value: &str) -> Result<PathBuf, String> {
+    if value.len() > 4096 {
+        return Err("INVALID_DIRECTORY_PATH: enter a bounded absolute directory path".into());
+    }
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        return Err("INVALID_DIRECTORY_PATH: enter a bounded absolute directory path".into());
+    }
+    let path = PathBuf::from(value);
+    let environment = path_environment(&path);
+    let explicit_uri = ["wsl://", "ssh://", "vscode-remote://"].iter().any(|prefix| {
+        value.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.split_once('/').is_some_and(|(host, remainder)| {
+                !host.is_empty() && !remainder.is_empty()
+            })
+        })
+    });
+    if environment == Environment::WindowsLocal
+        && value.starts_with('/') && !value.starts_with("//")
+    {
+        return Err("UNSUPPORTED_ENVIRONMENT: an unqualified POSIX path is not a Windows directory".into());
+    }
+    if !path.is_absolute() && !explicit_uri {
+        return Err("ABSOLUTE_DIRECTORY_REQUIRED: relative paths are not accepted".into());
+    }
+    Ok(path)
+}
+
 impl Engine {
     fn sync_visibility(&mut self) {
         let Some(window) = self.app.get_webview_window("main") else {
@@ -356,6 +480,8 @@ impl Engine {
         });
     }
     fn suspend_execution(&mut self) {
+        // Automatic workspace changes also invalidate user-confirmed assisted offers.
+        self.cancel_assisted();
         self.backend.cancel_controls();
         self.controls.reset();
         self.device_runtime.cancel();
@@ -378,6 +504,7 @@ impl Engine {
     fn close_session(&mut self) {
         self.suspend_execution();
         self.snapshot.project = None;
+        self.associated_manually = false;
     }
     fn apply_window(&mut self, update: WindowUpdate) {
         // Display surfaces are independent of project execution and preview delivery.
@@ -402,9 +529,10 @@ impl Engine {
         if changed {
             self.close_session();
             self.snapshot.candidates.clear();
+            self.snapshot.workspace_observation = None;
             if self.snapshot.target.is_some() {
-                if let Err(error) = self.discover() {
-                    self.snapshot.phase = Phase::SelectProject;
+                if let Err(error) = self.discover(DiscoveryMode::Explicit) {
+                    self.discovery_failed(&error);
                     self.diagnostic("DISCOVERY_FAILED", error, CheckStatus::Fail);
                 }
             } else {
@@ -426,34 +554,97 @@ impl Engine {
         }
         Ok(target)
     }
-    fn discover(&mut self) -> Result<(), String> {
+    fn discover(&mut self, mode: DiscoveryMode) -> Result<(), String> {
         let target = self.current_target()?;
-        self.snapshot.phase = Phase::Discovering;
-        self.publish();
+        self.next_workspace_probe = Instant::now() + WORKSPACE_PROBE_INTERVAL;
+        if matches!(mode, DiscoveryMode::Explicit) && self.snapshot.project.is_none() {
+            self.snapshot.phase = Phase::Discovering;
+            self.publish();
+        }
         let observed = now();
         #[cfg(windows)]
-        {
+        let (mut candidates, observation, source_error) = {
             let controller = self.controller.as_ref().ok_or("WINDOWING_UNAVAILABLE")?;
             let scope = controller.discovery_scope(&target.id)?;
-            let tabs = WindowsTabResolver::collect(scope.handle, &target, observed);
+            let tabs = match mode {
+                DiscoveryMode::Explicit => {
+                    WindowsTabResolver::collect(scope.handle, &target, observed)
+                }
+                DiscoveryMode::Lightweight => {
+                    let Some(tabs) =
+                        WindowsTabResolver::collect_lightweight(scope.handle, &target, observed)
+                    else {
+                        return Ok(());
+                    };
+                    tabs
+                }
+            };
+            // HWND equality is insufficient: verify the controller's current lifecycle again.
             controller.discovery_scope(&target.id)?;
-            self.snapshot.candidates = resolve_with_sources(
+            let candidates = resolve_with_sources(
                 &target,
                 observed,
                 &[&tabs, &RegistrationRegistry::default(), &TitleResolver],
-            )?;
-        }
+            );
+            match candidates {
+                Ok(candidates) => (candidates, tabs.observation(), None),
+                Err(error) => (Vec::new(), Some(WorkspaceObservation {
+                    status: WorkspaceStatus::Unknown,
+                    project_name: tabs.observation().and_then(|observation| observation.project_name),
+                    active_path: None,
+                    reason: format!("Current workspace metadata could not be verified: {error}"),
+                    observed_at: observed,
+                }), Some(error)),
+            }
+        };
         #[cfg(not(windows))]
-        {
-            self.snapshot.candidates = resolve(&target, observed)?;
+        let (mut candidates, observation, source_error) = match resolve(&target, observed) {
+            Ok(candidates) => (candidates, None, None),
+            Err(error) => (Vec::new(), None, Some(error)),
+        };
+        self.current_target()?;
+        let current_observation = workspace_observation(&candidates, &target, observed, observation.clone());
+        if matches!(mode, DiscoveryMode::Lightweight) {
+            for candidate in &self.snapshot.candidates {
+                if candidate.evidence.iter().any(|evidence| {
+                    evidence.source == EvidenceSource::Manual
+                        && evidence.target_id.as_deref() == Some(target.id.as_str())
+                        && evidence.process.as_ref() == Some(&target.process)
+                }) && !(current_observation.status == WorkspaceStatus::Verified
+                        && current_observation.active_path.as_ref().is_some_and(|path| {
+                            !workspace_path_matches(&candidate.project, path)
+                        })) {
+                    if let Some(current) = candidates.iter_mut().find(|item| item.id == candidate.id) {
+                        current.evidence.extend(candidate.evidence.iter()
+                            .filter(|evidence| evidence.source == EvidenceSource::Manual)
+                            .cloned());
+                    } else {
+                        let mut manual = candidate.clone();
+                        manual.evidence.retain(|evidence| evidence.source == EvidenceSource::Manual);
+                        manual.auto_eligible = false;
+                        candidates.push(manual);
+                    }
+                }
+            }
         }
-        // History is a hint. It never upgrades to current-session reliable evidence.
-        if let Some(store) = &self.store {
+        // Polls retain historical suggestions without repeatedly inspecting every old project.
+        if matches!(mode, DiscoveryMode::Lightweight) {
+            for candidate in &self.snapshot.candidates {
+                if !candidate.evidence.is_empty()
+                    && candidate.evidence.iter().all(|evidence| evidence.source == EvidenceSource::History)
+                    && !candidates.iter().any(|current| current.id == candidate.id)
+                {
+                    candidates.push(candidate.clone());
+                }
+            }
+        }
+        // History is separate from current-window evidence, including when its path matches.
+        if let Some(store) = self.store.as_ref().filter(|_| matches!(mode, DiscoveryMode::Explicit)) {
             for project in store.history() {
                 let evidence = Evidence {
                     source: EvidenceSource::History,
-                    target_id: Some(target.id.clone()),
-                    process: Some(target.process.clone()),
+                    target_id: None,
+                    process: None,
                     session_id: None,
                     observed_at: observed,
                     expires_at: observed + 30_000,
@@ -468,14 +659,81 @@ impl Engine {
                     evidence,
                 ) {
                     for item in items {
-                        if !self.snapshot.candidates.iter().any(|c| c.id == item.id) {
-                            self.snapshot.candidates.push(item);
+                        if !candidates.iter().any(|c| c.id == item.id) {
+                            candidates.push(item);
                         }
                     }
                 }
             }
         }
-        if let Some(id) = automatic_candidate(&self.snapshot.candidates, &target, observed) {
+        self.snapshot.workspace_observation = Some(workspace_observation(
+            &candidates,
+            &target,
+            observed,
+            observation,
+        ));
+        self.snapshot.candidates = candidates;
+        self.reconcile_workspace(&target, observed)?;
+        if let Some(error) = source_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn reconcile_workspace(&mut self, target: &TargetInfo, observed: u64) -> Result<(), String> {
+        let automatic = automatic_candidate(&self.snapshot.candidates, target, observed);
+        if let Some(project) = self.snapshot.project.as_ref() {
+            let different_project = automatic.as_ref().is_some_and(|id| {
+                self.snapshot.candidates.iter().any(|candidate| {
+                    candidate.id == *id && candidate.project.id != project.id
+                })
+            });
+            let conflicting = different_project || self.snapshot.candidates.iter().any(|candidate| {
+                candidate.evidence.iter().any(|evidence| {
+                    current_active_evidence(evidence, target, observed)
+                        && !workspace_path_matches(project, &evidence.raw_path)
+                })
+            }) || self.snapshot.workspace_observation.as_ref().is_some_and(|observation| {
+                observation.status == WorkspaceStatus::Verified
+                    && observation.active_path.as_ref().is_some_and(|path| {
+                        !workspace_path_matches(project, path)
+                    })
+            });
+            let unchanged = automatic.as_ref().is_some_and(|id| {
+                self.snapshot.candidates.iter().any(|candidate| {
+                    candidate.id == *id && candidate.project.id == project.id
+                })
+            });
+            if conflicting || (!self.associated_manually && !unchanged) {
+                // Stop watcher/build/runtime before the old workspace can emit another frame.
+                self.close_session();
+                self.snapshot.phase = Phase::SelectProject;
+                self.diagnostic(
+                    "WORKSPACE_EVIDENCE_CHANGED",
+                    "Current workspace evidence changed or is no longer reliable; the previous association was suspended".into(),
+                    CheckStatus::Blocked,
+                );
+            } else {
+                if let Some(session) = &mut self.snapshot.session_ref {
+                    let mut evidence: Vec<_> = self.snapshot.candidates.iter()
+                        .filter(|candidate| candidate.project.id == project.id)
+                        .flat_map(|candidate| candidate.evidence.iter().cloned())
+                        .collect();
+                    if self.associated_manually {
+                        for manual in session.binding_evidence.iter()
+                            .filter(|evidence| evidence.source == EvidenceSource::Manual)
+                        {
+                            if !evidence.contains(manual) {
+                                evidence.push(manual.clone());
+                            }
+                        }
+                    }
+                    session.binding_evidence = evidence;
+                }
+                // Fresh metadata for the same workspace must not restart a preview or lift Stop.
+                return Ok(());
+            }
+        }
+        if let Some(id) = automatic {
             let project = self
                 .snapshot
                 .candidates
@@ -490,6 +748,50 @@ impl Engine {
         }
         Ok(())
     }
+    fn discovery_failed(&mut self, error: &str) {
+        for candidate in &mut self.snapshot.candidates {
+            candidate.auto_eligible = false;
+            for evidence in &mut candidate.evidence {
+                if !matches!(evidence.source, EvidenceSource::History | EvidenceSource::Manual) {
+                    evidence.verifiable = false;
+                    evidence.active_scope = false;
+                }
+            }
+        }
+        self.snapshot.workspace_observation = Some(WorkspaceObservation {
+            status: WorkspaceStatus::Unknown,
+            project_name: None,
+            active_path: None,
+            reason: format!("Current workspace metadata could not be verified: {error}"),
+            observed_at: now(),
+        });
+        if !self.associated_manually {
+            self.close_session();
+            self.snapshot.phase = Phase::SelectProject;
+        }
+    }
+    fn probe_workspace(&mut self) {
+        if self.snapshot.target.is_none() || Instant::now() < self.next_workspace_probe {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            // The resolver returns early for other hosts and never performs generic tab scanning
+            // here. Codex uses a bounded, noninteractive metadata-only scan every five seconds.
+            let previous = self.snapshot.workspace_observation.clone();
+            if let Err(error) = self.discover(DiscoveryMode::Lightweight) {
+                self.discovery_failed(&error);
+                self.diagnostic("DISCOVERY_FAILED", error, CheckStatus::Blocked);
+            }
+            if self.snapshot.workspace_observation != previous {
+                self.publish();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.next_workspace_probe = Instant::now() + WORKSPACE_PROBE_INTERVAL;
+        }
+    }
     fn associate(
         &mut self,
         mut project: ProjectRef,
@@ -498,6 +800,15 @@ impl Engine {
         let target = self.current_target()?;
         if project.environment != Environment::WindowsLocal {
             return Err("UNSUPPORTED_ENVIRONMENT: WSL/remote preview is not implemented".into());
+        }
+        let observed = now();
+        if explicitly_selected && self.snapshot.workspace_observation.as_ref().is_some_and(|observation| {
+            observation.status == WorkspaceStatus::Verified
+                && observation.observed_at <= observed
+                && observed.saturating_sub(observation.observed_at) < WORKSPACE_OBSERVATION_TTL_MS
+                && observation.active_path.as_ref().is_some_and(|path| !workspace_path_matches(&project, path))
+        }) {
+            return Err("WORKSPACE_CONFLICT: the host's current project differs from this directory; rediscover its current workspace".into());
         }
         // Re-read candidate directory before selecting it; candidate id is not an authorization credential.
         let evidence = Evidence {
@@ -523,6 +834,7 @@ impl Engine {
         {
             return Err("PROJECT_CHANGED_OR_INVALID".into());
         }
+        self.current_target()?;
         let mut binding_evidence = self
             .snapshot
             .candidates
@@ -532,8 +844,21 @@ impl Engine {
             .unwrap_or_default();
         if explicitly_selected {
             binding_evidence.push(evidence);
+        } else if self.associated_manually {
+            if let Some(session) = &self.snapshot.session_ref {
+                for manual in session.binding_evidence.iter()
+                    .filter(|evidence| evidence.source == EvidenceSource::Manual)
+                {
+                    if !binding_evidence.contains(manual) {
+                        binding_evidence.push(manual.clone());
+                    }
+                }
+            }
         }
+        let manual = explicitly_selected || (self.associated_manually
+            && self.snapshot.project.as_ref().is_some_and(|current| current.id == project.id));
         self.close_session();
+        self.associated_manually = manual;
         self.serial += 1;
         let session = format!("{}-{}-{}", std::process::id(), now(), self.serial);
         project.sdk_id = self.snapshot.backend.sdk_path.as_ref().map(|path| {
@@ -577,6 +902,64 @@ impl Engine {
         }
         self.scheduler.request_refresh(now());
         self.gate_preview();
+        Ok(())
+    }
+    fn inspect_manual_directory(&mut self, path: PathBuf, select_unique: bool) -> Result<(), String> {
+        let target = self.current_target()?;
+        let observed = now();
+        let environment = path_environment(&path);
+        if environment == Environment::WindowsLocal && !path.is_dir() {
+            return Err("DIRECTORY_REQUIRED: select or enter an existing directory".into());
+        }
+        let evidence = Evidence {
+            source: EvidenceSource::Manual,
+            target_id: Some(target.id),
+            process: Some(target.process),
+            session_id: None,
+            observed_at: observed,
+            expires_at: observed + 30_000,
+            environment: environment.clone(),
+            raw_path: path.to_string_lossy().into_owned(),
+            verifiable: true,
+            // Validation alone proves a directory, not the host's active workspace.
+            active_scope: false,
+        };
+        let inspected = inspect_directory(&path, environment, evidence)?;
+        self.current_target()?;
+        let unique = (inspected.len() == 1 && inspected[0].valid)
+            .then(|| inspected[0].project.clone());
+        {
+            let additional = inspected.iter().filter(|candidate| {
+                !self.snapshot.candidates.iter().any(|existing| existing.id == candidate.id)
+            }).count();
+            if self.snapshot.candidates.len().saturating_add(additional) > 256 {
+                return Err("CANDIDATE_LIMIT: rediscover before inspecting more directories".into());
+            }
+            for mut candidate in inspected {
+                if let Some(existing) = self.snapshot.candidates.iter_mut()
+                    .find(|existing| existing.id == candidate.id)
+                {
+                    // The read-only inspection refreshes the directory's validity, without
+                    // replacing current host evidence with a manual current-workspace claim.
+                    existing.valid = candidate.valid;
+                    existing.evidence.retain(|evidence| {
+                        evidence.source != EvidenceSource::Manual || evidence.active_scope
+                    });
+                    existing.evidence.append(&mut candidate.evidence);
+                } else {
+                    self.snapshot.candidates.push(candidate);
+                }
+            }
+        }
+        if select_unique {
+            if let Some(project) = unique {
+                self.associate(project, true)?;
+            } else if self.snapshot.project.is_none() {
+                self.snapshot.phase = Phase::SelectProject;
+            }
+        } else if self.snapshot.project.is_none() {
+            self.snapshot.phase = Phase::SelectProject;
+        }
         Ok(())
     }
     fn gate_preview(&mut self) {
@@ -632,8 +1015,9 @@ impl Engine {
                 .ok_or("UNSUPPORTED_PLATFORM")?
                 .begin_drag()?,
             Action::Rediscover => {
-                if let Err(error) = self.discover() {
-                    self.snapshot.phase = Phase::SelectProject;
+                if let Err(error) = self.discover(DiscoveryMode::Explicit) {
+                    self.discovery_failed(&error);
+                    self.publish();
                     return Err(error);
                 }
             }
@@ -650,27 +1034,10 @@ impl Engine {
                 self.associate(project, true)?;
             }
             Action::Directory(path) => {
-                let target = self.current_target()?;
-                let observed = now();
-                let environment = path_environment(&path);
-                let evidence = Evidence {
-                    source: EvidenceSource::Manual,
-                    target_id: Some(target.id),
-                    process: Some(target.process),
-                    session_id: None,
-                    observed_at: observed,
-                    expires_at: observed + 30_000,
-                    environment: environment.clone(),
-                    raw_path: path.to_string_lossy().into_owned(),
-                    verifiable: true,
-                    active_scope: true,
-                };
-                self.snapshot.candidates = inspect_directory(&path, environment, evidence)?;
-                if self.snapshot.candidates.len() == 1 && self.snapshot.candidates[0].valid {
-                    self.associate(self.snapshot.candidates[0].project.clone(), true)?;
-                } else {
-                    self.snapshot.phase = Phase::SelectProject;
-                }
+                self.inspect_manual_directory(path, true)?;
+            }
+            Action::InspectDirectory(path) => {
+                self.inspect_manual_directory(path, false)?;
             }
             Action::Detach => {
                 if let Some(controller) = &self.controller {
@@ -680,6 +1047,7 @@ impl Engine {
                 self.close_session();
                 self.snapshot.target = None;
                 self.snapshot.candidates.clear();
+                self.snapshot.workspace_observation = None;
                 self.snapshot.phase = Phase::Idle;
                 self.snapshot.layout_required = false;
                 self.snapshot.dock_confirmation = None;
@@ -850,6 +1218,30 @@ impl Engine {
         }
     }
     fn tick(&mut self) {
+        self.probe_workspace();
+        if !self.associated_manually && self.snapshot.project.is_some() {
+            let active = self.snapshot.target.as_ref().and_then(|target| {
+                automatic_candidate(&self.snapshot.candidates, target, now())
+            });
+            let current = self.snapshot.project.as_ref().is_some_and(|project| {
+                self.snapshot.candidates.iter().any(|candidate| {
+                    active.as_deref() == Some(candidate.id.as_str())
+                        && candidate.project.id == project.id
+                })
+            });
+            if !current {
+                self.close_session();
+                self.snapshot.phase = Phase::SelectProject;
+                self.snapshot.workspace_observation = Some(WorkspaceObservation {
+                    status: WorkspaceStatus::Unknown,
+                    project_name: None,
+                    active_path: None,
+                    reason: "The previous active workspace evidence expired; rediscover or select a directory".into(),
+                    observed_at: now(),
+                });
+                self.publish();
+            }
+        }
         if !self.snapshot.trusted || !self.snapshot.backend.available {
             return;
         }
@@ -1217,6 +1609,18 @@ async fn select_directory(
     .await
 }
 #[tauri::command]
+async fn inspect_directory_path(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    path: String,
+) -> Result<AppSnapshot, String> {
+    check_window(&window)?;
+    validate_scope(&service.snapshot()?, &scope)?;
+    let directory = absolute_directory_input(&path)?;
+    request(window, service, scope, Action::InspectDirectory(directory)).await
+}
+#[tauri::command]
 async fn configure_sdk(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
@@ -1406,6 +1810,7 @@ pub fn run() {
             rediscover,
             select_candidate,
             select_directory,
+            inspect_directory_path,
             configure_sdk,
             detach,
             set_trust,
@@ -1518,6 +1923,8 @@ pub fn run() {
                     last_visibility_sync: 0,
                     last_visibility_emit: 0,
                     own_handle,
+                    associated_manually: false,
+                    next_workspace_probe: Instant::now() + WORKSPACE_PROBE_INTERVAL,
                 };
                 match selection_result {
                     Ok(store) => engine.selections = Some(store),

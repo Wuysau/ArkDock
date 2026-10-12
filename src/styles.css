@@ -231,6 +231,20 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .search-box input::placeholder { color: var(--muted); }
 .results-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; font-size: 11px; color: var(--muted); }
 .results-summary button { border: 0; background: transparent; color: var(--highlight); font-size: 11px; padding: 6px; }
+.workspace-observation { padding: 12px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
+.workspace-observation .results-summary { margin: 0 0 7px; }
+.workspace-observation h3 { color: var(--muted); font-size: 11px; }
+.workspace-observation > strong { display: block; overflow-wrap: anywhere; }
+.workspace-observation > p { margin: 7px 0 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.directory-fallback { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+.directory-fallback > button { align-self: flex-start; }
+.directory-input { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.directory-input > label { width: 100%; color: var(--muted); font-size: 11px; }
+.directory-input > input { flex: 1 1 180px; min-width: 0; width: 100%; font-family: Consolas, monospace; padding: 9px 10px; }
+.directory-input > button { font-size: 11px; }
+.directory-input > p { width: 100%; margin: 0; font-size: 10px; line-height: 1.6; }
+.candidate-group + .candidate-group { margin-top: 16px; }
+.candidate-group > h3 { margin-bottom: 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .candidate-list { list-style: none; margin: 0; padding: 0; }
 .candidate + .candidate { margin-top: 10px; }
 .candidate > button { display: flex; flex-direction: column; align-items: stretch; width: 100%; padding: 12px; gap: 7px; text-align: left; background: var(--surface); border-radius: var(--radius-card); }

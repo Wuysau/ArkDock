@@ -29,7 +29,7 @@ function candidate(index: number, reliable = false): Candidate {
 }
 function base(revision: number): AppSnapshot {
   return {
-    revision, phase: 'idle', target: null, project: null, candidates: [], trusted: false, sessionId: null,
+    revision, phase: 'idle', target: null, project: null, candidates: [], workspaceObservation: null, trusted: false, sessionId: null,
     backend: { id: 'ui-fixture', mode: 'UI 演示 · 非原生渲染', available: false, reason: 'UI 演示数据，不能证明 Windows 贴边或 HarmonyOS 原生预览。', sdkPath: null, sdkVersion: null, canClick: false, canSwipe: false, canText: false, canRotate: false },
     build: { generation: 0, displayedGeneration: null, buildId: null, durationMs: null, error: null, stale: false },
     diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null, pairLayout: { state: 'unbound', preferredWidthDip: 440, reason: null },
