@@ -15,20 +15,28 @@ export const NativeCanvas = memo(function NativeCanvas({ store, visible = true }
     if (!canvas) return;
     const context = canvas.getContext('2d', { alpha: false });
     if (!context) return;
+    const initialBounds = canvas.getBoundingClientRect();
+    let cssSize = { width: initialBounds.width, height: initialBounds.height };
     function dimensions() {
-      const bounds = canvas!.getBoundingClientRect();
-      const ratio = Math.max(1, window.devicePixelRatio || 1);
-      const width = Math.max(1, Math.round(bounds.width * ratio)), height = Math.max(1, Math.round(bounds.height * ratio));
+      // CSS layout is observed outside the frame loop; DPR only changes the backing buffer.
+      if (cssSize.width <= 0 || cssSize.height <= 0) return null;
+      const deviceRatio = window.devicePixelRatio;
+      const ratio = Number.isFinite(deviceRatio) && deviceRatio > 0 ? deviceRatio : 1;
+      const width = Math.max(1, Math.round(cssSize.width * ratio)), height = Math.max(1, Math.round(cssSize.height * ratio));
       const reduction = Math.min(1, 8192 / width, 8192 / height, Math.sqrt((16 * 1024 * 1024) / (width * height)));
       return { width: Math.max(1, Math.floor(width * reduction)), height: Math.max(1, Math.floor(height * reduction)) };
     }
     const presenter = new FramePresenter<ImageBitmap>({
       decode: decodePreviewFrame,
-      current: (frame) => visibleRef.current && !document.hidden && store.isPresentable(frame),
+      current: (frame) => visibleRef.current && !document.hidden && cssSize.width > 0 && cssSize.height > 0 && store.isPresentable(frame),
       draw: (image, frame, decodeMs) => {
         const size = dimensions();
+        if (!size) return;
         // Setting dimensions resets pixels; redraw the retained valid bitmap in the same task.
         if (canvas.width !== size.width || canvas.height !== size.height) { canvas.width = size.width; canvas.height = size.height; }
+        // Decode stays at SDK resolution. Sample once into the final DPR-aware display buffer.
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
         context.drawImage(image, 0, 0, canvas.width, canvas.height);
         const firstPresentation = store.getDisplayed() !== frame;
         if (firstPresentation && !store.markDisplayed(frame)) return;
@@ -52,7 +60,14 @@ export const NativeCanvas = memo(function NativeCanvas({ store, visible = true }
     presenterRef.current = presenter;
     const submit = () => presenter.submit(store.getSnapshot());
     const off = store.subscribe(submit);
-    const observer = new ResizeObserver(() => presenter.replay());
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      cssSize = { width: entry.contentRect.width, height: entry.contentRect.height };
+      // A zero-size hidden window keeps its last buffer and bitmap until a usable layout returns.
+      if (cssSize.width <= 0 || cssSize.height <= 0) return;
+      submit();
+      presenter.replay();
+    });
     observer.observe(canvas);
     // Cross-monitor DPI changes may leave the CSS rectangle unchanged.
     let dpi = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);

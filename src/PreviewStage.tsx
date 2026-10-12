@@ -17,38 +17,53 @@ export interface PreviewStageProps {
   visible?: boolean;
 }
 
+// Pixel updates bypass React. Layout only changes when the surface or build identity changes.
+function frameLayoutKey(frame: PreviewFrame | null): string {
+  return frame ? JSON.stringify([frame.sessionId, frame.buildId, frame.generation, frame.width, frame.height, frame.rotation]) : '';
+}
+
 export function PreviewStage({ snapshot, store, zoom, busy, onClick, interactionMode = 'interact', overlay, visible = true }: PreviewStageProps) {
-  const received = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  const displayed = useSyncExternalStore(store.subscribeDisplayed, store.getDisplayed, store.getDisplayed);
-  const frame = displayed ?? received;
+  const receivedKey = useSyncExternalStore(store.subscribe, () => frameLayoutKey(store.getSnapshot()), () => '');
+  const displayedKey = useSyncExternalStore(store.subscribeDisplayed, () => frameLayoutKey(store.getDisplayed()), () => '');
+  const displayed = displayedKey ? store.getDisplayed() : null;
+  const frame = displayed ?? (receivedKey ? store.getSnapshot() : null);
   const viewport = useRef<HTMLDivElement>(null);
-  const [available, setAvailable] = useState({ width: 0, height: 0 });
+  const shell = useRef<HTMLDivElement>(null);
+  const [available, setAvailable] = useState({ width: 0, height: 0, horizontalInset: 0, verticalInset: 0 });
   const ui = deriveUiState(snapshot, displayed);
   useEffect(() => {
     const element = viewport.current;
-    if (!element) return;
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      const { width, height } = entry.contentRect;
-      setAvailable((current) => current.width === width && current.height === height ? current : { width, height });
+    const device = shell.current;
+    if (!element || !device) return;
+    const observer = new ResizeObserver((entries) => {
+      const bounds = entries.find((entry) => entry.target === element)?.contentRect;
+      const style = getComputedStyle(device);
+      const length = (value: string) => Number.parseFloat(value) || 0;
+      const horizontalInset = length(style.paddingLeft) + length(style.paddingRight) + length(style.borderLeftWidth) + length(style.borderRightWidth);
+      const verticalInset = length(style.paddingTop) + length(style.paddingBottom) + length(style.borderTopWidth) + length(style.borderBottomWidth);
+      setAvailable((current) => {
+        const width = bounds?.width ?? current.width, height = bounds?.height ?? current.height;
+        return current.width === width && current.height === height && current.horizontalInset === horizontalInset && current.verticalInset === verticalInset
+          ? current : { width, height, horizontalInset, verticalInset };
+      });
     });
     observer.observe(element);
+    observer.observe(device);
     return () => observer.disconnect();
   }, []);
-  // The shell occupies 12 DIP on each axis. Fit uses actual viewport bounds and never distorts pixels.
-  const scale = frame ? zoom === 'fit' ? Math.min(Math.max(1, available.width - 12) / frame.width,
-    Math.max(1, available.height - 12) / frame.height) : zoom : 1;
-  const canClick = visible && ui.inputAllowed && !busy && interactionMode === 'interact';
+  // The measured shell inset follows CSS tokens; fit applies one uniform scale to the actual frame.
+  const scale = frame ? zoom === 'fit' ? Math.min(Math.max(0, available.width - available.horizontalInset) / frame.width,
+    Math.max(0, available.height - available.verticalInset) / frame.height) : zoom : 0;
+  const canClick = visible && scale > 0 && ui.inputAllowed && !busy && interactionMode === 'interact';
   const stale = Boolean(frame && (!ui.frameCurrent || ui.preview === 'stale'));
   return <div ref={viewport} className={`frame-viewport${zoom !== 'fit' ? ' is-zoomed' : ''}`} data-testid="preview-stage">
-    {frame ? <>
-      <div className="frame-scroll">
-        <div className={`device-shell${stale ? ' is-stale' : ''}`}>
-          <div className="native-surface-wrap" style={{ position: 'relative', width: frame.width * scale, height: frame.height * scale }}>
+      <div className="frame-scroll" style={{ visibility: frame ? undefined : 'hidden' }} aria-hidden={!frame || undefined}>
+        <div ref={shell} className={`device-shell${stale ? ' is-stale' : ''}`}>
+          <div className="native-surface-wrap" style={{ position: 'relative', width: (frame?.width ?? 0) * scale, height: (frame?.height ?? 0) * scale }}>
           <button className="native-surface" data-testid="native-screen"
-            aria-label={`实际原生画面，构建 ${frame.buildId}${canClick ? '；Enter 点击画面中心' : '；当前不可交互'}`}
+            aria-label={frame ? `实际原生画面，构建 ${frame.buildId}${canClick ? '；Enter 点击画面中心' : '；当前不可交互'}` : '等待有效原生画面'}
             title={canClick ? '点击原生画面；Enter 点击中心' : ui.capabilities.click.reason}
-            disabled={!canClick && interactionMode !== 'inspect'}
+            disabled={!frame || (!canClick && interactionMode !== 'inspect')}
             onKeyDown={(event) => {
               if (!canClick || (event.key !== 'Enter' && event.key !== ' ')) return;
               event.preventDefault();
@@ -66,15 +81,15 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
               const point = mapFramePoint(actual, bounds, event.clientX, event.clientY);
               if (point) onClick(actual, point.x, point.y);
             }}>
-            <NativeCanvas store={store} visible={visible} />
+            <NativeCanvas store={store} visible={visible && Boolean(frame)} />
           </button>
-          {interactionMode === 'inspect' && overlay}
+          {frame && interactionMode === 'inspect' && overlay}
           </div>
         </div>
       </div>
       {stale && <output className="frame-stale" data-testid="stale-frame">{snapshot?.build.error
-        ? '旧画面 · 当前代码构建失败' : '旧画面 · 等待当前构建'} · 画面版本 {frame.generation}</output>}
-      {!canClick && <span className="frame-input-note">{busy ? '请求处理中，暂缓输入' : ui.capabilities.click.reason}</span>}
-    </> : <div className="frame-empty" />}
+        ? '旧画面 · 当前代码构建失败' : '旧画面 · 等待当前构建'} · 画面版本 {frame?.generation}</output>}
+      {frame && !canClick && interactionMode === 'interact' && <span className="frame-input-note">{busy ? '请求处理中，暂缓输入' : ui.capabilities.click.reason}</span>}
+      {!frame && <div className="frame-empty" />}
   </div>;
 }

@@ -1,115 +1,96 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AgentDelivery, AgentKind, AgentPairing, AgentSessionList, AssistedOffer, RequestScope, SelectionContext } from '../ipc/model.ts';
+import type { AgentDelivery, AssistedOffer, RequestScope, SelectionContext } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
 
-const transportNames = { unsupported: '未接通', explicitBridge: '显式桥接', claudeChannel: 'Claude Channel · Research Preview', codexAppServer: 'ArkDock 管理的 Codex 会话', codexDesktopPlugin: 'Codex 会话插件', assistedWindow: 'Windows 辅助填写' };
-export function AgentDeliveryPanel({ selection, sessions, scope, bridge, disabled, revokeDisabled, hasInstruction, save, busy }: {
-  selection: SelectionContext; sessions: AgentSessionList | null; scope: RequestScope; bridge: UiBridge;
-  disabled: boolean; revokeDisabled: boolean; hasInstruction: boolean; save: () => Promise<SelectionContext>; busy: (value: boolean) => void;
+/** Copy or fill a confirmed composer. This UI never queues or submits an Agent message. */
+export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired, hasInstruction, save, busy }: {
+  selection: SelectionContext; scope: RequestScope; bridge: UiBridge;
+  disabled: boolean; expired: boolean; hasInstruction: boolean;
+  save: () => Promise<SelectionContext>; busy: (value: boolean) => void;
 }) {
-  const [list, setList] = useState(sessions);
-  const [bindingId, setBindingId] = useState(() => sessions?.bindings.filter((b) => b.writable).length === 1 ? sessions.bindings.find((b) => b.writable)!.bindingId : '');
-  const [registrationId, setRegistrationId] = useState('');
-  const [kind, setKind] = useState<AgentKind>('codex');
-  const [pair, setPair] = useState<AgentPairing | null>(null);
   const [offer, setOffer] = useState<AssistedOffer | null>(null);
   const [delivery, setDelivery] = useState<AgentDelivery | null>(null);
   const [notice, setNotice] = useState('');
   const [working, setWorking] = useState(false);
+  const active = useRef(false);
   const alive = useRef(true);
-  const pendingStatus = useRef(false);
-  const selectedManually = useRef(false);
-  const deliveryId = delivery?.requestId;
-  const deliveryState = delivery?.state;
+  const identity = JSON.stringify([selection.selectionId, selection.workspaceId, selection.buildId, selection.generation, scope.targetId, scope.sessionId]);
+  const current = useRef({ identity, expired }); current.current = { identity, expired };
   const { targetId, sessionId } = scope;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { setOffer(null); setDelivery(null); setNotice(''); }, [identity, expired]);
   useEffect(() => {
-    let live = true; let reading = false;
-    async function refresh() {
-      if (reading || !bridge.transfer) return;
-      reading = true;
-      try {
-        const value = await bridge.transfer('agent_session_list', {}, { targetId, sessionId });
-        if (live) setList(value);
-      } catch { if (live) setList(null); }
-      finally { reading = false; }
+    if (!offer) return;
+    const timer = window.setTimeout(() => {
+      setOffer(value => value?.confirmationId === offer.confirmationId ? null : value);
+      setNotice('输入框确认已过期，请重新检查。');
+    }, Math.max(0, offer.expiresAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [offer]);
+  const usable = Boolean(offer && offer.targetId === targetId && offer.expiresAt > Date.now());
+  const stillCurrent = (requested: string) => alive.current && !current.current.expired && current.current.identity === requested;
+  async function perform(task: (requested: string) => Promise<void>) {
+    if (disabled || active.current || !bridge.transfer) return;
+    const requested = identity;
+    active.current = true; setWorking(true); busy(true); setNotice('');
+    try { await task(requested); }
+    catch (error) { if (stillCurrent(requested)) setNotice(String(error)); }
+    finally {
+      active.current = false;
+      if (alive.current) { setWorking(false); busy(false); }
     }
-    void refresh(); const timer = window.setInterval(() => void refresh(), 1000);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [bridge, targetId, sessionId]);
-  useEffect(() => {
-    if (!deliveryId || !deliveryState || ['COMPLETED', 'EXPIRED', 'FAILED', 'FILLED_PENDING_USER_SEND', 'UNSUPPORTED', 'SESSION_UNVERIFIED'].includes(deliveryState)) return;
-    let live = true;
-    const timer = window.setInterval(() => {
-      if (!bridge.transfer || pendingStatus.current) return;
-      pendingStatus.current = true;
-      void bridge.transfer('agent_delivery_status', { requestId: deliveryId }, { targetId, sessionId })
-        .then((value) => { if (live) setDelivery(value); })
-        .catch((error) => { if (live) setNotice(String(error)); })
-        .finally(() => { pendingStatus.current = false; });
-    }, 750);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [deliveryId, deliveryState, bridge, targetId, sessionId]);
-  useEffect(() => {
-    const confirmed = list?.bindings.filter((binding) => binding.writable) ?? [];
-    if (!selectedManually.current && !bindingId && confirmed.length === 1) setBindingId(confirmed[0].bindingId);
-  }, [list, bindingId]);
-  const target = list?.bindings.find((binding) => binding.bindingId === bindingId);
-  const registration = list?.registrations.find((value) => value.transportInstanceId === target?.transportInstanceId && value.expiresAt > Date.now());
-  const direct = Boolean(target?.writable && registration && target.capabilities.directSend && target.expiresAt > Date.now());
-  const assisted = Boolean(offer && offer.targetId === targetId && offer.expiresAt > Date.now());
-  async function perform(task: () => Promise<void>, revoke = false) {
-    if ((revoke ? revokeDisabled : disabled) || working || !bridge.transfer) return;
-    setWorking(true); busy(true); setNotice('');
-    try { await task(); }
-    catch (error) { if (alive.current) setNotice(String(error)); }
-    finally { if (alive.current) { setWorking(false); busy(false); } }
   }
-  async function primary() {
-    await perform(async () => {
+  async function copy() {
+    await perform(async requested => {
       const saved = await save();
-      if (direct && target) {
-        const prepared = await bridge.transfer!('agent_delivery_prepare', { selectionId: saved.selectionId, bindingId: target.bindingId }, scope);
-        const result = prepared.state === 'READY' ? await bridge.transfer!('agent_delivery_send', { requestId: prepared.requestId }, scope) : prepared;
-        if (alive.current) setDelivery(result);
-      } else if (assisted && offer) {
-        const result = await bridge.transfer!('agent_assisted_fill', { selectionId: saved.selectionId, confirmationId: offer.confirmationId }, scope);
-        if (alive.current) { setDelivery(result); setOffer(null); }
-      } else {
-        const prompt = await bridge.transfer!('selection_prompt', { selectionId: saved.selectionId }, scope);
-        await navigator.clipboard.writeText(prompt);
-        if (alive.current) setNotice('修改要求已复制；请在目标 Agent 中粘贴并自行提交。');
+      if (!stillCurrent(requested)) return;
+      const prompt = await bridge.transfer!('selection_prompt', { selectionId: saved.selectionId, detailed: false }, { targetId, sessionId });
+      if (!stillCurrent(requested)) return;
+      await navigator.clipboard.writeText(prompt);
+      if (stillCurrent(requested)) setNotice('精简修改要求已复制。粘贴到 Agent 输入框后，由你决定是否发送。');
+    });
+  }
+  async function inspect() {
+    await perform(async requested => {
+      setOffer(null); setDelivery(null);
+      try {
+        const result = await bridge.transfer!('agent_assisted_inspect', {}, { targetId, sessionId });
+        if (stillCurrent(requested) && result.targetId === targetId) setOffer(result);
+      } catch (error) {
+        if (stillCurrent(requested)) setNotice(`无法确认可填写的输入框：${String(error)}\n可复制修改要求后手动粘贴。`);
       }
     });
   }
-  return <section className="selection-target agent-delivery" aria-label="发送到 Agent">
-    <header><h4>发送到 Agent</h4><span className="agent-mode">{direct ? '直接连接' : assisted ? '辅助填写' : '复制提示词'}</span></header>
-    {list?.bindings.length ? <label>已确认的目标<select aria-label="发送目标会话" value={bindingId} disabled={disabled || working} onChange={(event) => { selectedManually.current = true; setBindingId(event.target.value); setDelivery(null); setOffer(null); }}><option value="">选择已配对会话</option>{list.bindings.map((binding) => <option key={binding.bindingId} value={binding.bindingId}>{binding.agentKind} · {binding.conversationOrThreadId}</option>)}</select></label> : <p>尚未绑定可写会话。创建配对后，在指定 Agent 中启用对应连接。</p>}
-    {target && <dl><dt>Agent / 版本</dt><dd>{target.agentKind} · {target.agentVersion ?? '未核验'}</dd><dt>工程</dt><dd>{selection.workspaceName}</dd><dt>目标进程</dt><dd>PID {target.process.pid} · {target.targetId}</dd><dt>会话</dt><dd>{target.conversationOrThreadId}</dd><dt>通信方式</dt><dd>{transportNames[target.transportKind]}</dd><dt>能力</dt><dd>{direct ? '可提交' : '连接待核验'} · {target.capabilities.images ? '图片已授权读取' : '无图片能力'} · {registration?.busy ? 'Agent 正忙' : '提交前再次核验'}</dd></dl>}
-    {offer && <div className="agent-confirmation"><strong>{offer.app} · PID {offer.pid}</strong><p>输入区：{offer.composerName}</p><p>{offer.reason}</p><p>需要在目标窗口中确认提交。30 秒内有效，切换目标将取消。</p><button disabled={working} onClick={() => setOffer(null)}>取消辅助填写</button></div>}
-    <button className="primary-button selection-primary" disabled={disabled || working || !hasInstruction || Boolean(direct && registration?.busy)} onClick={() => void primary()}>{working ? '正在处理…' : direct ? '发送到当前 Agent' : assisted ? '填入 Agent 输入框' : '复制修改要求'}</button>
-    {!direct && !assisted && <p className="agent-hint">复制会覆盖系统剪贴板，内容包含当前工程和所选组件的信息。</p>}
-    {!direct && <button disabled={disabled || working} onClick={() => void perform(async () => {
-      const result = await bridge.transfer!('agent_assisted_inspect', {}, scope);
-      if (alive.current) setOffer(result);
-    })}>检查当前目标输入框</button>}
-    {delivery && <output aria-live="polite" className="agent-receipt"><strong>{delivery.state}</strong><p>{delivery.reason}</p>{delivery.transportReceipt && <small>传输回执：{delivery.transportReceipt}</small>}{delivery.agentAcknowledgment && <small>Agent 确认：{delivery.agentAcknowledgment}</small>}{delivery.state === 'FILLED_PENDING_USER_SEND' && <p>已填写，尚未发送。请在目标窗口确认并提交。</p>}</output>}
-    <details><summary>连接与授权</summary><label>Agent 类型<select value={kind} disabled={working} onChange={(event) => setKind(event.target.value as AgentKind)}><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
-      <button disabled={disabled || working} onClick={() => void perform(async () => {
-        const result = await bridge.transfer!('agent_pair_create', { agentKind: kind }, scope);
-        if (alive.current) { setPair(result); setBindingId(''); setDelivery(null); setNotice('配对文件已保存。按连接指南在指定 Agent 中启用；这一步尚未发送任何组件。'); }
-      })}>保存本次配对文件</button>
-      {pair && <p>凭证有效期至 {new Date(pair.expiresAt).toLocaleTimeString()}。文件：<code>{pair.configPath}</code>。仅交给指定本地 Agent，请勿提交到 Git。</p>}
-      <p>Claude Channel 需要显式启用及会话 Hook；Codex App Server 仅管理新建会话。Desktop 插件需另行启用并证明会话和工程。</p>
-      {Boolean(list?.registrations.length) && <><label>已登记的连接<select value={registrationId} onChange={(event) => setRegistrationId(event.target.value)}><option value="">请选择并核对工程 / 会话</option>{list!.registrations.map((r) => <option key={r.registrationId} value={r.registrationId}>{transportNames[r.transportKind]} · {r.conversationOrThreadId} · PID {r.pid}</option>)}</select></label><button disabled={disabled || working || !registrationId} onClick={() => void perform(async () => {
-        const result = await bridge.transfer!('agent_registration_bind', { registrationId }, scope);
-        if (alive.current) { setBindingId(result.bindingId); setNotice(result.bindingEvidence); setList(await bridge.transfer!('agent_session_list', {}, scope)); }
-      })}>确认绑定此会话</button></>}
-      <button disabled={revokeDisabled || working || !targetId || !sessionId} onClick={() => void perform(async () => {
-        await bridge.transfer!('agent_pair_revoke', {}, scope);
-        if (alive.current) { setPair(null); setBindingId(''); setOffer(null); setList(null); setNotice('已撤销会话连接与截图读取授权。'); }
-      }, true)}>撤销连接与授权</button>
-    </details>
-    {notice && <output aria-live="polite">{notice}</output>}
+  async function fill() {
+    if (!usable || !offer) return;
+    const confirmationId = offer.confirmationId;
+    await perform(async requested => {
+      // Consume the local confirmation too; no automatic retry after an uncertain write.
+      setOffer(null); setDelivery(null);
+      const saved = await save();
+      if (!stillCurrent(requested)) return;
+      const result = await bridge.transfer!('agent_assisted_fill', { selectionId: saved.selectionId, confirmationId }, { targetId, sessionId });
+      if (stillCurrent(requested)) setDelivery(result);
+    });
+  }
+  return <section className="selection-target agent-delivery" aria-label="复制或填写修改要求">
+    <header><h4>交给 Agent 修改</h4><span className="agent-mode">由你发送</span></header>
+    <p className="agent-hint">复制后粘贴到对话框。可识别的空输入框也能辅助填写，发送由你决定。</p>
+    <button className="primary-button selection-primary" disabled={disabled || working || !hasInstruction} onClick={() => void copy()}>
+      {working ? '正在处理…' : '复制修改要求'}
+    </button>
+    <div className="composer-actions"><button disabled={disabled || working || !targetId || !hasInstruction} title="只检查当前绑定窗口的输入框；不需要 Agent 会话配对" onClick={() => void inspect()}>检查目标输入框</button></div>
+    {offer && <div className="agent-confirmation">
+      <strong>填写到 {offer.app}</strong><p>输入框：{offer.composerName}</p>
+      <p>只填写已确认的空输入框，不按 Enter、不点击发送。确认在 30 秒内有效。</p>
+      <div className="composer-actions"><button className="primary-button" disabled={disabled || working || !hasInstruction || !usable} onClick={() => void fill()}>确认填入输入框</button>
+        <button disabled={working} onClick={() => setOffer(null)}>取消</button></div>
+    </div>}
+    {delivery && <output aria-live="polite" className="agent-receipt">
+      <strong>{delivery.state === 'FILLED_PENDING_USER_SEND' ? '已填入，等待你发送' : delivery.state === 'UNKNOWN' ? '填写结果尚未确认' : '未完成填写'}</strong>
+      <p>{delivery.reason}</p>{delivery.state === 'UNKNOWN' && <p>请先检查目标输入框，避免重复填写。</p>}
+    </output>}
+    <p className="agent-hint">复制会覆盖剪贴板，不会自动附加截图。需要图片时，可在下方导出并手动添加。</p>
+    {notice && <output className="composer-notice" aria-live="polite">{notice}</output>}
   </section>;
 }

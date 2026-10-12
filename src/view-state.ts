@@ -2,6 +2,7 @@ import type { AppSnapshot, Candidate, NativeFrame, Phase } from './ipc/model.ts'
 import type { PreviewFrame } from './preview/frame-types.ts';
 import { isBinaryFrame } from './preview/frame-types.ts';
 import { hasDockCandidate } from './request-state.ts';
+import { displayPath } from './path-display.ts';
 
 export function applySnapshot(current: AppSnapshot | null, incoming: AppSnapshot): AppSnapshot {
   return current && incoming.revision <= current.revision ? current : incoming;
@@ -18,6 +19,7 @@ export function acceptFrame(state: AppSnapshot, current: PreviewFrame | null, fr
 export function filterCandidates(items: Candidate[], query: string): Candidate[] {
   const search = query.trim().toLocaleLowerCase();
   return search ? items.filter(({ project, reasons }) => [project.name, project.appRoot, project.workspaceRoot,
+    displayPath(project.appRoot), displayPath(project.workspaceRoot),
     project.module, project.environment, ...reasons].join(' ').toLocaleLowerCase().includes(search)) : items;
 }
 

@@ -127,7 +127,7 @@ try {
   const selected = await until('Actual target and ArkTS candidate discovery', (state) => state.target?.process.pid === target.pid && state.phase === 'selectProject' && state.candidates.some((c) => normalizedPath(c.project.appRoot) === normalizedPath(project)), 15_000);
   const candidate = selected.candidates.find((c) => normalizedPath(c.project.appRoot) === normalizedPath(project));
   assert.equal(candidate.autoEligible, false);
-  await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.querySelector("code")?.textContent === ${JSON.stringify(candidate.project.appRoot)})`,'Actual candidate selection');
+    await clickUiControl(`[...document.querySelectorAll(".candidate-list button")].find(button => button.dataset.candidateId === ${JSON.stringify(candidate.id)})`,'Actual candidate selection');
   const associated = await until('Workspace associated through the actual candidate control', (state) => state.project?.id === candidate.project.id && (state.phase === 'untrusted' || state.sessionId), 10_000);
   projectId = associated.project.id; originalTrust = associated.trusted;
   if (!originalTrust) await trustThroughUi();

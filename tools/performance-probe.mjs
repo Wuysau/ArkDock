@@ -111,7 +111,7 @@ try {
   report.drag = action('drag', dockHandle, { X: x, Y: y, EndX: x + destination.right - before.left, EndY: y + destination.top - before.top, OutlinePid: ownedPid });
   const found = await until('Owned project discovery', async () => { const s = await snapshot(); return s.target?.process.pid === target.pid && s.phase === 'selectProject' && s.candidates.some((c) => c.project.appRoot.replaceAll('\\', '/').endsWith('/examples/native-counter')) && s; }, 20000);
   const candidate = found.candidates.find((c) => c.project.appRoot.replaceAll('\\', '/').endsWith('/examples/native-counter'));
-  await clickControl(`[...document.querySelectorAll(".candidate-list button")].find(b=>b.querySelector("code")?.textContent===${JSON.stringify(candidate.project.appRoot)})`);
+  await clickControl(`[...document.querySelectorAll(".candidate-list button")].find(b=>b.dataset.candidateId===${JSON.stringify(candidate.id)})`);
   const associated = await snapshot(); projectId = candidate.project.id; originalTrust = associated.trusted;
   if (!originalTrust) await clickControl('[...document.querySelectorAll("dialog button")].find(b=>b.textContent.trim()==="信任此工程")');
   let running = await until('Real SDK frame', async () => { const s = await snapshot(); if (['protocolBlocked', 'sdkMissing', 'crashed'].includes(s.phase)) throw new Error(s.backend.reason + JSON.stringify(s.diagnostics.slice(-2))); return s.phase === 'running' && s.sessionId && s.build.displayedGeneration === s.build.generation && s; }, 150000);

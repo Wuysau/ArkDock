@@ -1,0 +1,116 @@
+.sheet.diagnostics {
+  height: min(680px, calc(100dvh - 44px));
+  min-height: min(320px, calc(100dvh - 44px));
+}
+
+.sheet.diagnostics > .panel-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.runtime-logs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--space-3);
+}
+
+.runtime-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.runtime-log-actions > .muted { margin-right: auto; }
+.runtime-log-actions button, .runtime-log-actions select { font-size: 11px; }
+.runtime-log-order { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.runtime-log-order select { color: var(--text); }
+
+.runtime-log-context {
+  flex-shrink: 0;
+  max-height: 120px;
+  padding: 8px 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-button);
+  background: var(--surface);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.runtime-log-context > p { margin: 0; }
+.runtime-log-context > .build-error { margin-top: var(--space-2); white-space: pre-wrap; }
+.runtime-log-copy-status { margin: 0; color: var(--muted); }
+
+.runtime-log-history {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.runtime-log-updates {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.runtime-log-updates > button { min-height: 28px; padding: 4px 8px; color: var(--highlight); font-size: 11px; }
+
+.runtime-log-viewport {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: var(--muted) var(--surface);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.runtime-log-viewport::-webkit-scrollbar { width: 10px; }
+.runtime-log-viewport::-webkit-scrollbar-track { background: var(--surface); }
+.runtime-log-viewport::-webkit-scrollbar-thumb { border: 2px solid var(--surface); border-radius: 6px; background: var(--muted); }
+.runtime-log-viewport:focus-visible { outline-offset: -3px; }
+
+.diagnostics .runtime-log-record { padding: 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.runtime-log-record:last-child { border-bottom: 0; }
+.diagnostics .runtime-log-record > .runtime-log-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 11px; }
+.runtime-log-code { font-family: "Cascadia Code", Consolas, monospace; color: var(--text); }
+.diagnostics .runtime-log-heading time { margin-left: auto; color: var(--muted); font-size: 10px; }
+.diagnostics .runtime-log-record > .runtime-log-source { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.runtime-log-message { margin: 8px 0; white-space: pre-wrap; font-family: "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace; line-height: 1.7; }
+.runtime-log-scope { margin: 0; color: var(--muted); font-size: 10px; }
+.runtime-log-scope > div { display: flex; align-items: baseline; gap: 8px; }
+.runtime-log-scope dt { flex-shrink: 0; }
+.runtime-log-scope dd { min-width: 0; margin: 0; font-family: "Cascadia Code", Consolas, monospace; }
+
+@media (max-height: 560px) {
+  .runtime-logs { gap: var(--space-2); }
+  .runtime-log-context { max-height: 76px; }
+}

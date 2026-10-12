@@ -702,7 +702,8 @@
     },
     "selection_prompt": {
       "scope": "RequestScope",
-      "selectionId": "string"
+      "selectionId": "string",
+      "detailed": "bool?"
     },
     "selection_read_image": {
       "scope": "RequestScope",

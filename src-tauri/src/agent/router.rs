@@ -2,7 +2,7 @@ use super::adapters;
 use super::bridge::{Attachments, SessionBridge};
 use super::AgentTransport;
 use crate::ipc::model::*;
-use crate::selection::{format_prompt, validate_selection};
+use crate::selection::{format_compact_prompt, format_prompt, validate_selection};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -537,7 +537,7 @@ impl AgentRouter {
             selection_id: selection.selection_id.clone(),
             binding_id: None,
             state: DeliveryState::Sending,
-            prompt: format_prompt(selection),
+            prompt: format_compact_prompt(selection),
             target: None,
             receipt_id: None,
             reason: "等待目标输入框填写结果；不会自动提交。".into(),

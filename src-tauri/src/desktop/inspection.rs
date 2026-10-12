@@ -8,7 +8,7 @@ pub(super) enum DataAction {
     SelectionGet(String),
     SelectionClear(Option<String>),
     SelectionInstruction(String, String),
-    SelectionPrompt(String),
+    SelectionPrompt(String, bool),
     SelectionImage(String, bool),
     AgentList,
     AgentBind(AgentBindingDraft),
@@ -172,11 +172,11 @@ impl Engine {
                         .ok_or("SELECTION_STORAGE_UNAVAILABLE")?
                         .update_instruction(&self.snapshot, &id, &instruction, observed)?,
                 ),
-                DataAction::SelectionPrompt(id) => json_result(
+                DataAction::SelectionPrompt(id, detailed) => json_result(
                     self.selections
                         .as_mut()
                         .ok_or("SELECTION_STORAGE_UNAVAILABLE")?
-                        .prompt(&self.snapshot, &id, observed)?,
+                        .prompt_with_detail(&self.snapshot, &id, observed, detailed)?,
                 ),
                 DataAction::SelectionImage(id, crop) => Ok(DataResult::Bytes(
                     self.selections
@@ -415,13 +415,14 @@ pub(crate) async fn selection_prompt(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     selection_id: String,
+    detailed: Option<bool>,
 ) -> Result<String, String> {
     decode_data(
         data_request(
             window,
             service,
             scope,
-            DataAction::SelectionPrompt(selection_id),
+            DataAction::SelectionPrompt(selection_id, detailed.unwrap_or(false)),
         )
         .await?,
     )
