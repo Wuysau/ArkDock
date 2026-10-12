@@ -101,7 +101,7 @@
       "FILLED_PENDING_USER_SEND",
       "UNKNOWN"
     ],
-    "NativeControlAction": ["pointerDown", "pointerMove", "pointerUp", "pointerCancel", "textCommit", "keyPress", "setOrientation", "setResolution", "setColorMode", "navigatePage", "queryRouter", "switchProfile"],
+    "NativeControlAction": ["pointerDown", "pointerMove", "pointerUp", "pointerCancel", "cancelAll", "textCommit", "keyPress", "setOrientation", "setResolution", "setColorMode", "navigatePage", "queryRouter", "switchProfile"],
     "NativeControlPhase": ["queued", "commandAccepted", "awaitingFrame", "observed", "failed", "cancelled", "timedOut", "blocked"],
     "NativeControlAvailability": ["available", "experimental", "blocked", "unavailable"],
     "PreviewOrientation": ["portrait", "landscape"],

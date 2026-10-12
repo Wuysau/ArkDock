@@ -98,20 +98,24 @@ pub(crate) struct ControlMailbox {
     queue: VecDeque<ControlRequest>,
     cancel: Option<ControlRequest>,
     cancel_requested: bool,
+    cancel_all: bool,
 }
 
 #[cfg(windows)]
 impl ControlMailbox {
     pub fn enqueue(&mut self, request: ControlRequest) -> Result<(), String> {
-        if request.request.action == NativeControlAction::PointerCancel {
+        if matches!(request.request.action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll) {
             self.cancel_requested = true;
+            self.cancel_all |= request.request.action == NativeControlAction::CancelAll;
             if let Some(old) = self.cancel.replace(request) {
                 old.send(old.receipt(NativeControlPhase::Cancelled, "Cancellation replaced by a newer request"));
             }
-            self.cancel_queued();
+            self.cancel_queued(self.cancel_all);
             return Ok(());
         }
-        if self.cancel_requested { return Err("NATIVE_CONTROL_CANCELLING".into()); }
+        if self.cancel_requested && (self.cancel_all || is_input_action(&request.request.action)) {
+            return Err("NATIVE_CONTROL_CANCELLING".into());
+        }
         if request.request.action == NativeControlAction::PointerMove {
             let replace = self.queue.back().is_some_and(|old| {
                 old.request.action == NativeControlAction::PointerMove
@@ -135,19 +139,25 @@ impl ControlMailbox {
 
     pub fn cancel_all(&mut self) {
         self.cancel_requested = true;
-        self.cancel_queued();
+        self.cancel_all = true;
+        self.cancel_queued(true);
     }
 
-    pub fn take_cancel(&mut self) -> Option<Option<ControlRequest>> {
+    pub fn take_cancel(&mut self) -> Option<(bool, Option<ControlRequest>)> {
         if !self.cancel_requested { return None; }
         self.cancel_requested = false;
-        Some(self.cancel.take())
+        let all = std::mem::take(&mut self.cancel_all);
+        Some((all, self.cancel.take()))
     }
 
-    fn cancel_queued(&mut self) {
+    fn cancel_queued(&mut self, all: bool) {
+        let mut retained = VecDeque::new();
         for request in self.queue.drain(..) {
-            request.send(request.receipt(NativeControlPhase::Cancelled, "Native operation cancelled before dispatch"));
+            if all || is_input_action(&request.request.action) {
+                request.send(request.receipt(NativeControlPhase::Cancelled, "Native operation cancelled before dispatch"));
+            } else { retained.push_back(request); }
         }
+        self.queue = retained;
     }
 }
 
@@ -196,7 +206,7 @@ pub fn validate_request(request: &NativeControlRequest) -> Result<(), String> {
     let action = &request.action;
     let pointer = matches!(action, NativeControlAction::PointerDown | NativeControlAction::PointerMove
         | NativeControlAction::PointerUp);
-    let cancel = *action == NativeControlAction::PointerCancel;
+    let cancel = matches!(action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll);
     if (pointer || cancel) && request.gesture_id.as_ref().is_some_and(|id| {
         id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'))
     }) { return Err("NATIVE_GESTURE_ID_INVALID".into()); }
@@ -301,7 +311,7 @@ pub(crate) fn commands(request: &NativeControlRequest, state: &RuntimeControlSta
         NativeControlAction::NavigatePage => {
             steps.push_back(set("ReloadRuntimePage", json!({ "ReloadRuntimePage": request.page })));
         }
-        NativeControlAction::QueryRouter | NativeControlAction::PointerCancel => {}
+        NativeControlAction::QueryRouter | NativeControlAction::PointerCancel | NativeControlAction::CancelAll => {}
         NativeControlAction::SwitchProfile => return Err("DEVICE_PROFILE_REQUIRES_CONTROLLED_RESTART".into()),
     }
     Ok(steps)
@@ -311,4 +321,11 @@ pub(crate) fn commands(request: &NativeControlRequest, state: &RuntimeControlSta
 pub(crate) fn observes_frame(action: &NativeControlAction) -> bool {
     matches!(action, NativeControlAction::SetOrientation | NativeControlAction::SetResolution
         | NativeControlAction::SetColorMode | NativeControlAction::NavigatePage)
+}
+
+/// Focus and modal changes cancel input without discarding a configuration
+/// observation that was already explicitly requested by the user.
+pub fn is_input_action(action: &NativeControlAction) -> bool {
+    matches!(action, NativeControlAction::PointerDown | NativeControlAction::PointerMove
+        | NativeControlAction::PointerUp | NativeControlAction::TextCommit | NativeControlAction::KeyPress)
 }

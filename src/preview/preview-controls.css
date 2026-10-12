@@ -8,7 +8,10 @@
 .native-surface.is-streaming { touch-action: none; }
 .native-text-capture { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; clip-path: inset(50%); overflow: hidden; pointer-events: none; }
 .native-surface-wrap:has(.native-text-capture:focus) .native-surface { outline: 2px solid var(--accent); outline-offset: -3px; }
-.native-input-toggle { position: absolute; right: 8px; bottom: 8px; z-index: 2; padding: 3px 7px; font-size: 10px; background: var(--glass); }
+.native-input-bar { position: absolute; right: 8px; bottom: 8px; left: 8px; z-index: 2; display: flex; justify-content: flex-end; align-items: center; gap: 6px; pointer-events: none; }
+.native-input-toggle { flex-shrink: 0; padding: 3px 7px; font-size: 10px; background: var(--glass); pointer-events: auto; }
+.native-input-status { max-width: 260px; padding: 4px 7px; border-radius: 6px; background: var(--glass); color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.native-input-feedback { position: absolute; right: 8px; bottom: 42px; left: 8px; z-index: 2; padding: 6px 8px; border-radius: 6px; background: var(--glass); color: var(--danger); font-size: 11px; overflow-wrap: anywhere; pointer-events: none; }
 .native-controls-settings { margin-bottom: 12px; }
 .native-config-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .native-config-fields label, .native-profile-select, .native-resolution-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }

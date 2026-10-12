@@ -125,7 +125,7 @@ impl Engine {
                 DataAction::ControlState => json_result(self.control_state()),
                 DataAction::ControlEnable(enabled) => json_result(self.enable_controls(enabled)?),
                 DataAction::ControlSubmit(request) => json_result(self.submit_control(request)?),
-                DataAction::ControlCancel(identity) => json_result(self.cancel_control(identity)?),
+                DataAction::ControlCancel(identity) => json_result(self.cancel_control(identity, false)?),
                 DataAction::DeviceState => json_result(self.device_state()),
                 DataAction::DeviceAction(request) => json_result(self.device_action(request)?),
                 DataAction::InspectorCapabilities => {

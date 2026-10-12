@@ -12,12 +12,21 @@ function ready(snapshot: AppSnapshot | null, store: FrameStore, controls: Native
 export function PreviewPageSelect({ snapshot, store, controls, busy }: { snapshot: AppSnapshot | null; store: FrameStore; controls: NativeControls; busy: boolean }) {
   useSyncExternalStore(store.subscribeDisplayed, store.getDisplayed, store.getDisplayed);
   const state = controls.state;
-  const available = ready(snapshot, store, controls, 'page', busy);
-  const reason = state?.capabilities.find((item) => item.name === 'page')?.reason ?? '等待原生页面列表';
-  return <label><span className="sr-only">原生应用页面</span><select aria-label="原生应用页面" value={state?.currentPage ?? ''}
-    disabled={!available} title={reason} onChange={(event) => void controls.submit({ action: 'navigatePage', page: event.target.value })}>
-    <option value="" disabled>{state?.currentPage ? '选择页面' : '当前路由待确认'}</option>
-    {state?.pages.map((page) => <option key={page} value={page}>{page}</option>)}
+  const pages = state?.pages ?? [];
+  const currentPage = state?.currentPage ?? '';
+  const routeConfirmed = Boolean(currentPage && pages.includes(currentPage));
+  const available = pages.length > 1 && routeConfirmed && ready(snapshot, store, controls, 'page', busy);
+  const reason = pages.length === 1 ? '当前工程只有一个编译页面，无需切换；不会重新替换入口页面'
+    : !routeConfirmed ? '当前原生路由尚未确认，暂不发送页面替换命令'
+      : state?.capabilities.find((item) => item.name === 'page')?.reason ?? '等待原生页面列表';
+  return <label><span className="sr-only">原生应用页面</span><select aria-label="原生应用页面" value={routeConfirmed ? currentPage : ''}
+    disabled={!available} title={reason} onChange={(event) => {
+      const page = event.target.value;
+      if (!available || page === currentPage || !pages.includes(page)) return;
+      void controls.submit({ action: 'navigatePage', page });
+    }}>
+    <option value="" disabled>{pages.length === 1 ? `仅一个页面：${pages[0]} · 当前路由待确认` : '当前路由待确认'}</option>
+    {pages.map((page) => <option key={page} value={page} disabled={page === currentPage}>{page}</option>)}
   </select></label>;
 }
 export function PreviewControlToolbar({ snapshot, store, controls, busy }: { snapshot: AppSnapshot | null; store: FrameStore; controls: NativeControls; busy: boolean }) {

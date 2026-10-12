@@ -46,6 +46,7 @@ const StableInspectorPreview = memo(InspectorPreview, (previous, next) => previo
   && previous.store === next.store && previous.visible === next.visible && previous.zoom === next.zoom
   && previous.busy === next.busy && previous.interactionMode === next.interactionMode
   && previous.controlState === next.controlState && previous.nativeInput === next.nativeInput && previous.inputPaused === next.inputPaused
+  && previous.inputError === next.inputError
   && previous.exit === next.exit && previous.onClick === next.onClick
   && previous.actions === next.actions && previous.onProblem === next.onProblem && previous.onError === next.onError
   && previewStateKey(previous.snapshot) === previewStateKey(next.snapshot));
@@ -133,9 +134,10 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const ui = deriveUiState(state, null);
   const pair = pairControl(state);
   const controls = useNativeControls({ bridge, snapshot: state, store,
-    visible: previewVisible && !panel && runtimeKind === 'native' && interactionMode === 'interact', wake: () => frameController.current?.wake() });
+    visible: previewVisible && !panel && runtimeKind === 'native' && interactionMode === 'interact',
+    windowVisible: previewVisible && runtimeKind === 'native', wake: () => frameController.current?.wake() });
   const nativeInput = useMemo(() => ({ start: controls.start, move: controls.input.move.bind(controls.input),
-    end: controls.input.end.bind(controls.input), cancel: controls.input.cancel.bind(controls.input), text: controls.text, key: controls.key }), [controls.input]);
+    end: controls.input.end.bind(controls.input), cancel: controls.cancelInput, text: controls.text, key: controls.key }), [controls.input]);
   const receive = useCallback((value: AppSnapshot) => {
     const updated = applySnapshot(stateRef.current, value);
     if (updated === stateRef.current) return;
@@ -163,7 +165,10 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     const controller = bridge.readFrame ? new BinaryFrameController({ bridge: { request: bridge.request, readFrame: bridge.readFrame }, store, getState: () => stateRef.current, onSnapshot: receive, onMode: (_mode, reason) => { if (live && reason) setError(reason); } }) : null;
     frameController.current = controller;
     controller?.update(stateRef.current);
-    const visibility = () => controller?.setVisible(previewVisibleRef.current && !document.hidden);
+    // WebView2 document.hidden can disagree with the visible owned main window.
+    // The native visibility observation controls frame delivery; keyboard input
+    // additionally requires local document focus and the current native scope.
+    const visibility = () => controller?.setVisible(previewVisibleRef.current);
     visibility(); document.addEventListener('visibilitychange', visibility);
     if (connected) bridge.observe((value) => { if (live) receive(value); }, (frame) => { if (live && stateRef.current) { if (controller) controller.acceptLegacy(frame); else store.push(stateRef.current, frame); } }, (visible) => { if (live && previewVisibleRef.current !== visible) { previewVisibleRef.current = visible; setPreviewVisible(visible); visibility(); } }).then(async (off) => {
       if (!live) { off(); return; }
@@ -348,7 +353,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
           <div className="native-preview-host" hidden={runtimeKind !== 'native'}>
           <StableInspectorPreview visible={previewVisible && runtimeKind === 'native'} bridge={bridge} interactionMode={interactionMode} exit={exitInspection}
             actions={inspectorActions} onProblem={setInspectorProblem} onError={setError}
-            controlState={controls.state} nativeInput={nativeInput} inputPaused={Boolean(controls.pending || panel || runtimeKind !== 'native')}
+            controlState={controls.state} nativeInput={nativeInput} inputPaused={Boolean(controls.pending || panel || runtimeKind !== 'native')} inputError={controls.error}
             snapshot={state} store={store} zoom={zoom} busy={busy} onClick={clickNative} />
           <EmptyState snapshot={state} store={store} connected={connected} navigate={navigate} />
           </div>

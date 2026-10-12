@@ -76,16 +76,29 @@ fn page_list(value: &Value) -> Result<Vec<String>, String> {
     Ok(pages)
 }
 
-/// Source pages alone are not compiled-route evidence. Require the actual
-/// PreviewBuild resource copy to agree and a nonempty compiled ABC artifact.
-pub fn compiled_pages(project: &ProjectRef) -> Result<Vec<String>, String> {
+pub struct CompiledPageProfile {
+    /// Previewer's -pages argument is the profile basename, without .json.
+    pub name: String,
+    pub pages: Vec<String>,
+}
+
+pub fn page_profile_name(project: &ProjectRef) -> Result<String, String> {
     let module = module_directory(project)?;
     let manifest = read_json(&module, &module.join("src/main/module.json5"))?;
-    let reference = manifest.get("module").and_then(|value| value.get("pages")).and_then(Value::as_str)
+    let name = manifest.get("module").and_then(|value| value.get("pages")).and_then(Value::as_str)
         .and_then(|value| value.strip_prefix("$profile:")).ok_or("STAGE_PAGE_PROFILE_REQUIRED")?;
-    if reference.is_empty() || reference.len() > 128 || !reference.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+    if name.is_empty() || name.len() > 128 || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
         return Err("PAGE_PROFILE_INVALID".into());
     }
+    Ok(name.to_owned())
+}
+
+/// Source pages alone are not compiled-route evidence. Require the actual
+/// PreviewBuild resource copy to agree and a nonempty compiled ABC artifact.
+/// The same checked profile name must be used by the Previewer launch.
+pub fn compiled_page_profile(project: &ProjectRef) -> Result<CompiledPageProfile, String> {
+    let module = module_directory(project)?;
+    let reference = page_profile_name(project)?;
     let filename = format!("{reference}.json");
     let source = page_list(&read_json(&module, &module.join("src/main/resources/base/profile").join(&filename))?)?;
     let intermediates = module.join(".preview/default/intermediates");
@@ -101,5 +114,9 @@ pub fn compiled_pages(project: &ProjectRef) -> Result<Vec<String>, String> {
         let file = module.join("src/main/ets").join(format!("{page}.ets")).canonicalize().map_err(|_| "PAGE_SOURCE_MISSING")?;
         if !file.starts_with(&module) || !file.is_file() { return Err("PAGE_SOURCE_OUTSIDE_PROJECT".into()); }
     }
-    Ok(source)
+    Ok(CompiledPageProfile { name: reference, pages: source })
+}
+
+pub fn compiled_pages(project: &ProjectRef) -> Result<Vec<String>, String> {
+    compiled_page_profile(project).map(|profile| profile.pages)
 }

@@ -27,6 +27,12 @@ fn terminal(phase: &NativeControlPhase) -> bool {
         | NativeControlPhase::Failed | NativeControlPhase::Cancelled | NativeControlPhase::TimedOut | NativeControlPhase::Blocked)
 }
 
+fn input_operation(action: &NativeControlAction) -> bool {
+    matches!(action, NativeControlAction::PointerDown | NativeControlAction::PointerMove
+        | NativeControlAction::PointerUp | NativeControlAction::PointerCancel
+        | NativeControlAction::TextCommit | NativeControlAction::KeyPress)
+}
+
 impl Controls {
     fn remember(&mut self, receipt: NativeControlReceipt) {
         if let Some(previous) = self.operations.iter_mut().find(|previous| previous.operation_id == receipt.operation_id) {
@@ -125,11 +131,17 @@ impl Engine {
         } else { self.snapshot.backend.reason.clone() };
         let mut capabilities: Vec<_> = ["touch", "text", "key", "orientation", "resolution", "colorMode"]
             .into_iter().map(|name| NativeControlCapability { name: name.into(), status: status.clone(), reason: experimental_reason.clone() }).collect();
-        capabilities.push(NativeControlCapability { name: "page".into(), status: if self.controls.pages.is_empty() {
+        let route_known = runtime.as_ref().and_then(|state| state.current_route.as_ref())
+            .is_some_and(|route| self.controls.pages.contains(route));
+        capabilities.push(NativeControlCapability { name: "page".into(), status: if self.controls.pages.len() <= 1 || !route_known {
             NativeControlAvailability::Blocked
-        } else { status }, reason: if self.controls.pages.is_empty() {
+        } else { status }, reason: if self.controls.pages.len() == 1 {
+            "当前编译工程只有一个页面；保持入口页，重新加载请使用预览刷新".into()
+        } else if self.controls.pages.is_empty() {
             if self.controls.page_reason.is_empty() { "等待当前构建的真实页面资源，未核验源码列表不可开放导航".into() }
                 else { self.controls.page_reason.clone() }
+        } else if !route_known {
+            "尚未取得可核验的原生当前路由；禁止替换页面，以保留当前有效画面".into()
         }
             else { "已读取可信工程与 PreviewBuild 页面资源；导航还须原生 CurrentJsRouter 事件及后续帧确认，SDK NOT_RUN".into() } });
         capabilities.push(NativeControlCapability { name: "profile".into(), status: NativeControlAvailability::Blocked,
@@ -163,7 +175,8 @@ impl Engine {
     pub(super) fn submit_control(&mut self, request: NativeControlRequest) -> Result<NativeControlReceipt, String> {
         self.sync_control_lifecycle();
         self.poll_native_controls();
-        if request.action == NativeControlAction::PointerCancel { return self.cancel_control(request.identity); }
+        if request.action == NativeControlAction::PointerCancel { return self.cancel_control(request.identity, true); }
+        if request.action == NativeControlAction::CancelAll { return self.cancel_control(request.identity, false); }
         let cleanup = matches!(request.action, NativeControlAction::PointerUp | NativeControlAction::PointerCancel);
         self.validate_control_identity(&request.identity, cleanup)?;
         if matches!(request.action, NativeControlAction::TextCommit | NativeControlAction::KeyPress)
@@ -183,6 +196,12 @@ impl Engine {
         }
         if request.action == NativeControlAction::NavigatePage && !request.page.as_ref().is_some_and(|page| self.controls.pages.contains(page)) {
             return Err("PAGE_NOT_IN_COMPILED_ARTIFACT".into());
+        }
+        if request.action == NativeControlAction::NavigatePage {
+            if self.controls.pages.len() <= 1 { return Err("SINGLE_PAGE_PROJECT: 当前工程只有入口页，不执行页面替换；重新加载请使用预览刷新".into()); }
+            let route = self.backend.control_runtime_state().and_then(|state| state.current_route)
+                .filter(|route| self.controls.pages.contains(route)).ok_or("NATIVE_CURRENT_ROUTE_UNVERIFIED: 保持当前画面，等待真实路由回读")?;
+            if request.page.as_deref() == Some(route.as_str()) { return Err("NATIVE_PAGE_ALREADY_CURRENT: 当前页保持不变，不执行页面替换".into()); }
         }
         if request.action == NativeControlAction::QueryRouter {
             return Err("CURRENT_ROUTER_ASYNC_ONLY: 外部 get 不提供可靠回读，当前路由仅来自真实 CurrentJsRouter 事件".into());
@@ -208,26 +227,31 @@ impl Engine {
         Ok(receipt)
     }
 
-    pub(super) fn cancel_control(&mut self, identity: NativeControlIdentity) -> Result<NativeControlReceipt, String> {
+    pub(super) fn cancel_control(&mut self, identity: NativeControlIdentity, input_only: bool) -> Result<NativeControlReceipt, String> {
         self.validate_control_identity(&identity, true)?;
         let current = self.control_identity().ok_or("PREVIEW_SESSION_REQUIRED")?;
         // UI cancellation has an observed reply; lifecycle cancellation uses the
         // independent priority flag. Never let a full normal queue prevent Up.
+        let mut preserved = Vec::new();
         for mut pending in std::mem::take(&mut self.controls.pending) {
+            if input_only && !input_operation(&pending.receipt.action) { preserved.push(pending); continue; }
             pending.receipt.phase = NativeControlPhase::Cancelled;
             pending.receipt.observed_at = now();
-            pending.receipt.reason = "本地操作已撤销；原生释放状态由取消操作的独立回执确认".into();
+            pending.receipt.reason = if input_only { "本地输入已撤销；配置操作仍在继续，原生释放由独立回执确认".into() }
+                else { "本地操作已撤销；原生释放状态由取消操作的独立回执确认".into() };
             self.controls.remember(pending.receipt);
         }
+        self.controls.pending = preserved;
         self.controls.serial = self.controls.serial.checked_add(1).ok_or("CONTROL_SEQUENCE_EXHAUSTED")?;
         let receipt = NativeControlReceipt {
             operation_id: format!("cancel-{}-{}", identity.generation, self.controls.serial), identity,
-            action: NativeControlAction::PointerCancel, phase: NativeControlPhase::Queued, command_accepted: false,
+            action: if input_only { NativeControlAction::PointerCancel } else { NativeControlAction::CancelAll }, phase: NativeControlPhase::Queued, command_accepted: false,
             frame_observed: false, pixels_changed: false, configuration_confirmed: false, current_route: None, frame_sequence: None,
-            requested_at: now(), observed_at: now(), reason: "已请求优先取消和安全释放；本地取消请求不代表原生已松开".into(),
+            requested_at: now(), observed_at: now(), reason: if input_only { "已请求仅取消输入并安全释放；页面和主题配置观察保持".into() }
+                else { "已请求取消全部操作和安全释放；本地取消请求不代表原生已松开".into() },
         };
         let request = NativeControlRequest {
-            identity: current, action: NativeControlAction::PointerCancel, gesture_id: None,
+            identity: current, action: receipt.action.clone(), gesture_id: None,
             x: None, y: None, text: None, key: None, orientation: None, color_mode: None,
             page: None, profile_id: None, width: None, height: None, dpi: None,
         };

@@ -3,7 +3,7 @@
 //! are required by the native gate. No unverified version enters this adapter.
 use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
 use super::control::{self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand};
-use super::frames::{parse_jpeg40_for_surface, BinaryFrameMailbox};
+use super::frames::{parse_jpeg40_for_surface, BinaryFrame, BinaryFrameMailbox};
 use super::NativePoint;
 use crate::inspector::{
     InspectionReceiver, InspectionRequest, InspectorCommand, RawInspectionResponse,
@@ -229,7 +229,7 @@ impl Runtime {
             worker_stop.store(true, Ordering::Release);
             if let Ok(mut mailbox) = worker_controls.lock() {
                 mailbox.cancel_all();
-                if let Some(Some(request)) = mailbox.take_cancel() {
+                if let Some((_, Some(request))) = mailbox.take_cancel() {
                     request.send(request.receipt(NativeControlPhase::Cancelled, "Owned native runtime stopped"));
                 }
             }
@@ -270,12 +270,12 @@ impl Runtime {
         if self.stop.load(Ordering::Acquire) || !control::identity_matches(&request.identity, &self.task, &state) {
             return Err("NATIVE_CONTROL_STALE_IDENTITY".into());
         }
-        if !state.input_ready && request.action != NativeControlAction::PointerCancel {
+        if !state.input_ready && !matches!(request.action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll) {
             return Err(format!("NATIVE_CONTROL_PAUSED: {}", state.reason));
         }
         let (reply, response) = mpsc::sync_channel(8);
         let queued = ControlRequest { request, operation_id, reply, requested_at: super::now_ms(), legacy_click: false };
-        let cancelling = queued.request.action == NativeControlAction::PointerCancel;
+        let cancelling = matches!(queued.request.action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll);
         let mut mailbox = self.controls.lock().map_err(|_| "NATIVE_CONTROL_MAILBOX")?;
         {
             let mut current = self.control_state.lock().map_err(|_| "NATIVE_CONTROL_STATE")?;
@@ -651,6 +651,7 @@ fn run(
         .port();
     drop(port_listener);
     let arg = |path: PathBuf| path.to_string_lossy().into_owned();
+    let page_profile = super::configuration::page_profile_name(project)?;
     let args = vec![
         "-j".into(),
         arg(assets),
@@ -680,6 +681,8 @@ fn run(
         "ACE_2_0".into(),
         "-url".into(),
         "pages/Index".into(),
+        "-pages".into(),
+        page_profile,
         "-n".into(),
         project.module.clone(),
         "-sd".into(),
@@ -758,6 +761,7 @@ fn run(
     let mut inspection: Option<(InspectionRequest, Instant, u64, u64)> = None;
     let mut inspection_poisoned = false;
     let mut query_id = 0u64;
+    let mut held_navigation_frame: Option<(BinaryFrame, u64)> = None;
     let outcome = (|| -> Result<(), String> {
     while !stop.load(Ordering::Acquire) {
         if let Some(code) = previewer.exit_code()? {
@@ -818,6 +822,19 @@ fn run(
             inspection_poisoned = true;
         }
         if !first { control_worker.tick(&command, inspection.is_some(), inputs)?; }
+        if let Some(revision) = held_navigation_frame.as_ref().map(|(_, revision)| *revision) {
+            if control_worker.navigation_revision() != Some(revision) {
+                held_navigation_frame = None;
+            } else if control_worker.navigation_frame_ready(revision) {
+                if let Some((frame, _)) = held_navigation_frame.take() {
+                    if control_worker.frame(frame.metadata.width, frame.metadata.height,
+                        frame.metadata.sequence, &frame.payload)? {
+                        frames.lock().map_err(|_| "FRAME_MAILBOX")?.push(frame)
+                            .map_err(|error| format!("FRAME_REJECTED: {error:?}"))?;
+                    }
+                }
+            }
+        }
         if !first && inspection.is_none() && !control_worker.busy() {
             if let Ok(request) = inspections.try_recv() {
                 if inspection_poisoned {
@@ -854,7 +871,16 @@ fn run(
                         && control_worker.old_surface_packet(actual_width, actual_height) { continue; }
                 }
                 let frame = parse_jpeg40_for_surface(&data, task, sequence, super::now_ms(), width, height)?;
-                if !control_worker.frame(width, height, sequence, &frame.payload)? { continue; }
+                if !control_worker.frame(width, height, sequence, &frame.payload)? {
+                    if let Some(revision) = control_worker.navigation_revision() {
+                        // One bounded candidate from the already observed target
+                        // route may precede its command ACK on the other stream.
+                        // Preserve its original identity/sequence/time unchanged.
+                        held_navigation_frame = Some((frame, revision));
+                    }
+                    continue;
+                }
+                held_navigation_frame = None;
                 frames
                     .lock()
                     .map_err(|_| "FRAME_MAILBOX")?
