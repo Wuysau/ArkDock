@@ -326,7 +326,12 @@ fn inspect_application(
         });
     metadata_field(&app_name)?;
     let sdk_id = sdk_identity(&profile)?;
-    let narrowed = input != app_root && !app_root.join("AppScope").starts_with(input);
+    // A library source belongs to the containing application; it is not itself a HAP.
+    // Preserve narrowing for an actual application module, but let a declared library
+    // hint identify the application's HAP candidates without guessing a module by name.
+    let narrowed = input != app_root
+        && !app_root.join("AppScope").starts_with(input)
+        && !declared_library_contains_input(modules, input, &app_root);
     let mut candidates = Vec::new();
     for module in modules {
         let name = module
@@ -406,6 +411,22 @@ fn inspect_application(
             )?);
             continue;
         }
+        match module_config.get("type").and_then(Value::as_str) {
+            Some("har" | "shared") => continue,
+            Some("entry" | "feature") => {}
+            _ => {
+                candidates.push(invalid_module(
+                    &app_name,
+                    (&app_root_string, &workspace_root_string),
+                    &environment,
+                    &evidence,
+                    name,
+                    "Module type must explicitly declare entry or feature for an application candidate; HAR/HSP libraries are not application choices",
+                    budget,
+                )?);
+                continue;
+            }
+        }
         let variants = variants(module)?;
         for variant in variants {
             budget.reserve(&[
@@ -419,7 +440,7 @@ fn inspect_application(
             ])?;
             let id = project_id(&environment, &app_root_string, name, &variant);
             let mut reasons = vec![
-                "Read-only JSON5 inspection found a declared Harmony application module".into(),
+                "Read-only JSON5 inspection found a declared Harmony HAP application module; library modules are excluded".into(),
             ];
             if !matches!(environment, Environment::WindowsLocal) {
                 reasons.push("Environment identity is preserved; native execution for this environment is unsupported".into());
@@ -444,9 +465,23 @@ fn inspect_application(
         }
     }
     if candidates.is_empty() {
-        return Err("Supplied source path is not inside a declared application module".into());
+        return Err("No declared entry/feature application module matches this path; HAR/HSP libraries are not standalone application candidates".into());
     }
     Ok(candidates)
+}
+
+fn declared_library_contains_input(modules: &[Value], input: &Path, app_root: &Path) -> bool {
+    modules.iter().any(|module| {
+        let Some(name) = module.get("name").and_then(Value::as_str) else { return false; };
+        let Some(source) = module.get("srcPath").and_then(Value::as_str) else { return false; };
+        if name.is_empty() || metadata_field(source).is_err() { return false; }
+        let Ok(root) = safe_module_root(app_root, source) else { return false; };
+        if !input.starts_with(&root) && !root.starts_with(input) { return false; }
+        let Ok(manifest) = read_json5_within(&root.join("src/main/module.json5"), &root) else { return false; };
+        let Some(config) = manifest.get("module").filter(|value| value.is_object()) else { return false; };
+        config.get("name").and_then(Value::as_str) == Some(name)
+            && matches!(config.get("type").and_then(Value::as_str), Some("har" | "shared"))
+    })
 }
 
 fn ancestors(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
@@ -718,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn app_root_lists_all_declared_modules() {
+    fn app_root_lists_hap_modules_without_shared_libraries() {
         let root = fixture();
         let candidates = inspect_directory(
             &root,
@@ -726,8 +761,46 @@ mod tests {
             evidence(&root, Environment::WindowsLocal),
         )
         .unwrap();
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].project.module, "entry");
         assert!(candidates.iter().all(|candidate| !candidate.auto_eligible));
+    }
+
+    #[test]
+    fn declared_library_paths_identify_the_containing_application() {
+        let library = fixture().join("feature/src/main/module.json5");
+        let candidates = inspect_directory(
+            &library,
+            Environment::WindowsLocal,
+            evidence(&library, Environment::WindowsLocal),
+        ).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].project.module, "entry");
+        assert!(candidates[0].valid && !candidates[0].auto_eligible);
+    }
+
+    #[test]
+    fn hap_feature_remains_selectable_while_har_and_hsp_are_not_applications() {
+        let repo = tempfile::tempdir().unwrap();
+        make_monorepo_app(repo.path());
+        let modules = [("entry", "entry"), ("screen", "feature"), ("utils", "har"), ("common", "shared")];
+        for (name, kind) in modules {
+            let root = repo.path().join(name).join("src/main");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("module.json5"),
+                serde_json::json!({"module":{"name":name,"type":kind}}).to_string()).unwrap();
+        }
+        fs::write(repo.path().join("build-profile.json5"),
+            serde_json::json!({"modules":modules.map(|(name,_)|
+                serde_json::json!({"name":name,"srcPath":name}))}).to_string()).unwrap();
+        let candidates = inspect_directory(repo.path(), Environment::WindowsLocal,
+            evidence(repo.path(), Environment::WindowsLocal)).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|item| item.valid && matches!(item.project.module.as_str(), "entry" | "screen")));
+        let library = repo.path().join("common/src/main");
+        let from_library = inspect_directory(&library, Environment::WindowsLocal,
+            evidence(&library, Environment::WindowsLocal)).unwrap();
+        assert_eq!(from_library.len(), 2); // Multiple application modules still need a choice.
     }
 
     #[cfg(unix)]
@@ -1011,7 +1084,7 @@ mod tests {
             fs::create_dir_all(temp.path().join(&name).join("src/main")).unwrap();
             fs::write(
                 temp.path().join(&name).join("src/main/module.json5"),
-                serde_json::json!({"module":{"name":name}}).to_string(),
+                serde_json::json!({"module":{"name":name,"type":"entry"}}).to_string(),
             )
             .unwrap();
             modules.push(serde_json::json!({"name":name,"srcPath":name,

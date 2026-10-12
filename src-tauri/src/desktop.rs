@@ -640,6 +640,7 @@ impl Engine {
         }
         // History is separate from current-window evidence, including when its path matches.
         if let Some(store) = self.store.as_ref().filter(|_| matches!(mode, DiscoveryMode::Explicit)) {
+            let mut inspected_roots: Vec<(Environment, String, Vec<Candidate>)> = Vec::new();
             for project in store.history() {
                 let evidence = Evidence {
                     source: EvidenceSource::History,
@@ -653,14 +654,38 @@ impl Engine {
                     verifiable: false,
                     active_scope: false,
                 };
-                if let Ok(items) = inspect_directory(
-                    Path::new(&project.app_root),
-                    project.environment.clone(),
-                    evidence,
-                ) {
-                    for item in items {
+                if !inspected_roots.iter().any(|(environment, root, _)| {
+                    environment == &project.environment && root == &project.app_root
+                }) {
+                    let items = inspect_directory(
+                        Path::new(&project.app_root),
+                        project.environment.clone(),
+                        evidence,
+                    ).unwrap_or_default().into_iter().filter(|item| {
+                        // Cache only selections that actually exist in the bounded history,
+                        // not every variant inspected in every root (at most 64 records).
+                        store.history().iter().any(|selected| {
+                            selected.environment == project.environment
+                                && selected.app_root == project.app_root
+                                && selected.id == item.project.id
+                                && selected.module == item.project.module
+                                && selected.variant == item.project.variant
+                        })
+                    }).collect();
+                    inspected_roots.push((project.environment.clone(), project.app_root.clone(), items));
+                }
+                if let Some((_, _, items)) = inspected_roots.iter().find(|(environment, root, _)| {
+                    environment == &project.environment && root == &project.app_root
+                }) {
+                    // A historical selection is one module/variant, not every module in its
+                    // application directory. Removed/library selections cannot create new history.
+                    for item in items.iter().filter(|item| {
+                        item.project.id == project.id
+                            && item.project.module == project.module
+                            && item.project.variant == project.variant
+                    }) {
                         if !candidates.iter().any(|c| c.id == item.id) {
-                            candidates.push(item);
+                            candidates.push(item.clone());
                         }
                     }
                 }
