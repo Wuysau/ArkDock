@@ -101,6 +101,14 @@
       "FILLED_PENDING_USER_SEND",
       "UNKNOWN"
     ],
+    "NativeControlAction": ["pointerDown", "pointerMove", "pointerUp", "pointerCancel", "textCommit", "keyPress", "setOrientation", "setResolution", "setColorMode", "navigatePage", "queryRouter", "switchProfile"],
+    "NativeControlPhase": ["queued", "commandAccepted", "awaitingFrame", "observed", "failed", "cancelled", "timedOut", "blocked"],
+    "NativeControlAvailability": ["available", "experimental", "blocked", "unavailable"],
+    "PreviewOrientation": ["portrait", "landscape"],
+    "PreviewColorMode": ["light", "dark"],
+    "PreviewKey": ["enter", "backspace", "delete", "tab", "escape", "arrowUp", "arrowDown", "arrowLeft", "arrowRight", "home", "end"],
+    "DeviceRuntimeKind": ["unknown", "emulator", "physicalDevice"],
+    "DeviceRuntimeAction": ["discover", "select", "deploy", "start", "stop", "capture", "disconnect", "cancel"],
     "DeliveryMode": [
       "native",
       "assisted",
@@ -108,6 +116,33 @@
     ]
   },
   "structs": {
+    "NativeControlIdentity": {
+      "workspaceId": "string", "sessionId": "string", "buildId": "string", "generation": "u64", "width": "u32", "height": "u32"
+    },
+    "NativeControlRequest": {
+      "identity": "NativeControlIdentity", "action": "NativeControlAction", "gestureId": "string?", "x": "u32?", "y": "u32?", "text": "string?", "key": "PreviewKey?", "orientation": "PreviewOrientation?", "colorMode": "PreviewColorMode?", "page": "string?", "profileId": "string?", "width": "u32?", "height": "u32?", "dpi": "u32?"
+    },
+    "NativeControlReceipt": {
+      "operationId": "string", "identity": "NativeControlIdentity", "action": "NativeControlAction", "phase": "NativeControlPhase", "commandAccepted": "bool", "frameObserved": "bool", "pixelsChanged": "bool", "configurationConfirmed": "bool", "currentRoute": "string?", "frameSequence": "u64?", "requestedAt": "u64", "observedAt": "u64", "reason": "string"
+    },
+    "NativeControlCapability": {
+      "name": "string", "status": "NativeControlAvailability", "reason": "string"
+    },
+    "PreviewDeviceProfile": {
+      "id": "string", "label": "string", "deviceType": "string", "width": "u32", "height": "u32", "dpi": "u32", "shape": "string", "projectModel": "string", "requiresRestart": "bool", "status": "NativeControlAvailability", "reason": "string"
+    },
+    "NativeControlState": {
+      "identity": "NativeControlIdentity?", "experimentalEnabled": "bool", "inputReady": "bool", "capabilities": "NativeControlCapability[]", "operations": "NativeControlReceipt[]", "pages": "string[]", "currentPage": "string?", "profiles": "PreviewDeviceProfile[]", "currentProfileId": "string", "orientation": "PreviewOrientation", "colorMode": "PreviewColorMode", "width": "u32", "height": "u32", "dpi": "u32", "reason": "string"
+    },
+    "DeviceRuntimeTarget": {
+      "id": "string", "label": "string", "kind": "DeviceRuntimeKind", "connectionState": "string", "reason": "string"
+    },
+    "DeviceRuntimeState": {
+      "identity": "NativeControlIdentity?", "kind": "DeviceRuntimeKind", "hdcPath": "string?", "toolSha256": "string?", "hdcPresent": "bool", "targets": "DeviceRuntimeTarget[]", "selectedTargetId": "string?", "phase": "string", "deploymentReady": "bool", "signatureStatus": "string", "foregroundVerified": "bool", "frameReady": "bool", "reason": "string"
+    },
+    "DeviceRuntimeRequest": {
+      "identity": "NativeControlIdentity", "action": "DeviceRuntimeAction", "targetId": "string?", "kind": "DeviceRuntimeKind", "connectionConsent": "bool", "deploymentConsent": "bool"
+    },
     "MotionMetrics": {
       "frames": "u64",
       "coalescedUpdates": "u64",
@@ -455,6 +490,12 @@
     }
   },
   "commandResponses": {
+    "preview_control_state": { "rust": "NativeControlState", "typescript": "NativeControlState", "error": "String" },
+    "preview_control_enable": { "rust": "NativeControlState", "typescript": "NativeControlState", "error": "String" },
+    "preview_control_submit": { "rust": "NativeControlReceipt", "typescript": "NativeControlReceipt", "error": "String" },
+    "preview_control_cancel": { "rust": "NativeControlReceipt", "typescript": "NativeControlReceipt", "error": "String" },
+    "device_runtime_state": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "String" },
+    "device_runtime_action": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "String" },
     "get_motion_metrics": {
       "rust": "MotionMetrics",
       "typescript": "MotionMetrics",
@@ -572,6 +613,12 @@
     }
   },
   "commands": {
+    "preview_control_state": { "scope": "RequestScope" },
+    "preview_control_enable": { "scope": "RequestScope", "enabled": "bool" },
+    "preview_control_submit": { "scope": "RequestScope", "request": "NativeControlRequest" },
+    "preview_control_cancel": { "scope": "RequestScope", "identity": "NativeControlIdentity" },
+    "device_runtime_state": { "scope": "RequestScope" },
+    "device_runtime_action": { "scope": "RequestScope", "request": "DeviceRuntimeRequest" },
     "get_motion_metrics": {
       "scope": "RequestScope"
     },

@@ -19,6 +19,7 @@ use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
 mod agent_delivery;
 mod inspection;
+mod native_controls;
 mod visibility;
 use inspection::{DataAction, DataResult, PendingInspection};
 use std::collections::VecDeque;
@@ -220,6 +221,9 @@ struct Engine {
     inspection_anchor: Option<BinaryFrame>,
     last_inspection_at: u64,
     last_selection_sync: u64,
+    controls: native_controls::Controls,
+    device_runtime: crate::preview::device_runtime::DeviceRuntimeAdapter,
+    device_sdk: Option<PathBuf>,
     native_visible: Option<bool>,
     last_visibility_sync: u64,
     last_visibility_emit: u64,
@@ -315,6 +319,7 @@ impl Engine {
             return;
         };
         let visible = visibility::visible(self.own_handle);
+        if !visible { self.backend.cancel_controls(); }
         if self.native_visible != Some(visible)
             || now().saturating_sub(self.last_visibility_emit) >= 1000
         {
@@ -324,6 +329,7 @@ impl Engine {
         }
     }
     fn publish(&mut self) {
+        self.sync_control_lifecycle();
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
         if let Some(selections) = &self.selections {
@@ -350,6 +356,9 @@ impl Engine {
         });
     }
     fn suspend_execution(&mut self) {
+        self.backend.cancel_controls();
+        self.controls.reset();
+        self.device_runtime.cancel();
         self.inspection_tree = None;
         self.inspection_anchor = None;
         if let Some(pending) = self.inspection.take() {
@@ -709,6 +718,7 @@ impl Engine {
                 }
             }
             Action::Refresh => {
+                self.backend.cancel_controls();
                 self.current_target()?;
                 if self.snapshot.phase == Phase::Stopped {
                     let project = self.snapshot.project.clone().ok_or("PROJECT_REQUIRED")?;
@@ -724,6 +734,9 @@ impl Engine {
                 self.scheduler.request_refresh(now());
             }
             Action::Stop => {
+                self.backend.cancel_controls();
+                self.controls.reset();
+                self.device_runtime.cancel();
                 if let Ok(mut frames) = self.frames.lock() {
                     frames.clear();
                 }
@@ -787,6 +800,7 @@ impl Engine {
                 point,
             } => {
                 self.current_target()?;
+                self.ensure_native_surface_ready()?;
                 let status = self.scheduler.status();
                 if self.snapshot.phase != Phase::Running
                     || status.stale
@@ -1356,7 +1370,7 @@ async fn click_preview(
     x: u32,
     y: u32,
 ) -> Result<AppSnapshot, String> {
-    if build_id.len() > 256 || x >= 360 || y >= 640 {
+    if build_id.len() > 256 || x >= crate::preview::frames::MAX_SURFACE_DIMENSION || y >= crate::preview::frames::MAX_SURFACE_DIMENSION {
         return Err("INVALID_NATIVE_INPUT".into());
     }
     request(
@@ -1402,6 +1416,12 @@ pub fn run() {
             enable_binary_preview_frames,
             disable_binary_preview_frames,
             read_preview_frame,
+            native_controls::preview_control_state,
+            native_controls::preview_control_enable,
+            native_controls::preview_control_submit,
+            native_controls::preview_control_cancel,
+            native_controls::device_runtime_state,
+            native_controls::device_runtime_action,
             inspection::inspector_get_capabilities,
             inspection::inspector_get_tree,
             inspection::selection_create,
@@ -1491,6 +1511,9 @@ pub fn run() {
                     inspection_anchor: None,
                     last_inspection_at: 0,
                     last_selection_sync: 0,
+                    controls: native_controls::Controls::default(),
+                    device_runtime: crate::preview::device_runtime::DeviceRuntimeAdapter::new(None),
+                    device_sdk: None,
                     native_visible: None,
                     last_visibility_sync: 0,
                     last_visibility_emit: 0,
@@ -1559,6 +1582,8 @@ pub fn run() {
                     }
                     engine.drain_events();
                     engine.tick();
+                    engine.sync_control_lifecycle();
+                    engine.poll_native_controls();
                     engine.poll_inspection();
                     engine.poll_assisted();
                     engine.agents.sync(&engine.snapshot, now());

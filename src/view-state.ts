@@ -1,4 +1,4 @@
-import type { AppSnapshot, Candidate, NativeFrame, Phase } from './ipc/model.ts';
+import type { AppSnapshot, Candidate, DeviceRuntimeState, NativeControlState, NativeFrame, Phase } from './ipc/model.ts';
 import type { PreviewFrame } from './preview/frame-types.ts';
 import { isBinaryFrame } from './preview/frame-types.ts';
 import { hasDockCandidate } from './request-state.ts';
@@ -41,7 +41,7 @@ export function phaseText(phase: Phase): string {
 export type BindingState = 'unbound' | 'candidate' | 'binding' | 'bound' | 'unavailable';
 export type WorkspaceState = 'unidentified' | 'discovering' | 'selecting' | 'untrusted' | 'ready' | 'unavailable';
 export type PreviewState = 'unavailable' | 'idle' | 'building' | 'waitingFrame' | 'running' | 'stale' | 'stopped' | 'error';
-export type CapabilityStatus = 'available' | 'unsupported' | 'unavailable' | 'pending';
+export type CapabilityStatus = 'available' | 'unsupported' | 'unavailable' | 'pending' | 'experimental' | 'blocked';
 export interface UiCapability { status: CapabilityStatus; reason: string }
 export interface UiState {
   binding: BindingState;
@@ -87,7 +87,7 @@ export function mapFramePoint(frame: Pick<NativeFrame, 'width' | 'height'>,
 }
 
 /** These dimensions describe confirmed backend state, never a timer or a predicted command result. */
-export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | null): UiState {
+export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | null, control?: NativeControlState | null, device?: DeviceRuntimeState | null): UiState {
   const binding: BindingState = state?.phase === 'unsupported' ? 'unavailable'
     : hasDockCandidate(state?.dockHint) ? 'candidate' : state?.target ? 'bound' : 'unbound';
   const workspace: WorkspaceState = state?.phase === 'discovering' ? 'discovering'
@@ -111,6 +111,13 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
   const click = gate ?? (!state?.backend.canClick ? capability('unsupported', '当前原生后端未提供点击输入')
     : inputAllowed ? capability('available', '点击当前有效原生画面')
       : capability('pending', preview === 'stale' || preview === 'error' ? '旧画面不可交互，等待当前构建恢复' : '等待当前构建的有效首帧'));
+  const nativeCapability = (name: string, reason: string): UiCapability => {
+    if (gate) return gate;
+    const actual = control?.capabilities.find((item) => item.name === name);
+    return actual ? capability(actual.status, actual.reason) : capability('unavailable', control ? reason : '等待原生控制能力状态');
+  };
+  const deviceCapability = (kind: 'emulator' | 'physicalDevice'): UiCapability => gate ?? capability('blocked', device?.reason
+    || (kind === 'emulator' ? '尚未核验合法安装的鸿蒙虚拟设备、签名部署与真实画面传输' : '需要主动选择设备并授权连接；签名部署与真实设备画面尚待接入'));
   const bindingLabels: Record<BindingState, string> = {
     unbound: '未绑定', candidate: '松开以连接', binding: '正在连接',
     bound: state?.target ? `已连接到 ${state.target.app}` : '已连接', unavailable: '窗口联动不可用',
@@ -133,14 +140,14 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
       refresh: gate ?? capability('available', '重新构建当前受信任工程'),
       stop: !state ? capability('pending', '等待桌面后端') : state.sessionId && state.phase !== 'stopped'
         ? capability('available', '停止此工具拥有的原生预览资源') : capability('unavailable', '当前没有可停止的预览会话'),
-      swipe: capability('unsupported', state?.backend.canSwipe ? '滑动能力尚未接入受控 IPC' : '当前后端未提供滑动输入'),
-      text: capability('unsupported', state?.backend.canText ? '文字输入尚未接入受控 IPC' : '当前后端未提供文字与输入法输入'),
-      rotate: capability('unsupported', state?.backend.canRotate ? '设备方向尚未接入受控 IPC' : '当前后端未提供设备方向切换'),
-      page: capability('unsupported', '当前后端未提供页面或组件切换'),
-      device: capability('unsupported', '当前后端未提供设备配置切换'),
-      appTheme: capability('unsupported', '当前后端未提供被预览应用主题切换'),
-      emulator: capability('unsupported', '当前后端未接入模拟器运行'),
-      physicalDevice: capability('unsupported', '当前后端未接入真机运行'),
+      swipe: nativeCapability('touch', '当前后端未提供连续触控'),
+      text: nativeCapability('text', '当前后端未提供文字提交；完整 IME 事务未接入'),
+      rotate: nativeCapability('orientation', '当前后端未提供原生设备方向配置'),
+      page: nativeCapability('page', '当前编译产物没有核验的可切换页面'),
+      device: nativeCapability('profile', '当前 SDK 没有核验的可切换设备 Profile'),
+      appTheme: nativeCapability('colorMode', '当前后端未提供应用主题配置'),
+      emulator: deviceCapability('emulator'),
+      physicalDevice: deviceCapability('physicalDevice'),
     },
   };
 }

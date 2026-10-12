@@ -1,5 +1,8 @@
 //! Bounded SDK discovery and the exact locally verified Windows Previewer profile.
 pub mod build;
+pub mod configuration;
+pub mod control;
+pub mod device_runtime;
 pub mod environment;
 pub mod frames;
 #[cfg(windows)]
@@ -72,6 +75,36 @@ pub struct NativePreviewer {
 }
 
 impl NativePreviewer {
+    pub fn request_control(
+        &self,
+        request: crate::ipc::model::NativeControlRequest,
+        operation_id: String,
+    ) -> Result<control::ControlReceiver, String> {
+        #[cfg(windows)]
+        {
+            self.runtime.as_ref().ok_or("PREVIEW_SESSION_REQUIRED")?.control(request, operation_id)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (request, operation_id);
+            Err("UNSUPPORTED_PLATFORM".into())
+        }
+    }
+
+    pub fn cancel_controls(&self) {
+        #[cfg(windows)]
+        if let Some(runtime) = &self.runtime { runtime.cancel_controls(); }
+    }
+
+    pub fn control_runtime_state(&self) -> Option<control::RuntimeControlState> {
+        #[cfg(windows)]
+        { self.runtime.as_ref().map(|runtime| runtime.control_runtime_state()) }
+        #[cfg(not(windows))]
+        { None }
+    }
+
+    pub fn configured_sdk(&self) -> Option<PathBuf> { self.sdk.clone() }
+
     pub fn request_inspection(
         &self,
         command: crate::inspector::InspectorCommand,
@@ -331,7 +364,7 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         mode: "nativePreviewer".into(),
         available,
         reason: if available {
-            "HarmonyOS 26.0.0.105：Stage 默认目标、360×640、点击；PreviewBuild 刷新重启运行时，不保留组件状态；其他能力未支持".into()
+            "HarmonyOS 26.0.0.105：Stage phone 360×640 点击基线；新增官方控制命令为未验收实验入口，需单独启用；PreviewBuild 刷新重启运行时".into()
         } else {
             reason
         },

@@ -68,6 +68,9 @@ export function SelectionPanel({ selection, stale, candidates, scope, bridge, ch
   return <section className="selection-panel" aria-label="选择组件详情" data-testid="selection-panel">
     <header><div><h3>{node?.componentType ?? '截图区域'}</h3><span className="selection-kind">{node ? 'ArkUI 组件' : '区域选择'}</span></div><button className="icon-button" aria-label="关闭组件详情" onClick={close}><Icon name="close" size={17} /></button></header>
     {stale && <p role="alert">EXPIRED · 工程、构建或画面已改变，请重新选择。</p>}
+    <label htmlFor="selection-instruction">修改意见</label><textarea id="selection-instruction" maxLength={8192} value={instruction} disabled={working || stale} placeholder="描述要如何修改这个组件…" onChange={(event) => setInstruction(event.target.value)} />
+    <AgentDeliveryPanel selection={selection} scope={scope} bridge={bridge} disabled={working || stale} expired={stale} hasInstruction={Boolean(instruction.trim())} save={save} busy={setWorking} />
+    <details className="selection-evidence"><summary>组件与截图详情</summary>
     <dl className="selection-summary"><dt>工程</dt><dd>{selection.workspaceName}</dd>
       {node?.page && <><dt>页面</dt><dd>{node.page}</dd></>}
       <dt>源码位置</dt><dd><span className={`selection-source-state ${source.status}`}>{sourceLabel}</span><code>{source.relativePath ?? '结合组件和截图定位'}{source.line ? `:${source.line}` : ''}</code></dd>
@@ -76,9 +79,8 @@ export function SelectionPanel({ selection, stale, candidates, scope, bridge, ch
     {source.status !== 'verified' && <p className="selection-source-note">复制内容会提示 Agent 先核对源码，避免只按行号修改。</p>}
     {candidates.length > 1 && <label>选择命中组件<select aria-label="选择命中组件" value={node?.nodeId ?? ''} disabled={working || stale} onChange={(event) => { const candidate = candidates.find((item) => item.nodeId === event.target.value); if (candidate) choose(candidate); }}>{candidates.map((candidate) => <option key={candidate.nodeId} value={candidate.nodeId}>{candidate.componentType ?? '未知'} · #{candidate.nodeId} · 深度 {candidate.depth}</option>)}</select></label>}
     {images.length > 0 && <div className="selection-images">{images.map((url, index) => url && <img key={url} src={url} alt={index ? '选择区域裁剪' : '真实原生截图'} />)}</div>}
-    <label htmlFor="selection-instruction">修改意见</label><textarea id="selection-instruction" maxLength={8192} value={instruction} disabled={working || stale} placeholder="描述要如何修改这个组件…" onChange={(event) => setInstruction(event.target.value)} />
-    <AgentDeliveryPanel selection={selection} scope={scope} bridge={bridge} disabled={working || stale} expired={stale} hasInstruction={Boolean(instruction.trim())} save={save} busy={setWorking} />
     <div className="selection-actions"><button disabled={working || stale} onClick={() => void run('export')}>导出截图</button><button disabled={working || stale} onClick={() => void run('crop')}>导出裁剪</button></div>
+    </details>
     <details className="selection-technical"><summary>定位与技术详情</summary>
       <p>{source.reason}</p><p>{selection.inspectionReason}</p>
       <dl><dt>选择 ID</dt><dd><code>{selection.selectionId}</code></dd><dt>工作区 ID</dt><dd><code>{selection.workspaceId}</code></dd>

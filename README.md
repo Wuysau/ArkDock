@@ -16,6 +16,8 @@ The current `dev` source includes magnetic docking effects, Orb/Hidden display m
 
 The supported native profile uses HarmonyOS SDK/Previewer 26.0.0.105 (API 26), verified tool fingerprints, a default Stage target, `pages/Index`, and a 360×640 surface. It can build and run Previewer without opening DevEco Studio GUI. Preview rebuilds restart the runtime and reset component state; they are not state-preserving hot reload.
 
+The source also contains an opt-in experimental adapter for the public OpenHarmony Previewer control protocol: continuous touch, committed Unicode/key input, app color mode, admitted compiled-page navigation, and native orientation/resolution changes. These additions are **NOT_RUN — awaiting user acceptance** on the commercial SDK; command acknowledgements, frame observation, and configuration confirmation remain separate. Full native IME, additional device-profile restarts, and emulator/physical-device execution are blocked by their documented interface or runtime requirements. See [Native controls and per-feature acceptance steps](docs/native-controls/README.md).
+
 ArkDock currently targets Windows 11 x64. WSL and remote project identities are retained, but native preview execution for those environments is unsupported. Simulator, device, arbitrary SDK versions, state-preserving hot reload, and full IME input are not claimed as supported.
 
 ## Build from source

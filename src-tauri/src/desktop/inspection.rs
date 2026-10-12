@@ -3,6 +3,12 @@ use super::*;
 
 pub(super) enum DataAction {
     InspectorCapabilities,
+    ControlState,
+    ControlEnable(bool),
+    ControlSubmit(NativeControlRequest),
+    ControlCancel(NativeControlIdentity),
+    DeviceState,
+    DeviceAction(DeviceRuntimeRequest),
     InspectorTree(BinaryFrameMetadata),
     SelectionCreate(SelectionDraft),
     SelectionGet(String),
@@ -55,6 +61,7 @@ impl Engine {
         Ok(())
     }
     fn validate_display_frame(&self, frame: &BinaryFrameMetadata) -> Result<BinaryFrame, String> {
+        self.ensure_native_surface_ready()?;
         if self.snapshot.phase != Phase::Running
             || self.snapshot.build.stale
             || self.snapshot.build.error.is_some()
@@ -115,6 +122,12 @@ impl Engine {
             }
             let observed = now();
             let data = match action {
+                DataAction::ControlState => json_result(self.control_state()),
+                DataAction::ControlEnable(enabled) => json_result(self.enable_controls(enabled)?),
+                DataAction::ControlSubmit(request) => json_result(self.submit_control(request)?),
+                DataAction::ControlCancel(identity) => json_result(self.cancel_control(identity)?),
+                DataAction::DeviceState => json_result(self.device_state()),
+                DataAction::DeviceAction(request) => json_result(self.device_action(request)?),
                 DataAction::InspectorCapabilities => {
                     json_result(crate::inspector::capabilities(&self.snapshot.backend))
                 }

@@ -200,7 +200,7 @@ impl BuildCoordinator {
             metadata.generation,
             metadata.sequence,
         )?;
-        crate::preview::frames::validate_binary_frame(frame)?;
+        crate::preview::frames::validate_binary_frame_envelope(frame)?;
         self.last_frame_sequence = Some(metadata.sequence);
         self.displayed_generation = Some(metadata.generation);
         Ok(())

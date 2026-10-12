@@ -2,13 +2,14 @@
 //! Public OpenHarmony sources informed experiments; actual commercial binary receipts
 //! are required by the native gate. No unverified version enters this adapter.
 use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
-use super::frames::{parse_jpeg40, BinaryFrameMailbox};
+use super::control::{self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand};
+use super::frames::{parse_jpeg40_for_surface, BinaryFrameMailbox};
 use super::NativePoint;
 use crate::inspector::{
     InspectionReceiver, InspectionRequest, InspectorCommand, RawInspectionResponse,
     INSPECTION_TIMEOUT_MS,
 };
-use crate::ipc::model::ProjectRef;
+use crate::ipc::model::{NativeControlAction, NativeControlPhase, NativeControlRequest, ProjectRef};
 use crate::scheduler::BuildTask;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -33,6 +34,8 @@ use windows_sys::Win32::System::Pipes::*;
 
 #[path = "windows_process.rs"]
 mod process;
+#[path = "windows_control.rs"]
+mod control_worker;
 
 const FRAME_LIMIT: usize = 1024 * 1024;
 const LOG_LIMIT: u64 = 16 * 1024 * 1024;
@@ -102,6 +105,8 @@ struct WorkerContext<'a> {
     inputs: &'a mpsc::Receiver<NativePoint>,
     messages: &'a mpsc::SyncSender<String>,
     inspections: &'a mpsc::Receiver<InspectionRequest>,
+    controls: &'a Mutex<ControlMailbox>,
+    control_state: &'a Mutex<RuntimeControlState>,
 }
 
 pub(super) fn verified_root(root: &Path, version: &str) -> Option<PathBuf> {
@@ -166,6 +171,9 @@ pub(super) struct Runtime {
     thread: Option<JoinHandle<()>>,
     inputs: mpsc::SyncSender<NativePoint>,
     inspections: mpsc::SyncSender<InspectionRequest>,
+    controls: Arc<Mutex<ControlMailbox>>,
+    control_state: Arc<Mutex<RuntimeControlState>>,
+    task: BuildTask,
     pub completed: mpsc::Receiver<Completed>,
     pub frames: Arc<Mutex<BinaryFrameMailbox>>,
     pub messages: mpsc::Receiver<String>,
@@ -180,6 +188,11 @@ impl Runtime {
         let (message_tx, messages) = mpsc::sync_channel(16);
         let worker_stop = stop.clone();
         let worker_frames = frames.clone();
+        let controls = Arc::new(Mutex::new(ControlMailbox::default()));
+        let control_state = Arc::new(Mutex::new(RuntimeControlState::default()));
+        let worker_controls = controls.clone();
+        let worker_control_state = control_state.clone();
+        let runtime_task = task.clone();
         let thread = thread::spawn(move || {
             let mut reported = false;
             let outcome = run(
@@ -192,6 +205,8 @@ impl Runtime {
                     inputs: &input_receiver,
                     messages: &message_tx,
                     inspections: &inspection_receiver,
+                    controls: &worker_controls,
+                    control_state: &worker_control_state,
                 },
                 || {
                     let _ = completed_tx.try_send((task.clone(), Ok(())));
@@ -207,24 +222,79 @@ impl Runtime {
                     }
                 }
             }
+            if let Ok(mut state) = worker_control_state.lock() {
+                state.input_ready = false;
+                state.reason = "Native runtime stopped; pending input cannot continue".into();
+            }
+            worker_stop.store(true, Ordering::Release);
+            if let Ok(mut mailbox) = worker_controls.lock() {
+                mailbox.cancel_all();
+                if let Some(Some(request)) = mailbox.take_cancel() {
+                    request.send(request.receipt(NativeControlPhase::Cancelled, "Owned native runtime stopped"));
+                }
+            }
         });
         Self {
             stop,
             thread: Some(thread),
             inputs,
             inspections,
+            controls,
+            control_state,
+            task: runtime_task,
             completed,
             frames,
             messages,
         }
     }
     pub fn click(&self, point: NativePoint) -> Result<(), String> {
-        if point.x >= 360 || point.y >= 640 {
+        // Hold the state through enqueue. A cancellation cannot mark input
+        // paused and drain the old queue before this point is actually queued.
+        let state = self.control_state.lock().map_err(|_| "NATIVE_CONTROL_STATE")?;
+        if !state.input_ready { return Err("NATIVE_INPUT_PAUSED".into()); }
+        if state.width != 360 || state.height != 640 {
+            return Err("LEGACY_INPUT_SURFACE_IDENTITY_REQUIRED: dynamic surfaces require typed native control".into());
+        }
+        if point.x >= state.width || point.y >= state.height {
             return Err("INPUT_OUTSIDE_SURFACE".into());
         }
         self.inputs
             .try_send(point)
             .map_err(|_| "INPUT_QUEUE_BUSY".into())
+    }
+    pub fn control(&self, request: NativeControlRequest, operation_id: String) -> Result<ControlReceiver, String> {
+        control::validate_request(&request)?;
+        if operation_id.is_empty() || operation_id.len() > 128
+            || operation_id.chars().any(char::is_control) { return Err("NATIVE_OPERATION_ID_INVALID".into()); }
+        let state = self.control_runtime_state();
+        if self.stop.load(Ordering::Acquire) || !control::identity_matches(&request.identity, &self.task, &state) {
+            return Err("NATIVE_CONTROL_STALE_IDENTITY".into());
+        }
+        if !state.input_ready && request.action != NativeControlAction::PointerCancel {
+            return Err(format!("NATIVE_CONTROL_PAUSED: {}", state.reason));
+        }
+        let (reply, response) = mpsc::sync_channel(8);
+        let queued = ControlRequest { request, operation_id, reply, requested_at: super::now_ms(), legacy_click: false };
+        let cancelling = queued.request.action == NativeControlAction::PointerCancel;
+        let mut mailbox = self.controls.lock().map_err(|_| "NATIVE_CONTROL_MAILBOX")?;
+        {
+            let mut current = self.control_state.lock().map_err(|_| "NATIVE_CONTROL_STATE")?;
+            if !control::identity_matches(&queued.request.identity, &self.task, &current)
+                || !cancelling && !current.input_ready { return Err("NATIVE_CONTROL_CHANGED_BEFORE_ENQUEUE".into()); }
+            if cancelling { current.input_ready = false; current.reason = "Safely cancelling native input".into(); }
+        }
+        queued.send(queued.receipt(NativeControlPhase::Queued, "Queued for the owned native command channel"));
+        mailbox.enqueue(queued)?;
+        Ok(response)
+    }
+    pub fn cancel_controls(&self) {
+        if let Ok(mut mailbox) = self.controls.lock() {
+            if let Ok(mut state) = self.control_state.lock() { state.input_ready = false; state.reason = "Safely cancelling native input".into(); }
+            mailbox.cancel_all();
+        }
+    }
+    pub fn control_runtime_state(&self) -> RuntimeControlState {
+        self.control_state.lock().map(|state| state.clone()).unwrap_or_else(|_| RuntimeControlState::stopped())
     }
     pub fn request_inspection(
         &self,
@@ -239,6 +309,7 @@ impl Runtime {
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
+        self.cancel_controls();
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.thread.take() {
             let _ = worker.join();
@@ -353,25 +424,6 @@ impl Pipe {
         }
         Ok(results)
     }
-    fn mouse(&self, command: &str, point: NativePoint) -> Result<(), String> {
-        let mut bytes = serde_json::to_vec(&serde_json::json!({ "version": "1.0.1", "type": "action", "command": command, "args": { "x": point.x, "y": point.y } })).map_err(|e| e.to_string())?;
-        bytes.push(0);
-        unsafe {
-            let mut written = 0;
-            if WriteFile(
-                self.handle,
-                bytes.as_ptr().cast(),
-                bytes.len() as u32,
-                &mut written,
-                null_mut(),
-            ) == 0
-                || written as usize != bytes.len()
-            {
-                return Err("INPUT_PIPE_BACKPRESSURE".into());
-            }
-        }
-        Ok(())
-    }
     fn inspector(&self, command: InspectorCommand) -> Result<(), String> {
         let mut bytes = serde_json::to_vec(&serde_json::json!({
             "version": "1.0.1", "type": "action", "command": command.wire_name(), "args": {}
@@ -390,6 +442,17 @@ impl Pipe {
                 || written as usize != bytes.len()
             {
                 return Err("INSPECTOR_PIPE_BACKPRESSURE".into());
+            }
+        }
+        Ok(())
+    }
+    fn control(&self, command: &WireCommand) -> Result<(), String> {
+        let bytes = command.bytes()?;
+        unsafe {
+            let mut written = 0;
+            if WriteFile(self.handle, bytes.as_ptr().cast(), bytes.len() as u32,
+                &mut written, null_mut()) == 0 || written as usize != bytes.len() {
+                return Err("NATIVE_CONTROL_PIPE_BACKPRESSURE".into());
             }
         }
         Ok(())
@@ -457,6 +520,8 @@ fn run(
         inputs,
         messages,
         inspections,
+        controls,
+        control_state,
     } = context;
     if project.variant != "default"
         || project.module.is_empty()
@@ -630,6 +695,7 @@ fn run(
     )?;
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut websocket = None;
+    let mut control_worker = control_worker::ControlWorker::new(control_state, controls, task);
     while !stop.load(Ordering::Acquire) {
         if let Some(code) = previewer.exit_code()? {
             return Err(format!(
@@ -640,7 +706,7 @@ fn run(
                     .collect::<String>()
             ));
         }
-        command.receive(previewer.pid)?;
+        for message in command.receive(previewer.pid)? { control_worker.route_message(&message); }
         trace.receive(previewer.pid)?;
         if command.connected && tcp_owner(port, previewer.pid) {
             let stream = TcpStream::connect_timeout(
@@ -689,10 +755,10 @@ fn run(
     frames.lock().map_err(|_| "FRAME_MAILBOX")?.set_stream(task);
     let mut first = true;
     let mut sequence = 0;
-    let mut release = None;
     let mut inspection: Option<(InspectionRequest, Instant, u64, u64)> = None;
     let mut inspection_poisoned = false;
     let mut query_id = 0u64;
+    let outcome = (|| -> Result<(), String> {
     while !stop.load(Ordering::Acquire) {
         if let Some(code) = previewer.exit_code()? {
             return Err(format!("PREVIEWER_EXIT: {code}"));
@@ -734,9 +800,9 @@ fn run(
                 }
                 continue;
             }
-            if message.get("result") == Some(&serde_json::Value::Bool(false)) {
-                return Err("NATIVE_COMMAND_REJECTED".into());
-            }
+            // Additional commands fail their own receipts. Only an ambiguous
+            // acknowledgement/release forces the owned runtime to stop.
+            control_worker.receive(&message)?;
         }
         trace.receive(previewer.pid)?;
         if inspection.as_ref().is_some_and(|(_, sent, _, _)| {
@@ -751,7 +817,8 @@ fn run(
             // The wire has no request IDs. Never let a late response satisfy another query.
             inspection_poisoned = true;
         }
-        if !first && inspection.is_none() {
+        if !first { control_worker.tick(&command, inspection.is_some(), inputs)?; }
+        if !first && inspection.is_none() && !control_worker.busy() {
             if let Ok(request) = inspections.try_recv() {
                 if inspection_poisoned {
                     let _ = request
@@ -764,27 +831,30 @@ fn run(
                             inspection = Some((request, Instant::now(), super::now_ms(), query_id));
                         }
                         Err(error) => {
-                            let _ = request.reply.try_send(Err(error));
+                            let _ = request.reply.try_send(Err(error.clone()));
+                            return Err(format!("NATIVE_COMMAND_PIPE_PARTIAL_WRITE: {error}"));
                         }
                     }
                 }
             }
         }
-        if let Some((point, due)) = release {
-            if Instant::now() >= due {
-                command.mouse("MouseRelease", point)?;
-                release = None;
-            }
-        } else if !first {
-            if let Ok(point) = inputs.try_recv() {
-                command.mouse("MousePress", point)?;
-                release = Some((point, Instant::now() + Duration::from_millis(80)));
-            }
-        }
         match socket.read() {
             Ok(Message::Binary(data)) => {
                 sequence += 1;
-                let frame = parse_jpeg40(&data, task, sequence, super::now_ms())?;
+                let (width,height) = control_worker.surface();
+                // During native rotation/resizing, old-dimension frames can be
+                // queued on the socket. Discard them without relabeling pixels.
+                if data.len() >= 40 && data.len() <= FRAME_LIMIT
+                    && data[..4] == [0x12,0x34,0x56,0x78]
+                    && data[12..20] == data[4..12]
+                    && data[20..40].iter().all(|byte| *byte == 0) {
+                    let actual_width = u32::from_be_bytes(data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?);
+                    let actual_height = u32::from_be_bytes(data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?);
+                    if (actual_width != width || actual_height != height)
+                        && control_worker.old_surface_packet(actual_width, actual_height) { continue; }
+                }
+                let frame = parse_jpeg40_for_surface(&data, task, sequence, super::now_ms(), width, height)?;
+                if !control_worker.frame(width, height, sequence, &frame.payload)? { continue; }
                 frames
                     .lock()
                     .map_err(|_| "FRAME_MAILBOX")?
@@ -813,6 +883,11 @@ fn run(
         thread::sleep(Duration::from_millis(16));
     }
     Ok(())
+    })();
+    // The process Job drops immediately after this best-effort release. Even a
+    // failed pipe write cannot leave a live owned Previewer in pressed state.
+    control_worker.cleanup(&command);
+    outcome
 }
 
 #[cfg(test)]

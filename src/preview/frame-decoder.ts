@@ -5,7 +5,7 @@ import { isBinaryFrame } from './frame-types.ts';
 export const FRAME_PROTOCOL_VERSION = 1;
 export const MAX_METADATA_BYTES = 4096;
 export const MAX_JPEG_BYTES = 1024 * 1024 - 40;
-const MAX_PIXELS = 16 * 1024 * 1024;
+const MAX_PIXELS = 4 * 1024 * 1024;
 const idValid = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && new TextEncoder().encode(value).length <= 256;
 const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 
@@ -41,7 +41,8 @@ export function parseBinaryFrame(packet: ArrayBuffer, state: AppSnapshot, previo
   if (!metadata || metadata.protocolVersion !== FRAME_PROTOCOL_VERSION || metadata.format !== 'jpeg'
     || ![metadata.workspaceId, metadata.sessionId, metadata.buildId].every(idValid)
     || !positive(metadata.generation) || !positive(metadata.sequence)
-    || !positive(metadata.width) || metadata.width > 8192 || !positive(metadata.height) || metadata.height > 8192
+    || !positive(metadata.width) || metadata.width < 50 || metadata.width > 3000
+    || !positive(metadata.height) || metadata.height < 50 || metadata.height > 3000
     || metadata.width * metadata.height > MAX_PIXELS || metadata.rotation !== 0
     || !Number.isSafeInteger(metadata.capturedAt) || metadata.capturedAt < 0
     || !positive(metadata.payloadLength) || metadata.payloadLength !== packet.byteLength - 4 - length

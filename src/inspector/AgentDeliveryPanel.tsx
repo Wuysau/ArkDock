@@ -81,7 +81,7 @@ export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired
     </button>
     <div className="composer-actions"><button disabled={disabled || working || !targetId || !hasInstruction} title="只检查当前绑定窗口的输入框；不需要 Agent 会话配对" onClick={() => void inspect()}>检查目标输入框</button></div>
     {offer && <div className="agent-confirmation">
-      <strong>填写到 {offer.app}</strong><p>输入框：{offer.composerName}</p>
+      <strong><span title={offer.app}>填写到 {offer.app}</span><code>PID {offer.pid}</code></strong><p title={offer.composerName}>输入框：{offer.composerName}</p>
       <p>只填写已确认的空输入框，不按 Enter、不点击发送。确认在 30 秒内有效。</p>
       <div className="composer-actions"><button className="primary-button" disabled={disabled || working || !hasInstruction || !usable} onClick={() => void fill()}>确认填入输入框</button>
         <button disabled={working} onClick={() => setOffer(null)}>取消</button></div>

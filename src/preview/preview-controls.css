@@ -1,0 +1,34 @@
+.native-config-toolbar { display: flex; gap: 4px; flex-shrink: 0; }
+.native-config-toolbar .icon-button { min-width: 28px; width: 28px; height: 28px; }
+.orientation-symbol { display: block; width: 10px; height: 16px; border: 1.5px solid currentColor; border-radius: 3px; }
+.orientation-symbol.landscape { width: 16px; height: 10px; }
+.native-preview-host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.native-preview-host[hidden] { display: none; }
+.native-preview-host .empty { inset: 0; }
+.native-surface.is-streaming { touch-action: none; }
+.native-text-capture { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; clip-path: inset(50%); overflow: hidden; pointer-events: none; }
+.native-surface-wrap:has(.native-text-capture:focus) .native-surface { outline: 2px solid var(--accent); outline-offset: -3px; }
+.native-input-toggle { position: absolute; right: 8px; bottom: 8px; z-index: 2; padding: 3px 7px; font-size: 10px; background: var(--glass); }
+.native-controls-settings { margin-bottom: 12px; }
+.native-config-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.native-config-fields label, .native-profile-select, .native-resolution-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }
+.native-config-fields select, .native-profile-select select { width: 100%; }
+.native-profile-select { margin-top: 12px; }
+.profile-reason { margin: 4px 0; font-size: 10px; }
+.native-resolution, .native-control-receipts { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.native-resolution summary, .native-control-receipts summary { cursor: pointer; font-size: 11px; }
+.native-resolution-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }
+.native-resolution-fields input { width: 100%; padding: 5px; }
+.native-control-receipts article { padding: 8px 0; overflow-wrap: anywhere; }
+.native-control-receipts p, .native-control-receipts small { font-size: 10px; color: var(--muted); margin: 4px 0; }
+.native-control-error { display: block; margin: 8px 0; padding: 8px; color: var(--danger); background: var(--glass); border-radius: 8px; overflow-wrap: anywhere; font-size: 11px; }
+.device-runtime-panel { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 4px; scrollbar-width: thin; }
+.device-runtime-panel h3 { margin: 8px 0; }
+.device-runtime-panel .details-list dd { overflow-wrap: anywhere; }
+.device-consent { display: flex; align-items: flex-start; gap: 6px; margin: 12px 0; font-size: 11px; }
+.device-consent input { margin-top: 2px; }
+.device-targets { list-style: none; padding: 0; margin: 12px 0; }
+.device-targets button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; margin: 5px 0; text-align: left; overflow-wrap: anywhere; }
+.device-targets button[aria-pressed="true"] { border-color: var(--accent); }
+.device-targets span { color: var(--muted); font-size: 10px; }
+@media (max-width: 380px) { .toolbar-actions { gap: 4px; } .toolbar-actions .mode-caption { display: none; } .native-config-toolbar { margin-left: auto; } }
