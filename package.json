@@ -9,6 +9,12 @@
     "node": ">=24.18.0"
   },
   "scripts": {
+    "task:hooks": "node tools/install-task-hooks.mjs",
+    "task:begin": "node tools/task-completion.mjs begin",
+    "task:ready": "node tools/task-completion.mjs ready",
+    "task:finish": "node tools/task-completion.mjs finish",
+    "task:recover": "node tools/task-completion.mjs recover-lock",
+    "test:task-hooks": "node --test --test-isolation=none tests/portable/task-completion.test.mjs tests/portable/task-hooks-install.test.mjs",
     "dev": "node tools/desktop.mjs dev",
     "dev:validation": "node tools/desktop.mjs dev --validation",
     "dev:ui": "vite --host 127.0.0.1",
