@@ -59,6 +59,72 @@ struct PairState {
     registration: Option<AgentRegistration>,
     deliveries: BTreeMap<String, QueuedDelivery>,
 }
+
+/// The project, session and target a pairing belongs to.
+///
+/// Observed once when a credential is staged and compared again immediately
+/// before activation, so a pairing can only ever describe the identity it was
+/// prepared for. The same predicate also decides whether a live pairing still
+/// matches the current workspace during heartbeat synchronisation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PairScope {
+    trusted: bool,
+    environment: Environment,
+    workspace_id: String,
+    workspace_root: String,
+    preview_session: String,
+    target_id: String,
+    target_process: ProcessRef,
+}
+
+impl PairScope {
+    fn observe(snapshot: &AppSnapshot) -> Result<Self, String> {
+        let project = snapshot
+            .project
+            .as_ref()
+            .ok_or("AGENT_WORKSPACE_REQUIRED")?;
+        if !snapshot.trusted || project.environment != Environment::WindowsLocal {
+            return Err("AGENT_LOCAL_TRUSTED_WORKSPACE_REQUIRED".into());
+        }
+        let target = snapshot.target.as_ref().ok_or("AGENT_TARGET_REQUIRED")?;
+        let preview_session = snapshot
+            .session_id
+            .as_ref()
+            .ok_or("AGENT_PREVIEW_SESSION_REQUIRED")?;
+        Ok(Self {
+            trusted: snapshot.trusted,
+            environment: project.environment.clone(),
+            workspace_id: project.id.clone(),
+            workspace_root: project.workspace_root.clone(),
+            preview_session: preview_session.clone(),
+            target_id: target.id.clone(),
+            target_process: target.process.clone(),
+        })
+    }
+}
+
+/// A credential staged for a pairing that is not yet authoritative.
+///
+/// It is not a second source of pairing state: the live pair in [`Shared`] stays
+/// authoritative and the staged token authorizes nothing until activation.
+pub(super) struct PreparedPairing {
+    pairing: AgentPairing,
+    target: TargetInfo,
+    preview_session: String,
+    scope: PairScope,
+}
+
+impl PreparedPairing {
+    pub(super) fn pairing(&self) -> &AgentPairing {
+        &self.pairing
+    }
+
+    /// Records where the credential is being persisted, so the activated pairing
+    /// and the file an Agent reads describe the same thing.
+    pub(super) fn set_config_path(&mut self, path: String) {
+        self.pairing.config_path = Some(path);
+    }
+}
 #[derive(Default)]
 struct Shared {
     pair: Option<PairState>,
@@ -78,40 +144,90 @@ impl SessionBridge {
         http::start()
     }
 
-    pub fn pair(
+    /// A bridge with no loopback worker, for tests that drive the pairing and
+    /// delivery state machine directly through [`handle`].
+    #[cfg(test)]
+    pub(super) fn detached() -> Self {
+        Self {
+            shared: Arc::new(Mutex::new(Shared::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            endpoint: "http://127.0.0.1:1".into(),
+        }
+    }
+
+    /// Stages a new credential without touching the live pairing.
+    ///
+    /// The returned token grants nothing until [`Self::activate_pair`] installs
+    /// it, so the caller is free to persist it first and can abandon it if that
+    /// persistence fails.
+    pub(super) fn prepare_pair(
         &self,
         snapshot: &AppSnapshot,
         kind: AgentKind,
         now: u64,
-    ) -> Result<AgentPairing, String> {
-        let project = snapshot
-            .project
-            .as_ref()
-            .ok_or("AGENT_WORKSPACE_REQUIRED")?;
-        if !snapshot.trusted || project.environment != Environment::WindowsLocal {
-            return Err("AGENT_LOCAL_TRUSTED_WORKSPACE_REQUIRED".into());
-        }
+    ) -> Result<PreparedPairing, String> {
+        let scope = PairScope::observe(snapshot)?;
         let target = snapshot.target.clone().ok_or("AGENT_TARGET_REQUIRED")?;
-        let session = snapshot
-            .session_id
-            .clone()
-            .ok_or("AGENT_PREVIEW_SESSION_REQUIRED")?;
         let pairing = AgentPairing {
             pairing_id: random_id()?,
             endpoint: self.endpoint.clone(),
             token: random_id()?,
             config_path: None,
             agent_kind: kind,
-            workspace_id: project.id.clone(),
-            workspace_root: project.workspace_root.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            workspace_root: scope.workspace_root.clone(),
             expires_at: now + 600_000,
         };
+        Ok(PreparedPairing {
+            pairing,
+            target,
+            preview_session: scope.preview_session.clone(),
+            scope,
+        })
+    }
+
+    /// Installs a staged credential and archives the previous pairing in one
+    /// critical section, so at most one pairing is ever live.
+    ///
+    /// The snapshot identity the credential was staged for must still hold, and
+    /// the token of the replaced pairing stops authorizing immediately.
+    #[cfg(test)]
+    pub(super) fn activate_pair(
+        &self,
+        prepared: PreparedPairing,
+        snapshot: &AppSnapshot,
+        now: u64,
+    ) -> Result<AgentPairing, String> {
+        self.commit_pair(prepared, snapshot, now, || Ok(()))
+    }
+
+    /// Serialize the final file swap with all bridge readers. All fallible
+    /// activation checks precede the swap; installing the checked pair cannot
+    /// fail afterward. Disk staging must already have completed off the actor.
+    pub(super) fn commit_pair(
+        &self,
+        prepared: PreparedPairing,
+        snapshot: &AppSnapshot,
+        now: u64,
+        commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<AgentPairing, String> {
+        // Re-check before locking: a project, session, target or trust change
+        // during the credential write must never activate a stale credential.
+        if PairScope::observe(snapshot)? != prepared.scope {
+            return Err("AGENT_PAIR_SCOPE_CHANGED".into());
+        }
+        if now >= prepared.pairing.expires_at {
+            return Err("AGENT_PAIR_EXPIRED".into());
+        }
         let mut shared = self.shared.lock().map_err(|_| "AGENT_BRIDGE_UNAVAILABLE")?;
+        commit()?;
         archive_pair(&mut shared, now);
+        let pairing = prepared.pairing;
         shared.pair = Some(PairState {
             pairing: pairing.clone(),
-            target,
-            preview_session: session,
+            target: prepared.target,
+            preview_session: prepared.preview_session,
             registration: None,
             deliveries: BTreeMap::new(),
         });
@@ -124,6 +240,23 @@ impl SessionBridge {
         if let Ok(mut shared) = self.shared.lock() {
             archive_pair(&mut shared, crate::selection::now_ms());
         }
+    }
+
+    /// Test probe: run one bridge request under `token` against the live pairing.
+    /// Lets pairing tests prove which credential still authorizes.
+    #[cfg(test)]
+    pub(super) fn authorize(
+        &self,
+        token: &str,
+        route: &str,
+        body: Value,
+        now: u64,
+    ) -> Result<Value, String> {
+        let mut shared = self
+            .shared
+            .lock()
+            .map_err(|_| "AGENT_BRIDGE_UNAVAILABLE".to_owned())?;
+        handle(&mut shared, token, route, body, now)
     }
 
     /// Actor heartbeat also revokes queued delivery when preview/trust/build scope changes.
@@ -328,14 +461,13 @@ impl Drop for SessionBridge {
 }
 
 fn pair_scope(pair: &PairState, snapshot: &AppSnapshot) -> bool {
-    snapshot.trusted
-        && snapshot.target.as_ref().is_some_and(|target| {
-            target.id == pair.target.id && target.process == pair.target.process
-        })
-        && snapshot.project.as_ref().is_some_and(|p| {
-            p.id == pair.pairing.workspace_id && p.workspace_root == pair.pairing.workspace_root
-        })
-        && snapshot.session_id.as_ref() == Some(&pair.preview_session)
+    PairScope::observe(snapshot).is_ok_and(|scope| {
+        scope.workspace_id == pair.pairing.workspace_id
+            && scope.workspace_root == pair.pairing.workspace_root
+            && scope.preview_session == pair.preview_session
+            && scope.target_id == pair.target.id
+            && scope.target_process == pair.target.process
+    })
 }
 fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)

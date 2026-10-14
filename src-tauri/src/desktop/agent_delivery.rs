@@ -1,12 +1,31 @@
 //! User-confirmed pairing and asynchronous UIA work, isolated from Previewer actor work.
 use super::inspection::{data_request, decode_data, json_result};
 use super::*;
+use crate::agent::pairing::{CommitPermit, StagedCredential};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 enum AssistedResult {
     Offer(AssistedOffer),
     Fill(AssistedFill),
 }
+
+/// A pairing whose credential file is being written.
+///
+/// The credential is staged before the write and activated only after it is
+/// confirmed durable, so a failed save leaves the previous credential usable and
+/// a credential file that was never activated grants nothing.
+pub(super) struct PendingPair {
+    scope: RequestScope,
+    pairing: AgentPairing,
+    permit: Arc<CommitPermit>,
+    receiver: mpsc::Receiver<Result<StagedCredential, String>>,
+    reply: mpsc::Sender<Result<DataResult, String>>,
+}
+
+/// The write must settle while the calling command is still waiting, otherwise
+/// the command reports its own timeout and the report would be ambiguous.
+const PAIR_COMMIT_TIMEOUT_MS: u64 = 4_000;
+
 pub(super) struct PendingAssisted {
     scope: RequestScope,
     selection: Option<SelectionContext>,
@@ -17,6 +36,107 @@ pub(super) struct PendingAssisted {
     reply: mpsc::Sender<Result<DataResult, String>>,
 }
 impl Engine {
+    /// Stages a pairing credential and starts persisting it.
+    ///
+    /// Nothing the current pairing authorizes changes here; the reply is sent
+    /// from [`Self::poll_pair`] once the write settles.
+    pub(super) fn start_pair(
+        &mut self,
+        scope: RequestScope,
+        kind: AgentKind,
+        credentials: String,
+        permit: Arc<CommitPermit>,
+        reply: mpsc::Sender<Result<DataResult, String>>,
+    ) -> Result<(), String> {
+        if self.pending_pair.is_some() {
+            return Err("AGENT_PAIRING_IN_PROGRESS".into());
+        }
+        if permit.expired() {
+            return Err("PAIRING_WRITE_TIMEOUT".into());
+        }
+        let now = now();
+        let pairing = self
+            .agents
+            .prepare_pair(&self.snapshot, kind, &credentials, now)?;
+        let (sender, receiver) = mpsc::channel();
+        let written = pairing.clone();
+        // Off the actor thread: an unreachable or very slow directory must not
+        // stall preview work, and activation waits for this result only.
+        thread::spawn(move || {
+            let _ = sender.send(crate::agent::pairing::stage_credential(
+                std::path::Path::new(&credentials),
+                &written,
+            ));
+        });
+        self.pending_pair = Some(PendingPair {
+            scope,
+            pairing,
+            permit,
+            receiver,
+            reply,
+        });
+        Ok(())
+    }
+
+    pub(super) fn poll_pair(&mut self) {
+        let Some(pending) = self.pending_pair.take() else {
+            return;
+        };
+        let written = if pending.permit.expired() {
+            Err("PAIRING_WRITE_TIMEOUT".into())
+        } else {
+            match pending.receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) if !pending.permit.expired() => {
+                    self.pending_pair = Some(pending);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => Err("PAIRING_WRITE_TIMEOUT".into()),
+                Err(mpsc::TryRecvError::Disconnected) => Err("PAIRING_WRITE_FAILED".into()),
+            }
+        };
+        let id = pending.pairing.pairing_id.clone();
+        // The write is the commit point: only a durable credential may become
+        // authoritative, and every failure leaves the previous pairing in place.
+        let mut backup = None;
+        let result = written.and_then(|staged| {
+            self.validate_data_scope(&pending.scope)?;
+            // Serialization is fallible, so it also precedes the commit point.
+            let reply = json_result(pending.pairing.clone())?;
+            // An explicit replacement revokes prior delivery grants. Their
+            // cleanup failure rejects the replacement before touching either
+            // the credential file or the current bearer token.
+            if let Some(store) = &self.selections {
+                store.revoke_delivery_grants()?;
+            }
+            self.agents.commit_pair(&id, &self.snapshot, now(), || {
+                backup = staged.commit(&pending.permit)?;
+                Ok(())
+            })?;
+            Ok(reply)
+        });
+        if result.is_err() {
+            pending.permit.cancel();
+            self.agents.discard_pair(&id);
+        }
+        let _ = pending.reply.send(result);
+        if let Some(backup) = backup {
+            let _ = thread::Builder::new()
+                .name("arkdock-pair-cleanup".into())
+                .spawn(move || {
+                    let _ = std::fs::remove_file(backup);
+                });
+        }
+    }
+
+    pub(super) fn cancel_pairing(&mut self) {
+        if let Some(pending) = self.pending_pair.take() {
+            pending.permit.cancel();
+            self.agents.discard_pair(&pending.pairing.pairing_id);
+            let _ = pending.reply.send(Err("PAIRING_CANCELLED".into()));
+        }
+    }
+
     pub(super) fn cancel_assisted(&mut self) {
         self.assisted_offer_scope = None;
         if let Some(pending) = &self.pending_assisted {
@@ -185,17 +305,25 @@ pub(crate) async fn agent_pair_create(
         .save_file()
         .await
         .ok_or("PAIRING_SAVE_CANCELLED")?;
-    let mut pairing: AgentPairing = decode_data(
-        data_request(window, service, scope, DataAction::PairCreate(agent_kind)).await?,
-    )?;
-    pairing.config_path = Some(path.path().to_string_lossy().into_owned());
-    let bytes = serde_json::to_vec_pretty(&pairing).map_err(|_| "PAIRING_SERIALIZE_FAILED")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        std::fs::write(path.path(), bytes).map_err(|_| "PAIRING_WRITE_FAILED".to_owned())
-    })
-    .await
-    .map_err(|_| "PAIRING_WORKER_FAILED".to_owned())??;
-    Ok(pairing)
+    let credentials = path.path().to_string_lossy().into_owned();
+    // Staged, persisted, then activated inside the actor. A save that fails
+    // leaves the previously paired credential usable, and the reply only
+    // reports a pairing the backend actually holds.
+    decode_data(
+        data_request(
+            window,
+            service,
+            scope,
+            DataAction::PairCreate(
+                agent_kind,
+                credentials,
+                Arc::new(CommitPermit::new(Duration::from_millis(
+                    PAIR_COMMIT_TIMEOUT_MS,
+                ))),
+            ),
+        )
+        .await?,
+    )
 }
 #[tauri::command]
 pub(crate) async fn agent_pair_revoke(

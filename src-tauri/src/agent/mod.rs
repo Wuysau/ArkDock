@@ -3,6 +3,10 @@
 mod adapters;
 pub mod assisted;
 pub mod bridge;
+/// Credential persistence exists only where a credential is written: the desktop
+/// app that owns the save dialog, and the pairing tests.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) mod pairing;
 mod router;
 
 pub use adapters::AgentTransport;

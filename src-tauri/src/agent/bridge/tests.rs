@@ -55,14 +55,12 @@ impl Fixture {
         let bridge = if live_http {
             SessionBridge::start().unwrap()
         } else {
-            SessionBridge {
-                shared: Arc::new(Mutex::new(Shared::default())),
-                stop: Arc::new(AtomicBool::new(false)),
-                worker: None,
-                endpoint: "http://127.0.0.1:1".into(),
-            }
+            SessionBridge::detached()
         };
-        let pair = bridge.pair(&state, AgentKind::Claude, now).unwrap();
+        // Same commit boundary as production: the credential is staged, then
+        // activated. This fixture keeps no credential file.
+        let prepared = bridge.prepare_pair(&state, AgentKind::Claude, now).unwrap();
+        let pair = bridge.activate_pair(prepared, &state, now).unwrap();
         Self {
             bridge,
             pair,

@@ -18,7 +18,8 @@ pub(super) enum DataAction {
     SelectionImage(String, bool),
     AgentList,
     AgentBind(AgentBindingDraft),
-    PairCreate(AgentKind),
+    /// Pairing for `AgentKind`, saving the credential to the given path.
+    PairCreate(AgentKind, String, Arc<crate::agent::pairing::CommitPermit>),
     PairRevoke,
     RegistrationBind(String),
     AssistedInspect,
@@ -98,6 +99,18 @@ impl Engine {
                 self.start_assisted(scope.clone(), action, reply.clone())?;
                 return Ok(None);
             }
+            if let DataAction::PairCreate(kind, credentials, permit) = &action {
+                // The reply follows the credential write, so the caller never
+                // observes a pairing that was not persisted.
+                self.start_pair(
+                    scope.clone(),
+                    kind.clone(),
+                    credentials.clone(),
+                    permit.clone(),
+                    reply.clone(),
+                )?;
+                return Ok(None);
+            }
             if let DataAction::InspectorTree(frame) = &action {
                 let anchor = self.validate_display_frame(frame)?;
                 if self.inspection.is_some() {
@@ -125,7 +138,9 @@ impl Engine {
                 DataAction::ControlState => json_result(self.control_state()),
                 DataAction::ControlEnable(enabled) => json_result(self.enable_controls(enabled)?),
                 DataAction::ControlSubmit(request) => json_result(self.submit_control(request)?),
-                DataAction::ControlCancel(identity) => json_result(self.cancel_control(identity, false)?),
+                DataAction::ControlCancel(identity) => {
+                    json_result(self.cancel_control(identity, false)?)
+                }
                 DataAction::DeviceState => json_result(self.device_state()),
                 DataAction::DeviceAction(request) => json_result(self.device_action(request)?),
                 DataAction::InspectorCapabilities => {
@@ -201,13 +216,9 @@ impl Engine {
                 DataAction::AgentBind(draft) => {
                     json_result(self.agents.bind(&self.snapshot, &draft, observed)?)
                 }
-                DataAction::PairCreate(kind) => {
-                    if let Some(store) = &self.selections {
-                        store.revoke_delivery_grants()?;
-                    }
-                    json_result(self.agents.create_pair(&self.snapshot, kind, observed)?)
-                }
+                DataAction::PairCreate(_, _, _) => unreachable!(),
                 DataAction::PairRevoke => {
+                    self.cancel_pairing();
                     self.agents.revoke();
                     if let Some(store) = &self.selections {
                         store.revoke_delivery_grants()?;
@@ -324,14 +335,43 @@ pub(super) async fn data_request(
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let sender = service.sender.clone();
+    let permit = match &action {
+        DataAction::PairCreate(_, _, permit) => Some(permit.clone()),
+        _ => None,
+    };
+    struct CancelOnDrop(Option<Arc<crate::agent::pairing::CommitPermit>>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            if let Some(permit) = &self.0 {
+                permit.cancel();
+            }
+        }
+    }
+    // Dropping the Tauri command future also cancels an enqueued save.
+    let _cancel_on_drop = CancelOnDrop(permit.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Data(scope, action, send))
             .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
-        receive
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "DATA_REQUEST_TIMEOUT".to_owned())?
+        let wait = permit
+            .as_ref()
+            .map(|permit| permit.remaining())
+            .unwrap_or(Duration::from_secs(5));
+        match receive.recv_timeout(wait) {
+            Ok(result) => result,
+            Err(_) => {
+                if permit.is_some_and(|permit| !permit.cancel()) {
+                    // The atomic commit won; only the already computed reply
+                    // remains. Never report a timeout for a committed pairing.
+                    receive
+                        .recv()
+                        .map_err(|_| "DATA_REPLY_UNAVAILABLE".to_owned())?
+                } else {
+                    Err("DATA_REQUEST_TIMEOUT".into())
+                }
+            }
+        }
     })
     .await
     .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?

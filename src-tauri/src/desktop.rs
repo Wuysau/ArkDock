@@ -219,6 +219,7 @@ struct Engine {
     assisted: Arc<Mutex<crate::agent::assisted::AssistedController>>,
     assisted_busy: Arc<std::sync::atomic::AtomicBool>,
     pending_assisted: Option<agent_delivery::PendingAssisted>,
+    pending_pair: Option<agent_delivery::PendingPair>,
     assisted_offer_scope: Option<RequestScope>,
     inspection: Option<PendingInspection>,
     inspection_tree: Option<InspectorTree>,
@@ -331,7 +332,8 @@ fn execution_gate(
 
 fn normalized_workspace_path(path: &str) -> String {
     let value = path.replace('/', "\\");
-    let value = value.strip_prefix("\\\\?\\UNC\\")
+    let value = value
+        .strip_prefix("\\\\?\\UNC\\")
         .map(|unc| format!("\\\\{unc}"))
         .or_else(|| value.strip_prefix("\\\\?\\").map(str::to_owned))
         .unwrap_or(value);
@@ -345,7 +347,9 @@ fn workspace_path_matches(project: &ProjectRef, raw_path: &str) -> bool {
     // Canonicalization is read-only and only applies to already identified Windows paths.
     // WSL and remote identities are never opened as, or converted to, local filesystem paths.
     let resolved = if project.environment == Environment::WindowsLocal {
-        Path::new(raw_path).canonicalize().ok()
+        Path::new(raw_path)
+            .canonicalize()
+            .ok()
             .and_then(|path| path.to_str().map(str::to_owned))
             .unwrap_or_else(|| raw_path.to_owned())
     } else {
@@ -394,9 +398,13 @@ fn workspace_observation(
     if let Some(path) = active_paths.pop() {
         return WorkspaceObservation {
             status: WorkspaceStatus::Verified,
-            project_name: host_observation.as_ref().and_then(|observation| observation.project_name.clone()),
+            project_name: host_observation
+                .as_ref()
+                .and_then(|observation| observation.project_name.clone()),
             active_path: Some(path),
-            reason: "Current workspace path is supported by lifecycle-verified active-scope evidence".into(),
+            reason:
+                "Current workspace path is supported by lifecycle-verified active-scope evidence"
+                    .into(),
             observed_at: observed,
         };
     }
@@ -419,17 +427,22 @@ fn absolute_directory_input(value: &str) -> Result<PathBuf, String> {
     }
     let path = PathBuf::from(value);
     let environment = path_environment(&path);
-    let explicit_uri = ["wsl://", "ssh://", "vscode-remote://"].iter().any(|prefix| {
-        value.strip_prefix(prefix).is_some_and(|suffix| {
-            suffix.split_once('/').is_some_and(|(host, remainder)| {
-                !host.is_empty() && !remainder.is_empty()
+    let explicit_uri = ["wsl://", "ssh://", "vscode-remote://"]
+        .iter()
+        .any(|prefix| {
+            value.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix
+                    .split_once('/')
+                    .is_some_and(|(host, remainder)| !host.is_empty() && !remainder.is_empty())
             })
-        })
-    });
+        });
     if environment == Environment::WindowsLocal
-        && value.starts_with('/') && !value.starts_with("//")
+        && value.starts_with('/')
+        && !value.starts_with("//")
     {
-        return Err("UNSUPPORTED_ENVIRONMENT: an unqualified POSIX path is not a Windows directory".into());
+        return Err(
+            "UNSUPPORTED_ENVIRONMENT: an unqualified POSIX path is not a Windows directory".into(),
+        );
     }
     if !path.is_absolute() && !explicit_uri {
         return Err("ABSOLUTE_DIRECTORY_REQUIRED: relative paths are not accepted".into());
@@ -443,7 +456,9 @@ impl Engine {
             return;
         };
         let visible = visibility::visible(self.own_handle);
-        if !visible { self.backend.cancel_controls(); }
+        if !visible {
+            self.backend.cancel_controls();
+        }
         if self.native_visible != Some(visible)
             || now().saturating_sub(self.last_visibility_emit) >= 1000
         {
@@ -588,13 +603,21 @@ impl Engine {
             );
             match candidates {
                 Ok(candidates) => (candidates, tabs.observation(), None),
-                Err(error) => (Vec::new(), Some(WorkspaceObservation {
-                    status: WorkspaceStatus::Unknown,
-                    project_name: tabs.observation().and_then(|observation| observation.project_name),
-                    active_path: None,
-                    reason: format!("Current workspace metadata could not be verified: {error}"),
-                    observed_at: observed,
-                }), Some(error)),
+                Err(error) => (
+                    Vec::new(),
+                    Some(WorkspaceObservation {
+                        status: WorkspaceStatus::Unknown,
+                        project_name: tabs
+                            .observation()
+                            .and_then(|observation| observation.project_name),
+                        active_path: None,
+                        reason: format!(
+                            "Current workspace metadata could not be verified: {error}"
+                        ),
+                        observed_at: observed,
+                    }),
+                    Some(error),
+                ),
             }
         };
         #[cfg(not(windows))]
@@ -603,7 +626,8 @@ impl Engine {
             Err(error) => (Vec::new(), None, Some(error)),
         };
         self.current_target()?;
-        let current_observation = workspace_observation(&candidates, &target, observed, observation.clone());
+        let current_observation =
+            workspace_observation(&candidates, &target, observed, observation.clone());
         if matches!(mode, DiscoveryMode::Lightweight) {
             for candidate in &self.snapshot.candidates {
                 if candidate.evidence.iter().any(|evidence| {
@@ -611,16 +635,26 @@ impl Engine {
                         && evidence.target_id.as_deref() == Some(target.id.as_str())
                         && evidence.process.as_ref() == Some(&target.process)
                 }) && !(current_observation.status == WorkspaceStatus::Verified
-                        && current_observation.active_path.as_ref().is_some_and(|path| {
-                            !workspace_path_matches(&candidate.project, path)
-                        })) {
-                    if let Some(current) = candidates.iter_mut().find(|item| item.id == candidate.id) {
-                        current.evidence.extend(candidate.evidence.iter()
-                            .filter(|evidence| evidence.source == EvidenceSource::Manual)
-                            .cloned());
+                    && current_observation
+                        .active_path
+                        .as_ref()
+                        .is_some_and(|path| !workspace_path_matches(&candidate.project, path)))
+                {
+                    if let Some(current) =
+                        candidates.iter_mut().find(|item| item.id == candidate.id)
+                    {
+                        current.evidence.extend(
+                            candidate
+                                .evidence
+                                .iter()
+                                .filter(|evidence| evidence.source == EvidenceSource::Manual)
+                                .cloned(),
+                        );
                     } else {
                         let mut manual = candidate.clone();
-                        manual.evidence.retain(|evidence| evidence.source == EvidenceSource::Manual);
+                        manual
+                            .evidence
+                            .retain(|evidence| evidence.source == EvidenceSource::Manual);
                         manual.auto_eligible = false;
                         candidates.push(manual);
                     }
@@ -631,7 +665,10 @@ impl Engine {
         if matches!(mode, DiscoveryMode::Lightweight) {
             for candidate in &self.snapshot.candidates {
                 if !candidate.evidence.is_empty()
-                    && candidate.evidence.iter().all(|evidence| evidence.source == EvidenceSource::History)
+                    && candidate
+                        .evidence
+                        .iter()
+                        .all(|evidence| evidence.source == EvidenceSource::History)
                     && !candidates.iter().any(|current| current.id == candidate.id)
                 {
                     candidates.push(candidate.clone());
@@ -639,7 +676,11 @@ impl Engine {
             }
         }
         // History is separate from current-window evidence, including when its path matches.
-        if let Some(store) = self.store.as_ref().filter(|_| matches!(mode, DiscoveryMode::Explicit)) {
+        if let Some(store) = self
+            .store
+            .as_ref()
+            .filter(|_| matches!(mode, DiscoveryMode::Explicit))
+        {
             let mut inspected_roots: Vec<(Environment, String, Vec<Candidate>)> = Vec::new();
             for project in store.history() {
                 let evidence = Evidence {
@@ -661,7 +702,10 @@ impl Engine {
                         Path::new(&project.app_root),
                         project.environment.clone(),
                         evidence,
-                    ).unwrap_or_default().into_iter().filter(|item| {
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|item| {
                         // Cache only selections that actually exist in the bounded history,
                         // not every variant inspected in every root (at most 64 records).
                         store.history().iter().any(|selected| {
@@ -671,12 +715,19 @@ impl Engine {
                                 && selected.module == item.project.module
                                 && selected.variant == item.project.variant
                         })
-                    }).collect();
-                    inspected_roots.push((project.environment.clone(), project.app_root.clone(), items));
+                    })
+                    .collect();
+                    inspected_roots.push((
+                        project.environment.clone(),
+                        project.app_root.clone(),
+                        items,
+                    ));
                 }
-                if let Some((_, _, items)) = inspected_roots.iter().find(|(environment, root, _)| {
-                    environment == &project.environment && root == &project.app_root
-                }) {
+                if let Some((_, _, items)) =
+                    inspected_roots.iter().find(|(environment, root, _)| {
+                        environment == &project.environment && root == &project.app_root
+                    })
+                {
                     // A historical selection is one module/variant, not every module in its
                     // application directory. Removed/library selections cannot create new history.
                     for item in items.iter().filter(|item| {
@@ -708,25 +759,34 @@ impl Engine {
         let automatic = automatic_candidate(&self.snapshot.candidates, target, observed);
         if let Some(project) = self.snapshot.project.as_ref() {
             let different_project = automatic.as_ref().is_some_and(|id| {
-                self.snapshot.candidates.iter().any(|candidate| {
-                    candidate.id == *id && candidate.project.id != project.id
-                })
+                self.snapshot
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.id == *id && candidate.project.id != project.id)
             });
-            let conflicting = different_project || self.snapshot.candidates.iter().any(|candidate| {
-                candidate.evidence.iter().any(|evidence| {
-                    current_active_evidence(evidence, target, observed)
-                        && !workspace_path_matches(project, &evidence.raw_path)
-                })
-            }) || self.snapshot.workspace_observation.as_ref().is_some_and(|observation| {
-                observation.status == WorkspaceStatus::Verified
-                    && observation.active_path.as_ref().is_some_and(|path| {
-                        !workspace_path_matches(project, path)
+            let conflicting = different_project
+                || self.snapshot.candidates.iter().any(|candidate| {
+                    candidate.evidence.iter().any(|evidence| {
+                        current_active_evidence(evidence, target, observed)
+                            && !workspace_path_matches(project, &evidence.raw_path)
                     })
-            });
-            let unchanged = automatic.as_ref().is_some_and(|id| {
-                self.snapshot.candidates.iter().any(|candidate| {
-                    candidate.id == *id && candidate.project.id == project.id
                 })
+                || self
+                    .snapshot
+                    .workspace_observation
+                    .as_ref()
+                    .is_some_and(|observation| {
+                        observation.status == WorkspaceStatus::Verified
+                            && observation
+                                .active_path
+                                .as_ref()
+                                .is_some_and(|path| !workspace_path_matches(project, path))
+                    });
+            let unchanged = automatic.as_ref().is_some_and(|id| {
+                self.snapshot
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.id == *id && candidate.project.id == project.id)
             });
             if conflicting || (!self.associated_manually && !unchanged) {
                 // Stop watcher/build/runtime before the old workspace can emit another frame.
@@ -739,12 +799,17 @@ impl Engine {
                 );
             } else {
                 if let Some(session) = &mut self.snapshot.session_ref {
-                    let mut evidence: Vec<_> = self.snapshot.candidates.iter()
+                    let mut evidence: Vec<_> = self
+                        .snapshot
+                        .candidates
+                        .iter()
                         .filter(|candidate| candidate.project.id == project.id)
                         .flat_map(|candidate| candidate.evidence.iter().cloned())
                         .collect();
                     if self.associated_manually {
-                        for manual in session.binding_evidence.iter()
+                        for manual in session
+                            .binding_evidence
+                            .iter()
                             .filter(|evidence| evidence.source == EvidenceSource::Manual)
                         {
                             if !evidence.contains(manual) {
@@ -777,7 +842,10 @@ impl Engine {
         for candidate in &mut self.snapshot.candidates {
             candidate.auto_eligible = false;
             for evidence in &mut candidate.evidence {
-                if !matches!(evidence.source, EvidenceSource::History | EvidenceSource::Manual) {
+                if !matches!(
+                    evidence.source,
+                    EvidenceSource::History | EvidenceSource::Manual
+                ) {
                     evidence.verifiable = false;
                     evidence.active_scope = false;
                 }
@@ -827,12 +895,22 @@ impl Engine {
             return Err("UNSUPPORTED_ENVIRONMENT: WSL/remote preview is not implemented".into());
         }
         let observed = now();
-        if explicitly_selected && self.snapshot.workspace_observation.as_ref().is_some_and(|observation| {
-            observation.status == WorkspaceStatus::Verified
-                && observation.observed_at <= observed
-                && observed.saturating_sub(observation.observed_at) < WORKSPACE_OBSERVATION_TTL_MS
-                && observation.active_path.as_ref().is_some_and(|path| !workspace_path_matches(&project, path))
-        }) {
+        if explicitly_selected
+            && self
+                .snapshot
+                .workspace_observation
+                .as_ref()
+                .is_some_and(|observation| {
+                    observation.status == WorkspaceStatus::Verified
+                        && observation.observed_at <= observed
+                        && observed.saturating_sub(observation.observed_at)
+                            < WORKSPACE_OBSERVATION_TTL_MS
+                        && observation
+                            .active_path
+                            .as_ref()
+                            .is_some_and(|path| !workspace_path_matches(&project, path))
+                })
+        {
             return Err("WORKSPACE_CONFLICT: the host's current project differs from this directory; rediscover its current workspace".into());
         }
         // Re-read candidate directory before selecting it; candidate id is not an authorization credential.
@@ -871,7 +949,9 @@ impl Engine {
             binding_evidence.push(evidence);
         } else if self.associated_manually {
             if let Some(session) = &self.snapshot.session_ref {
-                for manual in session.binding_evidence.iter()
+                for manual in session
+                    .binding_evidence
+                    .iter()
                     .filter(|evidence| evidence.source == EvidenceSource::Manual)
                 {
                     if !binding_evidence.contains(manual) {
@@ -880,8 +960,13 @@ impl Engine {
                 }
             }
         }
-        let manual = explicitly_selected || (self.associated_manually
-            && self.snapshot.project.as_ref().is_some_and(|current| current.id == project.id));
+        let manual = explicitly_selected
+            || (self.associated_manually
+                && self
+                    .snapshot
+                    .project
+                    .as_ref()
+                    .is_some_and(|current| current.id == project.id));
         self.close_session();
         self.associated_manually = manual;
         self.serial += 1;
@@ -929,7 +1014,11 @@ impl Engine {
         self.gate_preview();
         Ok(())
     }
-    fn inspect_manual_directory(&mut self, path: PathBuf, select_unique: bool) -> Result<(), String> {
+    fn inspect_manual_directory(
+        &mut self,
+        path: PathBuf,
+        select_unique: bool,
+    ) -> Result<(), String> {
         let target = self.current_target()?;
         let observed = now();
         let environment = path_environment(&path);
@@ -951,17 +1040,29 @@ impl Engine {
         };
         let inspected = inspect_directory(&path, environment, evidence)?;
         self.current_target()?;
-        let unique = (inspected.len() == 1 && inspected[0].valid)
-            .then(|| inspected[0].project.clone());
+        let unique =
+            (inspected.len() == 1 && inspected[0].valid).then(|| inspected[0].project.clone());
         {
-            let additional = inspected.iter().filter(|candidate| {
-                !self.snapshot.candidates.iter().any(|existing| existing.id == candidate.id)
-            }).count();
+            let additional = inspected
+                .iter()
+                .filter(|candidate| {
+                    !self
+                        .snapshot
+                        .candidates
+                        .iter()
+                        .any(|existing| existing.id == candidate.id)
+                })
+                .count();
             if self.snapshot.candidates.len().saturating_add(additional) > 256 {
-                return Err("CANDIDATE_LIMIT: rediscover before inspecting more directories".into());
+                return Err(
+                    "CANDIDATE_LIMIT: rediscover before inspecting more directories".into(),
+                );
             }
             for mut candidate in inspected {
-                if let Some(existing) = self.snapshot.candidates.iter_mut()
+                if let Some(existing) = self
+                    .snapshot
+                    .candidates
+                    .iter_mut()
                     .find(|existing| existing.id == candidate.id)
                 {
                     // The read-only inspection refreshes the directory's validity, without
@@ -1245,9 +1346,10 @@ impl Engine {
     fn tick(&mut self) {
         self.probe_workspace();
         if !self.associated_manually && self.snapshot.project.is_some() {
-            let active = self.snapshot.target.as_ref().and_then(|target| {
-                automatic_candidate(&self.snapshot.candidates, target, now())
-            });
+            let active =
+                self.snapshot.target.as_ref().and_then(|target| {
+                    automatic_candidate(&self.snapshot.candidates, target, now())
+                });
             let current = self.snapshot.project.as_ref().is_some_and(|project| {
                 self.snapshot.candidates.iter().any(|candidate| {
                     active.as_deref() == Some(candidate.id.as_str())
@@ -1799,7 +1901,10 @@ async fn click_preview(
     x: u32,
     y: u32,
 ) -> Result<AppSnapshot, String> {
-    if build_id.len() > 256 || x >= crate::preview::frames::MAX_SURFACE_DIMENSION || y >= crate::preview::frames::MAX_SURFACE_DIMENSION {
+    if build_id.len() > 256
+        || x >= crate::preview::frames::MAX_SURFACE_DIMENSION
+        || y >= crate::preview::frames::MAX_SURFACE_DIMENSION
+    {
         return Err("INVALID_NATIVE_INPUT".into());
     }
     request(
@@ -1935,6 +2040,7 @@ pub fn run() {
                     )),
                     assisted_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     pending_assisted: None,
+                    pending_pair: None,
                     assisted_offer_scope: None,
                     inspection: None,
                     inspection_tree: None,
@@ -1991,6 +2097,7 @@ pub fn run() {
                         }
                         Ok(Message::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             engine.cancel_assisted();
+                            engine.cancel_pairing();
                             break;
                         }
                         Ok(Message::Action(scope, action, reply)) => {
@@ -2018,6 +2125,7 @@ pub fn run() {
                     engine.poll_native_controls();
                     engine.poll_inspection();
                     engine.poll_assisted();
+                    engine.poll_pair();
                     engine.agents.sync(&engine.snapshot, now());
                     if now().saturating_sub(engine.last_visibility_sync) >= 100 {
                         engine.last_visibility_sync = now();

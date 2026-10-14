@@ -1,5 +1,5 @@
 use super::adapters;
-use super::bridge::{Attachments, SessionBridge};
+use super::bridge::{Attachments, PreparedPairing, SessionBridge};
 use super::AgentTransport;
 use crate::ipc::model::*;
 use crate::selection::{format_compact_prompt, format_prompt, validate_selection};
@@ -21,6 +21,10 @@ pub struct AgentRouter {
     deliveries: BTreeMap<String, DeliveryRecord>,
     serial: u64,
     bridge: Option<SessionBridge>,
+    /// Credential staged by [`Self::prepare_pair`] and awaiting its durable
+    /// write. Not a second pairing state: the bridge's live pairing remains the
+    /// only authority, and a staged token authorizes nothing until activation.
+    pending_pair: Option<PreparedPairing>,
     #[cfg(test)]
     verified_adapter: Option<Box<dyn adapters::VerifiedAdapter>>,
 }
@@ -386,23 +390,98 @@ impl AgentRouter {
         }
     }
 
-    pub fn create_pair(
+    /// Stages a new pairing credential for `credential_path` without changing the
+    /// live pairing, and returns the exact credential to persist.
+    ///
+    /// The caller persists the credential and then calls [`Self::activate_pair`]
+    /// with the returned `pairing_id`, or [`Self::discard_pair`] when the write
+    /// failed. Nothing the previous pairing could do is lost before that.
+    pub fn prepare_pair(
         &mut self,
         snapshot: &AppSnapshot,
         kind: AgentKind,
+        credential_path: &str,
         now: u64,
     ) -> Result<AgentPairing, String> {
-        self.revoke();
+        if credential_path.is_empty()
+            || credential_path.len() > 4096
+            || credential_path.contains('\0')
+        {
+            return Err("AGENT_PAIR_PATH_INVALID".into());
+        }
         if self.bridge.is_none() {
             self.bridge = Some(SessionBridge::start()?);
         }
-        self.bridge
+        let mut prepared = self
+            .bridge
             .as_ref()
             .ok_or("AGENT_BRIDGE_UNAVAILABLE")?
-            .pair(snapshot, kind, now)
+            .prepare_pair(snapshot, kind, now)?;
+        prepared.set_config_path(credential_path.to_owned());
+        let pairing = prepared.pairing().clone();
+        // A newer preparation replaces an unwritten one; the older credential was
+        // never authoritative, so dropping it revokes nothing.
+        self.pending_pair = Some(prepared);
+        Ok(pairing)
+    }
+
+    /// Makes a staged credential authoritative, replacing the previous pairing.
+    ///
+    /// Only a credential this router staged may be activated, and the project,
+    /// session, target and trust identity must be unchanged since preparation. A
+    /// request for a superseded credential leaves the current staging intact.
+    pub fn activate_pair(
+        &mut self,
+        pairing_id: &str,
+        snapshot: &AppSnapshot,
+        now: u64,
+    ) -> Result<AgentPairing, String> {
+        self.commit_pair(pairing_id, snapshot, now, || Ok(()))
+    }
+
+    /// The actor calls this only with an already staged credential. Scope and
+    /// expiry are checked under the same bridge transaction as its file swap.
+    pub(crate) fn commit_pair(
+        &mut self,
+        pairing_id: &str,
+        snapshot: &AppSnapshot,
+        now: u64,
+        commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<AgentPairing, String> {
+        let Some(pending) = self.pending_pair.as_ref() else {
+            return Err("AGENT_PAIR_PREPARE_REQUIRED".into());
+        };
+        if pending.pairing().pairing_id != pairing_id {
+            return Err("AGENT_PAIR_PREPARE_SUPERSEDED".into());
+        }
+        let prepared = self
+            .pending_pair
+            .take()
+            .expect("the pending credential was just checked");
+        let pairing = self
+            .bridge
+            .as_ref()
+            .ok_or("AGENT_BRIDGE_UNAVAILABLE")?
+            .commit_pair(prepared, snapshot, now, commit)?;
+        // Declared sessions and their evidence belonged to the replaced pairing.
+        self.bindings.clear();
+        Ok(pairing)
+    }
+
+    /// Abandons a staged credential whose write failed, leaving the live pairing
+    /// exactly as it was.
+    pub fn discard_pair(&mut self, pairing_id: &str) {
+        if self
+            .pending_pair
+            .as_ref()
+            .is_some_and(|prepared| prepared.pairing().pairing_id == pairing_id)
+        {
+            self.pending_pair = None;
+        }
     }
 
     pub fn revoke(&mut self) {
+        self.pending_pair = None;
         if let Some(bridge) = &self.bridge {
             bridge.revoke();
         }
@@ -675,7 +754,9 @@ fn availability(binding: Option<&AgentSessionBinding>) -> (DeliveryState, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::pairing::{encode, CredentialStore, FileCredentials};
     use crate::selection::test_support::{context, snapshot};
+    use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -975,7 +1056,19 @@ mod tests {
         state.project.as_mut().unwrap().workspace_root =
             directory.path().to_string_lossy().into_owned();
         let mut router = AgentRouter::new();
-        let pair = router.create_pair(&state, AgentKind::Claude, now).unwrap();
+        // Production commit boundary: the credential is durable before the
+        // pairing becomes authoritative.
+        let credentials = directory.path().join("arkdock-pairing.json");
+        let pair = router
+            .prepare_pair(
+                &state,
+                AgentKind::Claude,
+                &credentials.to_string_lossy(),
+                now,
+            )
+            .unwrap();
+        crate::agent::pairing::write_credential(&credentials, &pair).unwrap();
+        let pair = router.activate_pair(&pair.pairing_id, &state, now).unwrap();
         let registration = post(
             &pair,
             "/v1/register",
@@ -1052,5 +1145,434 @@ mod tests {
             after_expiry.agent_acknowledgment.as_deref(),
             Some("ack-fixture")
         );
+    }
+
+    /// Injects a deterministic write failure. The real store is exercised by the
+    /// directory cases below, which need no injection.
+    struct FailingStore {
+        /// What an interrupted same-directory write leaves behind: a sibling
+        /// temporary file, never a truncated credential.
+        partial: bool,
+    }
+    impl CredentialStore for FailingStore {
+        fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+            if self.partial {
+                std::fs::write(path.with_extension("tmp"), &bytes[..bytes.len() / 2]).unwrap();
+            }
+            Err("PAIRING_WRITE_FAILED".into())
+        }
+    }
+
+    struct PairFixture {
+        router: AgentRouter,
+        state: AppSnapshot,
+        directory: tempfile::TempDir,
+        now: u64,
+    }
+
+    impl PairFixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let mut state = snapshot();
+            let root = directory.path().to_string_lossy().into_owned();
+            let project = state.project.as_mut().unwrap();
+            project.workspace_root = root.clone();
+            project.app_root = root;
+            Self {
+                router: AgentRouter::new(),
+                state,
+                directory,
+                now: 1_000,
+            }
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.path().join(name)
+        }
+
+        /// Stages a credential exactly as the desktop actor does before writing.
+        fn stage(&mut self, path: &Path) -> AgentPairing {
+            self.router
+                .prepare_pair(
+                    &self.state,
+                    AgentKind::Claude,
+                    &path.to_string_lossy(),
+                    self.now,
+                )
+                .unwrap()
+        }
+
+        fn persist(
+            &self,
+            pairing: &AgentPairing,
+            store: &dyn CredentialStore,
+            path: &Path,
+        ) -> Result<(), String> {
+            store.write(path, &encode(pairing)?)
+        }
+
+        /// The complete production sequence with an injectable store.
+        fn commit(
+            &mut self,
+            store: &dyn CredentialStore,
+            path: &Path,
+        ) -> Result<AgentPairing, String> {
+            let pairing = self.stage(path);
+            match self.persist(&pairing, store, path) {
+                Ok(()) => self.activate(&pairing),
+                Err(error) => {
+                    self.router.discard_pair(&pairing.pairing_id);
+                    Err(error)
+                }
+            }
+        }
+
+        fn activate(&mut self, pairing: &AgentPairing) -> Result<AgentPairing, String> {
+            self.router
+                .activate_pair(&pairing.pairing_id, &self.state, self.now)
+        }
+
+        /// An empty register body can never succeed, so `AGENT_REGISTRATION_INVALID`
+        /// proves the bearer check and the live scope accepted this token without
+        /// changing any state; anything else means it grants nothing here.
+        fn authorizes(&self, pairing: &AgentPairing) -> bool {
+            self.router
+                .bridge
+                .as_ref()
+                .expect("a pairing attempt starts the bridge")
+                .authorize(
+                    &pairing.token,
+                    "/v1/register",
+                    serde_json::json!({}),
+                    self.now,
+                )
+                .err()
+                .as_deref()
+                == Some("AGENT_REGISTRATION_INVALID")
+        }
+
+        fn stored(&self, path: &Path) -> AgentPairing {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        }
+    }
+
+    #[test]
+    fn first_pairing_persists_exactly_the_activated_credential() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let pairing = fixture.commit(&FileCredentials, &path).unwrap();
+        // The file an Agent reads and the pairing the backend accepts are one
+        // credential, and the report names the file it was saved to.
+        assert_eq!(fixture.stored(&path), pairing);
+        assert_eq!(
+            pairing.config_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+        assert!(fixture.authorizes(&pairing));
+    }
+
+    #[test]
+    fn transaction_scope_expiry_and_cancellation_leave_the_old_file_and_token_usable() {
+        use crate::agent::pairing::{stage_credential, CommitPermit};
+        use std::time::Duration;
+        for rejection in ["scope", "expiry", "cancel"] {
+            let mut fixture = PairFixture::new();
+            let path = fixture.path("pairing.json");
+            let first = fixture.commit(&FileCredentials, &path).unwrap();
+            let prepared = fixture.stage(&path);
+            let staged = stage_credential(&path, &prepared).unwrap();
+            let permit = CommitPermit::new(Duration::from_secs(2));
+            let mut state = fixture.state.clone();
+            let mut observed = fixture.now;
+            if rejection == "scope" {
+                state.session_id = Some("changed".into());
+            }
+            if rejection == "expiry" {
+                observed = prepared.expires_at;
+            }
+            if rejection == "cancel" {
+                permit.cancel();
+            }
+            let error = fixture
+                .router
+                .commit_pair(&prepared.pairing_id, &state, observed, || {
+                    staged.commit(&permit).map(|_| ())
+                })
+                .unwrap_err();
+            assert!(matches!(
+                error.as_str(),
+                "AGENT_PAIR_SCOPE_CHANGED" | "AGENT_PAIR_EXPIRED" | "PAIRING_WRITE_TIMEOUT"
+            ));
+            assert_eq!(fixture.stored(&path), first);
+            assert!(fixture.authorizes(&first));
+            assert!(!fixture.authorizes(&prepared));
+        }
+    }
+
+    #[test]
+    fn superseded_writer_at_the_same_path_cannot_clobber_the_committed_retry() {
+        use crate::agent::pairing::{stage_credential, CommitPermit};
+        use std::time::Duration;
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        let a = fixture.stage(&path);
+        let late = stage_credential(&path, &a).unwrap();
+        let b = fixture.stage(&path);
+        let retry = stage_credential(&path, &b).unwrap();
+        let permit = CommitPermit::new(Duration::from_secs(2));
+        let mut backup = None;
+        let live = fixture
+            .router
+            .commit_pair(&b.pairing_id, &fixture.state, fixture.now, || {
+                backup = retry.commit(&permit)?;
+                Ok(())
+            })
+            .unwrap();
+        if let Some(backup) = backup {
+            std::fs::remove_file(backup).unwrap();
+        }
+        assert_eq!(
+            fixture
+                .router
+                .commit_pair(&a.pairing_id, &fixture.state, fixture.now, || {
+                    late.commit(&CommitPermit::new(Duration::from_secs(2)))
+                        .map(|_| ())
+                })
+                .unwrap_err(),
+            "AGENT_PAIR_PREPARE_REQUIRED"
+        );
+        assert_eq!(fixture.stored(&path), live);
+        assert!(fixture.authorizes(&live));
+        assert!(!fixture.authorizes(&first));
+        assert!(!fixture.authorizes(&a));
+        assert_eq!(
+            std::fs::read_dir(fixture.directory.path()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn replacing_a_pairing_revokes_only_the_previous_credential() {
+        let mut fixture = PairFixture::new();
+        let first_path = fixture.path("first.json");
+        let second_path = fixture.path("second.json");
+        let first = fixture.commit(&FileCredentials, &first_path).unwrap();
+        let second = fixture.commit(&FileCredentials, &second_path).unwrap();
+        assert!(fixture.authorizes(&second));
+        assert!(!fixture.authorizes(&first));
+        assert_ne!(first.token, second.token);
+        // The earlier file keeps the credential it was written with; it is simply
+        // no longer a credential the backend accepts.
+        assert_eq!(fixture.stored(&first_path), first);
+    }
+
+    #[test]
+    fn failed_credential_write_keeps_the_previous_pairing_usable() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        // A staged credential whose bytes never reach the file.
+        let staged = fixture.stage(&path);
+        let error = fixture
+            .persist(&staged, &FailingStore { partial: true }, &path)
+            .unwrap_err();
+        assert_eq!(error, "PAIRING_WRITE_FAILED");
+        fixture.router.discard_pair(&staged.pairing_id);
+        assert!(fixture.authorizes(&first));
+        assert_eq!(fixture.stored(&path), first);
+        assert!(!fixture.authorizes(&staged));
+        assert!(!path.with_extension("tmp").to_string_lossy().is_empty());
+    }
+
+    #[test]
+    fn unwritable_directory_and_unreplaceable_target_never_disturb_the_live_pairing() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        let missing = fixture
+            .directory
+            .path()
+            .join("absent")
+            .join("arkdock-pairing.json");
+        assert_eq!(
+            fixture.commit(&FileCredentials, &missing).unwrap_err(),
+            "PAIRING_WRITE_FAILED"
+        );
+        let occupied = fixture.path("occupied.json");
+        std::fs::create_dir(&occupied).unwrap();
+        assert_eq!(
+            fixture.commit(&FileCredentials, &occupied).unwrap_err(),
+            "PAIRING_REPLACE_FAILED"
+        );
+        assert!(fixture.authorizes(&first));
+        assert_eq!(fixture.stored(&path), first);
+    }
+
+    #[test]
+    fn staged_credential_grants_nothing_until_it_is_activated() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        let staged_path = fixture.path("staged.json");
+        let staged = fixture.stage(&staged_path);
+        fixture
+            .persist(&staged, &FileCredentials, &staged_path)
+            .unwrap();
+        // The saved credential is complete, and still grants nothing: only
+        // activation installs a token the backend validates.
+        assert_eq!(fixture.stored(&staged_path), staged);
+        assert!(!fixture.authorizes(&staged));
+        assert!(fixture.authorizes(&first));
+    }
+
+    #[test]
+    fn project_session_target_or_trust_change_cancels_a_staged_activation() {
+        let mutations: [fn(&mut AppSnapshot); 6] = [
+            |state| state.project.as_mut().unwrap().id = "other-workspace".into(),
+            |state| state.project.as_mut().unwrap().workspace_root = "C:/other".into(),
+            |state| state.session_id = Some("other-session".into()),
+            |state| state.target.as_mut().unwrap().id = "other-target".into(),
+            |state| {
+                state.target.as_mut().unwrap().process.started_at = "lifecycle-2".into();
+            },
+            |state| state.trusted = false,
+        ];
+        for mutate in mutations {
+            let mut fixture = PairFixture::new();
+            let path = fixture.path("arkdock-pairing.json");
+            let first = fixture.commit(&FileCredentials, &path).unwrap();
+            let staged = fixture.stage(&path);
+            fixture.persist(&staged, &FileCredentials, &path).unwrap();
+            mutate(&mut fixture.state);
+            let error = fixture.activate(&staged).unwrap_err();
+            assert!(
+                matches!(
+                    error.as_str(),
+                    "AGENT_PAIR_SCOPE_CHANGED" | "AGENT_LOCAL_TRUSTED_WORKSPACE_REQUIRED"
+                ),
+                "unexpected rejection: {error}"
+            );
+            // The previous pairing is untouched: it is what the bridge still holds.
+            assert!(fixture.authorizes(&first));
+            assert!(!fixture.authorizes(&staged));
+            assert_eq!(
+                fixture.activate(&staged).unwrap_err(),
+                "AGENT_PAIR_PREPARE_REQUIRED"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_pairing_requests_leave_exactly_one_authorized_credential() {
+        let mut fixture = PairFixture::new();
+        let first_path = fixture.path("first.json");
+        let a_path = fixture.path("a.json");
+        let b_path = fixture.path("b.json");
+        let first = fixture.commit(&FileCredentials, &first_path).unwrap();
+        // Two preparations race before either is written.
+        let a = fixture.stage(&a_path);
+        let b = fixture.stage(&b_path);
+        fixture.persist(&b, &FileCredentials, &b_path).unwrap();
+        // The superseded preparation can no longer be activated.
+        assert_eq!(
+            fixture.activate(&a).unwrap_err(),
+            "AGENT_PAIR_PREPARE_SUPERSEDED"
+        );
+        assert!(fixture.authorizes(&first));
+        let activated = fixture.activate(&b).unwrap();
+        assert!(fixture.authorizes(&activated));
+        assert!(!fixture.authorizes(&first));
+        assert!(!fixture.authorizes(&a));
+        assert_eq!(fixture.stored(&b_path), activated);
+    }
+
+    #[test]
+    fn restart_grants_nothing_from_a_persisted_credential() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let pairing = fixture.commit(&FileCredentials, &path).unwrap();
+        // A restarted backend holds no live pairing, so the credential file - the
+        // only survivor of a crash - authorizes nothing on its own.
+        let restarted = SessionBridge::detached();
+        restarted.sync(&fixture.state, fixture.now);
+        assert_eq!(
+            restarted
+                .authorize(
+                    &pairing.token,
+                    "/v1/register",
+                    serde_json::json!({}),
+                    fixture.now
+                )
+                .unwrap_err(),
+            "AGENT_PAIR_REQUIRED"
+        );
+        // Pairing again from the surviving workspace succeeds normally.
+        let mut recovered = PairFixture::new();
+        let recovered_path = recovered.path("arkdock-pairing.json");
+        let again = recovered.commit(&FileCredentials, &recovered_path).unwrap();
+        assert!(recovered.authorizes(&again));
+    }
+
+    #[test]
+    fn revoke_drops_a_staged_credential_and_the_live_pairing() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        let staged = fixture.stage(&path);
+        fixture.router.revoke();
+        assert!(!fixture.authorizes(&first));
+        assert_eq!(
+            fixture.activate(&staged).unwrap_err(),
+            "AGENT_PAIR_PREPARE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn retry_after_a_failed_pairing_leaves_no_duplicate_state() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        assert_eq!(
+            fixture
+                .commit(&FailingStore { partial: true }, &path)
+                .unwrap_err(),
+            "PAIRING_WRITE_FAILED"
+        );
+        assert!(fixture.authorizes(&first));
+        // The retry replaces both the file and the live pairing, without a second
+        // live credential and without the discarded staging resurfacing.
+        let retried = fixture.commit(&FileCredentials, &path).unwrap();
+        assert_eq!(fixture.stored(&path), retried);
+        assert!(fixture.authorizes(&retried));
+        assert!(!fixture.authorizes(&first));
+        assert_eq!(
+            fixture.activate(&first).unwrap_err(),
+            "AGENT_PAIR_PREPARE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn pairing_failures_never_expose_the_token() {
+        let mut fixture = PairFixture::new();
+        let path = fixture.path("arkdock-pairing.json");
+        let first = fixture.commit(&FileCredentials, &path).unwrap();
+        let staged = fixture.stage(&path);
+        let mut errors = vec![fixture
+            .persist(&staged, &FailingStore { partial: false }, &path)
+            .unwrap_err()];
+        fixture.router.discard_pair(&staged.pairing_id);
+        let current = fixture.stage(&path);
+        errors.push(fixture.activate(&staged).unwrap_err());
+        fixture.state.session_id = Some("other-session".into());
+        errors.push(fixture.activate(&current).unwrap_err());
+        for error in errors {
+            for token in [&first.token, &staged.token, &current.token] {
+                assert!(
+                    !error.contains(token.as_str()),
+                    "a pairing error leaked a credential: {error}"
+                );
+            }
+        }
     }
 }
