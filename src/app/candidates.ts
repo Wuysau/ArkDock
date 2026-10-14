@@ -1,5 +1,7 @@
-import type { AppSnapshot, Candidate, Evidence, EvidenceSource, ProjectRef } from '../ipc/model.ts';
+import type { AppSnapshot, Candidate, CandidateCategory, EvidenceSource, ProjectRef } from '../ipc/model.ts';
 import { displayPath } from '../path-display.ts';
+
+export type { CandidateCategory } from '../ipc/model.ts';
 
 export const environments: Record<ProjectRef['environment'], string> = {
   windowsLocal: 'Windows 本地', wsl: 'WSL · 预览未支持', remote: '远程 · 预览未支持',
@@ -10,21 +12,33 @@ export function environmentLabel(environment: ProjectRef['environment']): string
   return environments[environment] ?? String(environment);
 }
 
-export type CandidateCategory = 'current' | 'suggested' | 'manual' | 'history';
-export const candidateCategoryOrder = ['current', 'suggested', 'manual', 'history'] as const;
+export const candidateCategoryOrder: ReadonlyArray<CandidateCategory> = ['current', 'suggested', 'manual', 'history'];
 export const candidateCategoryNames: Record<CandidateCategory, string> = {
   current: '当前工作区工程候选', suggested: '建议候选 · 需要确认',
   manual: '指定目录 · 验证结果', history: '历史工程 · 不代表当前工作区',
 };
+/** Labels only: the evidence sources stay whatever the backend reported. */
 export const evidenceSourceNames: Record<EvidenceSource, string> = {
   hostWorkspace: '宿主工作区接口', codexProjectMetadata: 'Codex 项目元数据', registration: '已登记工程线索',
   uia: '窗口标签线索', processArguments: '进程启动参数', history: '历史关联记录',
   title: '窗口标题 · 路径待确认', manual: '手动指定目录',
 };
 
-const workspaceSources: ReadonlyArray<EvidenceSource> = ['hostWorkspace', 'codexProjectMetadata', 'registration', 'uia', 'processArguments'];
+/** Mirrors `discovery::WORKSPACE_OBSERVATION_TTL_MS`; used for the observation sentence only. */
 export const WORKSPACE_OBSERVATION_MS = 15_000;
-const EVIDENCE_MAX_WINDOW_MS = 120_000;
+const categories = new Set<string>(candidateCategoryOrder);
+
+/**
+ * The backend owns candidate display semantics (`classification.rs` assigns
+ * `category` and `categoryExpiresAt` on every published snapshot). The frontend
+ * only labels, groups and orders what it received: it never inspects evidence
+ * freshness, target identity or process lifetime to decide a trust level. A
+ * candidate without the contract field is downgraded to `suggested`, so a
+ * partially built or older payload can never look like a verified workspace.
+ */
+function categoryOf(candidate: Candidate): CandidateCategory {
+  return categories.has(String(candidate.category)) ? candidate.category : 'suggested';
+}
 
 /** A workspace observation is only displayable inside its short validity window. */
 export function observationAge(snapshot: AppSnapshot | null, now: number): boolean {
@@ -33,39 +47,24 @@ export function observationAge(snapshot: AppSnapshot | null, now: number): boole
 }
 
 /**
- * Temporary frontend judgement: the backend does not yet report candidate
- * display semantics, so evidence freshness is still evaluated here. This is the
- * only place allowed to do it — the panel renders `candidateView` output and
- * never re-derives trust level itself. P3-04 replaces these two functions with
- * the backend-provided level without touching the panel.
+ * The earliest instant at which the display may move. `categoryExpiresAt` is the
+ * backend's own report, and the backend republishes as soon as a category really
+ * changes; this only arms a re-render for the observation sentence so a stale
+ * path is never presented as the current one.
  */
-function currentEvidence(evidence: Evidence, snapshot: AppSnapshot | null, now: number): boolean {
-  const target = snapshot?.target;
-  return Boolean(target && evidence.source !== 'history' && evidence.source !== 'manual'
-    && evidence.targetId === target.id && evidence.process?.pid === target.process.pid
-    && evidence.process.startedAt === target.process.startedAt
-    && evidence.observedAt <= now && now < evidence.expiresAt
-    && evidence.expiresAt > evidence.observedAt && evidence.expiresAt - evidence.observedAt <= EVIDENCE_MAX_WINDOW_MS);
-}
-
-function categoryOf(candidate: Candidate, snapshot: AppSnapshot | null, now: number): CandidateCategory {
-  const observation = snapshot?.workspaceObservation;
-  const fresh = !observation || (observation.status === 'verified' && observationAge(snapshot, now));
-  const current = candidate.evidence.filter((evidence) => currentEvidence(evidence, snapshot, now));
-  if (fresh && current.some((evidence) => workspaceSources.includes(evidence.source)
-    && evidence.verifiable && evidence.activeScope && evidence.environment === 'windowsLocal'
-    && candidate.project.environment === 'windowsLocal'
-    && Boolean(evidence.sessionId && evidence.sessionId.length <= 128))) return 'current';
-  if (current.length) return 'suggested';
-  if (candidate.evidence.some((evidence) => evidence.source === 'manual')) return 'manual';
-  return candidate.evidence.some((evidence) => evidence.source === 'history') ? 'history' : 'suggested';
+export function nextDisplayDeadline(snapshot: AppSnapshot | null, now: number): number | null {
+  if (!snapshot) return null;
+  const deadlines = snapshot.candidates.map((candidate) => candidate.categoryExpiresAt).filter((deadline) => deadline > now);
+  if (snapshot.workspaceObservation) deadlines.push(snapshot.workspaceObservation.observedAt + WORKSPACE_OBSERVATION_MS);
+  const next = Math.min(...deadlines);
+  return Number.isFinite(next) ? next : null;
 }
 
 export interface CandidateView {
   category: CandidateCategory;
-  /** A single reliable candidate may bypass explicit confirmation. */
+  /** The backend's unique auto-associable candidate; the only "reliable" row. */
   reliable: boolean;
-  /** Whether the row can actually be associated at all. */
+  /** Whether the row can be associated at all; trust still lives in the backend. */
   selectable: boolean;
   badge: string;
   reason: string;
@@ -75,12 +74,12 @@ export interface CandidateView {
   workspaceRoot: string;
 }
 
-export function candidateView(candidate: Candidate, snapshot: AppSnapshot | null, now: number): CandidateView {
-  const category = categoryOf(candidate, snapshot, now);
+export function candidateView(candidate: Candidate): CandidateView {
+  const category = categoryOf(candidate);
   const supported = candidate.project.environment === 'windowsLocal';
   const reliable = category === 'current' && candidate.autoEligible && candidate.valid && supported;
   const badge = !candidate.valid ? '目录不可用' : !supported ? '环境不支持'
-    : category === 'history' ? '历史工程' : reliable ? '证据可靠' : '需要确认';
+    : category === 'history' ? '历史工程' : reliable ? '证据可靠' : category === 'current' ? '当前工作区 · 需要确认' : '需要确认';
   const reason = !candidate.valid ? candidate.reasons.join('；') || '目录不可访问；需要重新选择有效工程。'
     : !supported ? `${environmentLabel(candidate.project.environment)}；当前不提供原生预览。`
       : category === 'history' ? '这是之前关联过的工程；当前窗口的活动工作区尚需另行核验。'
@@ -96,12 +95,9 @@ export function candidateView(candidate: Candidate, snapshot: AppSnapshot | null
   };
 }
 
-/**
- * Grouping only. Order stays the backend order inside each category; the panel
- * owns nothing but labels, descriptions, filtering and the user's click.
- */
-export function groupCandidates(candidates: Candidate[], snapshot: AppSnapshot | null, now: number): Record<CandidateCategory, Candidate[]> {
+/** Grouping only, in the backend's own order: it already ranks eligibility and validity. */
+export function groupCandidates(candidates: Candidate[]): Record<CandidateCategory, Candidate[]> {
   const groups: Record<CandidateCategory, Candidate[]> = { current: [], suggested: [], manual: [], history: [] };
-  for (const candidate of candidates) groups[categoryOf(candidate, snapshot, now)].push(candidate);
+  for (const candidate of candidates) groups[categoryOf(candidate)].push(candidate);
   return groups;
 }

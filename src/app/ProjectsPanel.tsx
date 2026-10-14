@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AppSnapshot } from '../ipc/model.ts';
 import { filterCandidates } from '../view-state.ts';
 import { displayPath } from '../path-display.ts';
-import { groupCandidates, observationAge, WORKSPACE_OBSERVATION_MS } from './candidates.ts';
+import { groupCandidates, nextDisplayDeadline, observationAge } from './candidates.ts';
 import { CandidateList } from './CandidateList.tsx';
 import { Icon } from '../Icon.tsx';
 
@@ -18,21 +18,19 @@ export function ProjectsPanel({ snapshot, connected, busy, search, onSearch, dir
   inspectDirectory: () => void; chooseDirectory: () => void; rediscover: () => void; select: (id: string) => void;
 }) {
   const [observationTime, setObservationTime] = useState(Date.now);
-  // Candidate reliability is time bound: re-evaluate exactly when the earliest
-  // evidence or workspace observation expires, instead of on a polling timer.
+  // The backend republishes when a candidate's display category moves; this
+  // deadline only re-renders the observation sentence for its own validity window.
   useEffect(() => {
     const now = Date.now();
-    const deadlines = (snapshot?.candidates ?? []).flatMap((candidate) => candidate.evidence.map((evidence) => evidence.expiresAt));
-    if (snapshot?.workspaceObservation) deadlines.push(snapshot.workspaceObservation.observedAt + WORKSPACE_OBSERVATION_MS);
-    const next = Math.min(...deadlines.filter((deadline) => Number.isFinite(deadline) && deadline > now));
-    if (!Number.isFinite(next)) return;
+    const next = nextDisplayDeadline(snapshot, now);
+    if (next === null) return;
     const timeout = window.setTimeout(() => setObservationTime(Date.now()), next - now + 1);
     return () => window.clearTimeout(timeout);
   }, [snapshot, observationTime]);
 
   const now = Math.max(observationTime, Date.now());
   const candidates = filterCandidates(snapshot?.candidates ?? [], search);
-  const grouped = groupCandidates(candidates, snapshot, now);
+  const grouped = groupCandidates(candidates);
   const observation = snapshot?.workspaceObservation;
   const observationFresh = Boolean(snapshot?.target) && observationAge(snapshot, now);
   const activePath = observationFresh && observation?.status === 'verified' ? observation.activePath : null;
@@ -56,7 +54,7 @@ export function ProjectsPanel({ snapshot, connected, busy, search, onSearch, dir
     </div>
     <label className="search-box"><Icon name="search" size={17} /><input data-autofocus aria-label="筛选已列出的工程候选" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="筛选候选：工程、路径或模块" /></label>
     <div className="results-summary"><span>工作区候选 {grouped.current.length} · 建议 {grouped.suggested.length} · 指定目录 {grouped.manual.length} · 历史 {grouped.history.length}{search ? '（筛选后）' : ''}</span></div>
-    <CandidateList groups={grouped} snapshot={snapshot} now={now} busy={busy} select={select} />
+    <CandidateList groups={grouped} busy={busy} select={select} />
     {!candidates.length && <div className="no-results"><Icon name="folder" size={30} /><h3>{search ? '没有匹配的工程候选' : '尚无可选择的鸿蒙工程'}</h3><p>{search ? '筛选仅作用于已列出的候选。指定目录请使用上方独立输入框。' : activePath ? '已取得工作区路径，但尚未确认可预览的实际鸿蒙工程。可指定应用根目录执行只读验证。' : '当前窗口没有提供可靠工程路径。可重新识别或手动指定目录。'}</p></div>}
   </>;
 }

@@ -1,113 +1,135 @@
+import type { ErrorCategory, RecoveryAction } from './model.ts';
+
 /**
- * Frontend normalization of native IPC failures.
+ * Frontend view of the structured IPC error contract (`IpcError`).
  *
- * The Rust IPC layer owns error codes, authorization and recovery semantics.
- * This module only reads what the backend actually sent; it never invents a
- * parallel wire contract. Until the structured contract lands, the opaque
- * legacy tokens that already exist in this repository are downgraded into the
- * same closed set, once, here:
+ * The backend owns the code, category, retryability and the single recovery
+ * action. The frontend only reads them: it groups them for display and maps the
+ * recovery action to a concrete hint or an affordance the user may activate. The
+ * action itself still goes back to the Rust backend, which re-validates the
+ * current scope, trust and toolchain before doing anything.
  *
- * - `STALE_REQUEST` (`src-tauri/src/ipc/mod.rs`) rejects a superseded target or
- *   preview session and becomes `staleScope`.
- * - `PROTOCOL_VERSION_UNSUPPORTED` (the structured `PreviewProtocolError` code)
- *   becomes `unsupported`, as does an unknown-command legacy reply.
- *
- * Every other failure stays `unknown` with its raw text preserved for display.
- * Unknown failures are never presented as success, as authorized, or as safe to
- * retry automatically, and no caller decides a business branch from message
- * text again. `unauthorized`, `sdkMissing` and `retryable` are declared so the
- * display layer can consume them the moment the backend reports them.
+ * `legacy` marks a value that did not carry the contract fields: a pre-contract
+ * string, a diagnostics-only transport payload, or the browser UI fixture. Those
+ * keep their raw text for display, are never retryable and offer no recovery
+ * action, so a legacy payload can never be presented as a success, as authorized
+ * or as safe to retry. No display layer matches message text.
  */
-export type AppErrorKind =
-  /** The request scope (target lifecycle or preview session) is no longer current. */
-  | 'staleScope'
-  /** The backend refused this action for the current session or user. */
-  | 'unauthorized'
-  /** A required toolchain (HarmonyOS SDK) is missing or unverified. */
-  | 'sdkMissing'
-  /** The backend or protocol does not implement this operation. */
-  | 'unsupported'
-  /** A transient failure the backend reported as explicitly retryable by the user. */
-  | 'retryable'
-  /** Not classified. Never treated as success and never retried automatically. */
-  | 'unknown';
-
-/** Recovery affordances the backend explicitly allows. Only the IPC layer fills these. */
-export type AppErrorRecovery = 'rediscover' | 'reselectProject' | 'retry' | 'configureSdk' | 'reconnect';
-
 export interface AppError {
-  kind: AppErrorKind;
-  /** Backend code when the backend sent one. Recorded for display and diagnostics only. */
-  code: string | null;
-  /** Text safe to display. Legacy strings are preserved verbatim. */
+  /** Backend `ErrorCode` wire value; `INTERNAL` when the payload carried none. */
+  code: string;
+  category: ErrorCategory;
   message: string;
-  /** Only what the backend explicitly reported; never guessed from message text. */
-  recovery: readonly AppErrorRecovery[];
-  /** True when only an opaque legacy string was available. */
+  retryable: boolean;
+  recovery: RecoveryAction;
+  details: string | null;
+  /** True when the thrown value did not carry the structured contract fields. */
   legacy: boolean;
 }
+
+/** Exhaustive by type: a new contract category fails to compile until it is named here. */
+export const errorCategoryLabels: Record<ErrorCategory, string> = {
+  validation: '请求无效', state: '状态已变化', trust: '执行信任', environment: '环境不支持',
+  storage: '本地存储', discovery: '工程发现', toolchain: '原生工具链', transport: '预览通道',
+  selection: '选择上下文', agent: 'Agent 投递', internal: '未识别',
+};
+
+/** Exhaustive by type: a new contract recovery action fails to compile until it is named here. */
+export const recoveryLabels: Record<RecoveryAction, string> = {
+  none: '', correctRequest: '请修正请求内容后重试', retryRequest: '后端允许重试该操作',
+  awaitCurrentOperation: '请等待当前原生操作结束', refreshSnapshot: '正在重新同步后端状态',
+  reselectTarget: '请重新连接目标窗口', reselectProject: '请重新选择当前工程',
+  confirmTrust: '请在工程信任中确认后继续', configureSdk: '请在原生工具链中指定 SDK 目录',
+  restartPreview: '可重新启动原生预览', rediscover: '可重新识别当前工程',
+  readDiagnostics: '请查看运行日志',
+};
+
+const recoveryActions = new Set<string>(Object.keys(recoveryLabels));
+const errorCategories = new Set<string>(Object.keys(errorCategoryLabels));
+
+/** Codes whose contract meaning the display layer acts on. Everything else is data. */
+const staleScopeCodes = new Set<string>(['STALE_REQUEST', 'STALE_TARGET', 'STALE_PROJECT', 'STALE_SESSION']);
+const unsupportedCodes = new Set<string>(['PROTOCOL_VERSION_UNSUPPORTED', 'UNSUPPORTED_PLATFORM', 'UNSUPPORTED_ENVIRONMENT']);
 
 const brand = Symbol('arkdock.appError');
 interface Branded extends AppError { readonly [brand]: true }
 
-/** Codes verified in this repository. The table grows only from real backend values. */
-const verifiedCodes: Readonly<Record<string, AppErrorKind>> = {
-  STALE_REQUEST: 'staleScope',
-  PROTOCOL_VERSION_UNSUPPORTED: 'unsupported',
-};
+/** Same token shape the backend uses, so prose that merely contains a colon is not a code. */
+function codeToken(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64) return null;
+  for (const character of value) {
+    const allowed = (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character === '_';
+    if (!allowed) return null;
+  }
+  return value;
+}
 
-/** The single legacy message pattern kept: a backend without the binary frame commands. */
-const unsupportedCommand = /(?:command.*not found|unknown command)/i;
-const recoveries = new Set<AppErrorRecovery>(['rediscover', 'reselectProject', 'retry', 'configureSdk', 'reconnect']);
+function legacy(message: string, token: string | null = null): AppError {
+  // A legacy payload keeps its text but carries no category, retryability or
+  // recovery: those are contract fields, and inventing them would be a second,
+  // incompatible protocol. The leading code token is preserved for diagnostics.
+  return { code: token ?? 'INTERNAL', category: 'internal', message, retryable: false, recovery: 'none', details: null, legacy: true, [brand]: true } as Branded;
+}
 
-function create(init: { kind: AppErrorKind; code: string | null; message: string; recovery?: readonly AppErrorRecovery[]; legacy?: boolean }): AppError {
-  return { kind: init.kind, code: init.code, message: init.message, recovery: init.recovery ?? [], legacy: init.legacy ?? false, [brand]: true } as Branded;
+/** A pre-contract string may lead with a contract code token; the match is confined here. */
+function legacyCode(message: string): string | null {
+  const head = message.split(':', 1)[0]?.trim() ?? '';
+  return codeToken(head);
 }
 
 export function isAppError(value: unknown): value is AppError {
   return Boolean(value && typeof value === 'object' && (value as Partial<Branded>)[brand] === true);
 }
 
-function legacyToken(message: string): string | null {
-  for (const token of Object.keys(verifiedCodes)) {
-    if (message === token || message.startsWith(`${token}:`) || message.startsWith(`${token} `)) return token;
-  }
-  return null;
-}
-
-function classify(message: string, code: string | null): AppErrorKind {
-  const token = code ?? legacyToken(message);
-  if (token && verifiedCodes[token]) return verifiedCodes[token];
-  return unsupportedCommand.test(message) ? 'unsupported' : 'unknown';
-}
-
-function readRecovery(value: unknown): readonly AppErrorRecovery[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is AppErrorRecovery => typeof item === 'string' && recoveries.has(item as AppErrorRecovery));
-}
+interface RawFailure { code?: unknown; message?: unknown; category?: unknown; retryable?: unknown; recovery?: unknown; details?: unknown }
 
 /**
- * Normalizes any thrown value into the closed `AppError` set. Idempotent, so
- * callers may normalize defensively without losing the original classification.
+ * Normalizes any thrown value into the contract shape. Idempotent, so callers may
+ * normalize defensively: a value that already carries the contract is returned
+ * unchanged, and one that does not is downgraded instead of being guessed at.
  */
 export function normalizeError(reason: unknown): AppError {
   if (isAppError(reason)) return reason;
-  if (typeof reason === 'string') return create({ kind: classify(reason, null), code: legacyToken(reason), message: reason, legacy: true });
+  if (typeof reason === 'string') return legacy(reason, legacyCode(reason));
   if (reason && typeof reason === 'object') {
-    const record = reason as { code?: unknown; message?: unknown; recovery?: unknown };
-    const code = typeof record.code === 'string' && record.code ? record.code : null;
-    const message = typeof record.message === 'string' && record.message ? record.message : code ?? String(reason);
-    return create({ kind: classify(message, code), code, message, recovery: readRecovery(record.recovery), legacy: code === null });
+    const raw = reason as RawFailure;
+    const code = codeToken(raw.code);
+    const message = typeof raw.message === 'string' && raw.message ? raw.message : code ?? String(reason);
+    if (!errorCategories.has(String(raw.category)) || !recoveryActions.has(String(raw.recovery)) || typeof raw.retryable !== 'boolean') {
+      return legacy(message, code ?? legacyCode(message));
+    }
+    return {
+      code: code ?? 'INTERNAL', category: raw.category as ErrorCategory, message, retryable: raw.retryable,
+      recovery: raw.recovery as RecoveryAction, details: typeof raw.details === 'string' && raw.details ? raw.details : null,
+      legacy: false, [brand]: true,
+    } as Branded;
   }
-  return create({ kind: 'unknown', code: null, message: String(reason) });
+  return legacy(String(reason));
 }
 
-/** Display text for any failure; readable even when the throw site was not an Error. */
+/** Display text for any failure; the sanitized backend details are appended when present. */
 export function describeError(reason: unknown): string {
-  return reason == null ? '' : normalizeError(reason).message;
+  if (reason == null) return '';
+  const error = normalizeError(reason);
+  return error.details ? `${error.message}（${error.details}）` : error.message;
 }
 
-/** A superseded scope may be re-issued against the latest confirmed state. */
+/** The backend reported that the request's target or session scope is no longer current. */
 export function isStaleScope(reason: unknown): boolean {
-  return normalizeError(reason).kind === 'staleScope';
+  return staleScopeCodes.has(normalizeError(reason).code);
+}
+
+/** The backend does not implement this operation, platform or protocol version. */
+export function isUnsupportedOperation(reason: unknown): boolean {
+  return unsupportedCodes.has(normalizeError(reason).code);
+}
+
+/** Only an explicit backend `retryable` flag, never a legacy or unclassified value. */
+export function isRetryable(reason: unknown): boolean {
+  const error = normalizeError(reason);
+  return !error.legacy && error.retryable;
+}
+
+export function errorCategoryLabel(error: AppError): string {
+  return errorCategoryLabels[error.category];
 }

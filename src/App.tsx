@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppSnapshot, InteractionMode } from './ipc/model.ts';
 import { nativeBridge } from './ipc/client.ts';
 import type { UiBridge } from './ipc/client.ts';
-import { describeError } from './ipc/errors.ts';
+import { describeError, errorCategoryLabel } from './ipc/errors.ts';
 import { deriveUiState } from './view-state.ts';
 import type { PreviewFrame } from './preview/frame-types.ts';
 import { InspectorActionsBar, InspectorToolbar } from './inspector/InspectorToolbar.tsx';
@@ -28,6 +28,8 @@ import { useNotices } from './app/notices.ts';
 import { useNavigation } from './app/useNavigation.ts';
 import { panelNames } from './app/navigation.ts';
 import type { Panel } from './app/navigation.ts';
+import { recoveryOffer, recoveryText } from './app/recovery.ts';
+import type { RecoveryIntent } from './app/recovery.ts';
 import { useDesktopSession } from './app/useDesktopSession.ts';
 import type { SnapshotTransition } from './app/useDesktopSession.ts';
 import { usePreferences } from './app/usePreferences.ts';
@@ -165,6 +167,25 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
     try { await navigator.clipboard.writeText(text); notify(`${label}已复制`); }
     catch { report('当前环境无法访问剪贴板。可在路径或诊断中选中文字复制。'); }
   }
+  // The backend's recovery action, narrowed to what this snapshot can actually do.
+  // Every branch re-enters the Rust backend, which re-validates before acting; none
+  // of them re-issues an Agent delivery, a credential change or a trust change.
+  function runRecovery(intent: RecoveryIntent) {
+    switch (intent) {
+      case 'refreshSnapshot': void act('snapshot', {}); return;
+      case 'rediscover': void act('rediscover', {}); return;
+      case 'openProjects': clear(); navigate('projects'); return;
+      case 'openTrust': clear(); navigate('trust'); return;
+      case 'configureSdk': void act('configure_sdk', {}); return;
+      case 'restartPreview': void act('refresh_preview', {}); return;
+      case 'openDiagnostics': clear(); navigate('diagnostics'); return;
+    }
+  }
+  const recovery = recoveryOffer(notices.error, {
+    connected, target: Boolean(state?.target), project: Boolean(state?.project),
+    trusted: Boolean(state?.trusted), refreshAvailable: ui.capabilities.refresh.status === 'available',
+  });
+  const recoveryHint = recoveryText(notices.error);
   const exitInspection = useCallback(() => setInteractionMode('interact'), []);
   const clickNative = useCallback(async (frame: PreviewFrame, x: number, y: number) => {
     if (inputPending.current || pendingRef.current || interactionMode !== 'interact') return;
@@ -242,7 +263,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       {panel === 'diagnostics' && <RuntimeLogs snapshot={state} />}
       {panel === 'help' && <HelpPanel />}
     </Sheet>}
-    {(notices.error || notices.feedback) && <div className={`toast ${notices.error ? 'error' : ''}`} role={notices.error ? 'alert' : 'status'}><span>{notices.error ? describeError(notices.error) : notices.feedback}</span><button className="icon-button" disabled={Boolean(panel)} aria-label="关闭提示" onClick={clear}><Icon name="close" size={16} /></button></div>}
+    {(notices.error || notices.feedback) && <div className={`toast ${notices.error ? 'error' : ''}`} role={notices.error ? 'alert' : 'status'} title={notices.error && !notices.error.legacy ? `${notices.error.code} · ${errorCategoryLabel(notices.error)}${notices.error.retryable ? ' · 可重试' : ''}` : undefined}><span>{notices.error ? `${describeError(notices.error)}${recoveryHint ? ` · ${recoveryHint}` : ''}` : notices.feedback}</span>{recovery && <button type="button" className="toast-action" disabled={Boolean(panel)} onClick={() => runRecovery(recovery.intent)}>{recovery.label}</button>}<button className="icon-button" disabled={Boolean(panel)} aria-label="关闭提示" onClick={clear}><Icon name="close" size={16} /></button></div>}
     <DockRipple snapshot={state} motion={effectiveMotion} />
   </main>;
 }

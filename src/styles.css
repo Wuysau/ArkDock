@@ -313,6 +313,8 @@ button.selected { background: var(--selected); border-color: var(--accent); colo
 .help-steps li + li { margin-top: 8px; }
 .toast { position: absolute; bottom: 76px; left: 16px; right: 16px; z-index: 30; display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--highlight); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow); animation: state-in var(--motion-state) var(--ease); }
 .toast > span { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
+.toast-action { background: transparent; border: 0; color: inherit; font-size: 11px; white-space: nowrap; flex-shrink: 0; padding: 4px 2px; }
+.toast-action:disabled { opacity: .55; }
 .toast.error { border-color: var(--danger); color: var(--danger); }
 .layout-notice { display: flex; flex-wrap: wrap; align-items: center; margin: 8px 12px 0; padding: 10px; gap: 8px; border: 1px solid var(--warning); border-radius: 8px; font-size: 11px; background: var(--surface); }
 .layout-notice > div { flex: 1; min-width: 150px; }
