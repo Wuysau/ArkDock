@@ -39,11 +39,15 @@ test('project Stop installation preserves other hooks, is idempotent and bootstr
     assert.equal(f.git(['status', '--porcelain']), '');
     const config = JSON.parse(readFileSync(join(f.root, '.codex/hooks.json'), 'utf8'));
     assert.deepEqual(config.hooks.Stop[0].hooks, [other]);
-    assert.equal(config.hooks.Stop.at(-1).hooks[0].type, 'command');
+    assert.equal(config.hooks.Stop[1].hooks[0].type, 'command');
+    assert.match(config.hooks.Stop[1].hooks[0].statusMessage, /^ArkDock task completion: /);
+    assert.equal(config.hooks.Stop[2].hooks[0].type, 'command');
+    assert.match(config.hooks.Stop[2].hooks[0].statusMessage, /^ArkDock autocommit: /);
+    assert.match(config.hooks.Stop[2].hooks[0].command, /autocommit\.ps1"$/);
     const before = readFileSync(join(f.root, 'AGENTS.md'), 'utf8');
     installTaskHooks({ cwd: f.root });
     assert.equal(readFileSync(join(f.root, 'AGENTS.md'), 'utf8'), before);
-    assert.equal(JSON.parse(readFileSync(join(f.root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 2);
+    assert.equal(JSON.parse(readFileSync(join(f.root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 3);
     const task = join(f.directory, 'task'); f.git(['worktree', 'add', '-b', 'codex/fixture', task]);
     assert.ok(existsSync(join(task, '.codex/hooks.json')));
     const taskPolicy = readFileSync(join(task, 'AGENTS.md'), 'utf8');
@@ -52,6 +56,11 @@ test('project Stop installation preserves other hooks, is idempotent and bootstr
     assert.match(taskPolicy, /不直接修改 dev\/main，不执行 ready\/finish/);
     assert.match(taskPolicy, /仅由 Integration Agent.*代码已审阅且完整集成验证通过/);
     assert.match(taskPolicy, /不得替代用户验收后的清理阶段/);
+    assert.match(taskPolicy, /chore\(autocommit\)/);
+    const taskConfig = JSON.parse(readFileSync(join(task, '.codex/hooks.json'), 'utf8'));
+    assert.equal(taskConfig.hooks.Stop.length, 2);
+    assert.match(taskConfig.hooks.Stop[0].hooks[0].statusMessage, /^ArkDock task completion: /);
+    assert.match(taskConfig.hooks.Stop[1].hooks[0].statusMessage, /^ArkDock autocommit: /);
     assert.equal(JSON.parse(readFileSync(join(task, '.codex/hooks.json'), 'utf8')).hooks.Stop.at(-1).hooks[0].command, config.hooks.Stop.at(-1).hooks[0].command);
   } finally { cleanup(f.directory); }
 });
