@@ -20,14 +20,15 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
       && value.identity.buildId === actual.build.buildId && value.identity.generation === actual.build.generation);
   }
   useEffect(() => {
+    const revisions = serial;
     liveRef.current = true; serial.current++; setState(null); setError(null); setPending(null); setConnectionConsent(false);
-    if (bridge.transfer && snapshot?.sessionId && snapshot.target) {
+    if (bridge.transfer && latest.current?.sessionId && latest.current.target) {
       const revision = serial.current;
       void bridge.transfer('device_runtime_state', {}, scope()).then((value) => {
         if (liveRef.current && revision === serial.current && belongs(value)) setState(value);
       }).catch((reason) => { if (liveRef.current && revision === serial.current) setError(String(reason)); });
     }
-    return () => { liveRef.current = false; serial.current++; };
+    return () => { liveRef.current = false; revisions.current++; };
   }, [bridge, key]);
   async function act(action: DeviceRuntimeAction, targetId: string | null = null) {
     if (!bridge.transfer || !state?.identity || pending && action !== 'cancel' || (action === 'discover' || action === 'select') && !connectionConsent) return;

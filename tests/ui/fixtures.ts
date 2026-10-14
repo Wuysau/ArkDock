@@ -122,7 +122,18 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
     const next = snapshot(scenario, ++revision);
     if (scenario === 'stale' || scenario === 'diagnostics') {
       const good = { ...next, phase: 'running' as const, build: { ...next.build, buildId: 'demo-build-1', generation: 1, error: null, stale: false }, diagnostics: [] };
-      publish(good); emitFrame(); current = { ...next, revision: ++revision }; emitState();
+      publish(good);
+      // Preserve a real decoded/displayed fixture bitmap before emitting build failure.
+      // A synchronous good/stale burst can invalidate the frame while createImageBitmap awaits.
+      const presented = (event: Event) => {
+        const frame = (event as CustomEvent<{ sessionId: string; buildId: string }>).detail;
+        if (frame?.sessionId !== good.sessionId || frame.buildId !== good.build.buildId) return;
+        window.removeEventListener('arkdock:frame-presented', presented);
+        if (current.target?.id !== good.target?.id || current.sessionId !== good.sessionId || current.build.buildId !== good.build.buildId || current.phase !== 'running') return;
+        current = { ...current, phase: next.phase, build: next.build, diagnostics: next.diagnostics, revision: ++revision }; emitState();
+      };
+      window.addEventListener('arkdock:frame-presented', presented);
+      emitFrame();
     } else { publish(next); if (scenario === 'running' || scenario === 'recovery') emitFrame(); }
   }
   async function perform<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope?: RequestScope): Promise<AppSnapshot> {
@@ -151,7 +162,6 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       if (name === 'maximize_pair' || name === 'restore_pair') publish({ ...current, revision: ++revision, pairLayout: { state: name === 'maximize_pair' ? 'maximized' : 'paired', preferredWidthDip: 440, reason: 'UI 演示仅验证共同布局状态，不操作系统窗口。' } });
       else if (name === 'detach') publish(base(++revision));
       else if (name === 'rediscover') publish({ ...current, revision: ++revision, phase: 'discovering', candidates: [], project: null, sessionId: null, trusted: false, sessionRef: null });
-      else if (name === 'cancel_discovery') publish({ ...current, revision: ++revision, phase: 'selectProject', candidates: [], dockHint: null });
       else if (name === 'begin_drag') publish({ ...current, revision: ++revision, dockHint: 'Release to bind Windows Terminal' });
       else if (name === 'select_candidate') {
         const chosen = current.candidates.find((item) => item.id === (args as unknown as { candidateId: string }).candidateId);

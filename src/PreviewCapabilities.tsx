@@ -14,9 +14,10 @@ export function PreviewCapabilities({ snapshot, store, busy, refresh, controls }
   const frame = useSyncExternalStore(store.subscribeDisplayed, store.getDisplayed, store.getDisplayed);
   const { capabilities } = deriveUiState(snapshot, frame, controls?.state);
   const state = controls?.state;
+  const width = state?.width, height = state?.height, dpi = state?.dpi;
   const ime = state?.capabilities.find((item) => item.name === 'ime');
   const [resolution, setResolution] = useState({ width: 360, height: 640, dpi: 160 });
-  useEffect(() => { if (state) setResolution({ width: state.width, height: state.height, dpi: state.dpi }); }, [state?.width, state?.height, state?.dpi]);
+  useEffect(() => { if (width !== undefined && height !== undefined && dpi !== undefined) setResolution({ width, height, dpi }); }, [width, height, dpi]);
   const configured = Boolean(state?.experimentalEnabled && state.inputReady && identityEqual(state.identity, displayedIdentity(snapshot, frame)));
   const ready = (name: string) => Boolean(controls && configured && !busy && !controls.pending && controlAvailable(state ?? null, name));
   const validResolution = Number.isInteger(resolution.width) && resolution.width >= 50 && resolution.width <= 3000
@@ -25,7 +26,7 @@ export function PreviewCapabilities({ snapshot, store, busy, refresh, controls }
   return <>
     <p className="muted">能力来自当前后端。画面缩放只影响查看尺寸。新增控制：NOT_RUN — 等待用户验收。</p>
     {controls && <div className="native-controls-settings">
-      <label className="setting-toggle"><span><strong>启用实验性原生控制</strong><small>官方公开协议已接入；当前 SDK 的行为须由你核验。</small></span>
+      <label className="setting-toggle" aria-label="启用实验性原生控制"><span><strong>启用实验性原生控制</strong><small>官方公开协议已接入；当前 SDK 的行为须由你核验。</small></span>
         <input type="checkbox" checked={Boolean(state?.experimentalEnabled)} disabled={!state || busy || Boolean(controls.pending)}
           onChange={(event) => void controls.enable(event.target.checked)} /></label>
       <p className="info-note">{state?.reason ?? '等待原生控制状态'}</p>

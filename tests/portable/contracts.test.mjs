@@ -26,8 +26,25 @@ test('正式路径不能自动选择测试后端', () => {
 
 test('Rust 自定义命令的参数与单一 IPC 定义一致', () => {
   const definition = JSON.parse(readFileSync('protocol/model.json', 'utf8'));
-  const source = ['src-tauri/src/desktop.rs', 'src-tauri/src/desktop/inspection.rs', 'src-tauri/src/desktop/agent_delivery.rs'].map((path) => readFileSync(path, 'utf8')).join('\n');
+  const desktop = readFileSync('src-tauri/src/desktop.rs', 'utf8');
+  const sources = new Map([['', desktop]]);
+  for (const [, module] of desktop.matchAll(/^mod ([a-z_]+);\r?$/gm)) {
+    sources.set(module, readFileSync(`src-tauri/src/desktop/${module}.rs`, 'utf8'));
+  }
+  const handler = desktop.match(/tauri::generate_handler!\[([\s\S]*?)\]/);
+  assert.ok(handler, '缺少桌面命令注册');
+  const registered = handler[1].split(',').map((entry) => entry.trim()).filter(Boolean);
+  const commandNames = registered.map((entry) => entry.split('::').at(-1));
+  assert.equal(new Set(commandNames).size, commandNames.length, '命令注册重复');
+  assert.deepEqual(commandNames.toSorted(), Object.keys(definition.commands).toSorted(), '注册命令与单一来源漂移');
+  const declared = [...sources].flatMap(([module, source]) => [...source.matchAll(/#\[tauri::command\]\s*(?:pub\(crate\) )?(?:async )?fn ([a-z_]+)\(/g)]
+    .map(([, name]) => module ? `${module}::${name}` : name));
+  assert.deepEqual(declared.toSorted(), registered.toSorted(), '原生命令声明与实际注册漂移');
   for (const [name, fields] of Object.entries(definition.commands)) {
+    const entry = registered.find((entry) => entry.split('::').at(-1) === name);
+    const module = entry.includes('::') ? entry.slice(0, entry.lastIndexOf('::')) : '';
+    assert.ok(sources.has(module), `未声明的命令模块：${entry}`);
+    const source = sources.get(module);
     const response = definition.commandResponses?.[name] ?? { rust: 'AppSnapshot', error: 'String' };
     const result = `Result<${response.rust}, ${response.error}>`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const signature = source.match(new RegExp(`#\\[tauri::command\\]\\s*(?:pub\\(crate\\) )?(?:async )?fn ${name}\\(([^)]*)\\)\\s*->\\s*${result}`));

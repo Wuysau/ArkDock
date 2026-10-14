@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, NativeControlIdentity, NativeControlReceipt, NativeControlRequest, NativeControlState, RequestScope } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
 import type { FrameStore } from '../frame-store.ts';
@@ -39,12 +39,12 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     return Boolean(actual && value.identity && value.identity.workspaceId === actual.project?.id && value.identity.sessionId === actual.sessionId
       && value.identity.buildId === actual.build.buildId && value.identity.generation === actual.build.generation);
   };
-  const sameRuntime = (identity: NativeControlIdentity) => {
+  const sameRuntime = useCallback((identity: NativeControlIdentity) => {
     const actual = context.current.snapshot;
     return Boolean(actual && actual.project?.id === identity.workspaceId && actual.sessionId === identity.sessionId
       && actual.build.buildId === identity.buildId && actual.build.generation === identity.generation);
-  };
-  async function awaitOperation(receipt: NativeControlReceipt, requestScope: RequestScope, commandOnly: boolean, inputReady = false): Promise<NativeControlReceipt> {
+  }, []);
+  const awaitOperation = useCallback(async (receipt: NativeControlReceipt, requestScope: RequestScope, commandOnly: boolean, inputReady = false): Promise<NativeControlReceipt> => {
     if (!bridge.transfer) throw new Error('缺少原生控制桥接。');
     const deadline = performance.now() + 20_000;
     let latest = receipt;
@@ -66,7 +66,8 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       await new Promise<void>((resolve) => setTimeout(resolve, 60));
     }
     throw new Error('等待原生操作确认超时；命令接受与画面完成仍未得到确认。');
-  }
+  }, [bridge, sameRuntime]);
+  const operationRef = useRef(awaitOperation); operationRef.current = awaitOperation;
   const accept = (value: NativeControlState) => {
     if (!active.current || !currentState(value)) return;
     context.current.state = value;
@@ -76,18 +77,19 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     if (!bridge.transfer) throw new Error('缺少原生控制桥接。');
     wakeRef.current();
     const queued = await bridge.transfer('preview_control_submit', { request }, requestScope);
-    return awaitOperation(queued, requestScope, true);
+    return operationRef.current(queued, requestScope, true);
   }, async (identity, requestScope) => {
     if (bridge.transfer) {
       const queued = await bridge.transfer('preview_control_submit', { request: controlRequest(identity, { action: 'pointerCancel' }) }, requestScope);
-      return awaitOperation(queued, requestScope, false);
+      return operationRef.current(queued, requestScope, false);
     }
   }, (reason, identity) => { if (active.current && sameRuntime(identity)) setError(String(reason)); }));
   useEffect(() => { active.current = true; return () => { active.current = false; void input.cancel(); }; }, [input]);
   const runtimeKey = JSON.stringify([snapshot?.target?.id, snapshot?.project?.id, snapshot?.sessionId, snapshot?.build.buildId, snapshot?.build.generation]);
   useEffect(() => {
     setState(null); setError(null); inputSerial.current++; inputQueue.current = []; void input.cancel();
-    if (!bridge.transfer || !snapshot?.target || !snapshot.sessionId || !snapshot.project) return;
+    const actual = context.current.snapshot;
+    if (!bridge.transfer || !actual?.target || !actual.sessionId || !actual.project) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     const requestScope = scope();
@@ -124,7 +126,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     const visibility = () => { if (!context.current.windowVisible) cancelLocalInput(true); };
     window.addEventListener('blur', blur); document.addEventListener('visibilitychange', visibility);
     return () => { window.removeEventListener('blur', blur); document.removeEventListener('visibilitychange', visibility); };
-  }, [visible, windowVisible, input, bridge]);
+  }, [visible, windowVisible, input, bridge, awaitOperation]);
   function binding(frame: PreviewFrame, name: string) {
     const actual = context.current;
     const identity = displayedIdentity(actual.snapshot, frame);
@@ -242,7 +244,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   }
   function enqueueText(text: string) {
     if (!text) return;
-    if (/[\u0000\r\n]/u.test(text)) { setError('文字提交包含换行或无效字符；换行请使用 Enter 按键。'); return; }
+    if (text.includes(String.fromCodePoint(0)) || /[\r\n]/u.test(text)) { setError('文字提交包含换行或无效字符；换行请使用 Enter 按键。'); return; }
     const scalars = Array.from(text);
     const chunks: string[] = [];
     for (let offset = 0; offset < scalars.length; offset += 128) chunks.push(scalars.slice(offset, offset + 128).join(''));

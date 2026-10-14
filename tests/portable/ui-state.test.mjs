@@ -75,16 +75,45 @@ test('构建失败保留同会话旧画面，明确过期并关闭输入', () =>
   assert.equal(deriveUiState(failed, { ...nativeFrame, sessionId: 'old-session' }).preview, 'error');
 });
 
-test('未接入的姿态、文字、滑动与设备控制不能由能力布尔值伪造可执行状态', () => {
+test('姿态、文字、滑动与设备控制等待独立能力状态，后端布尔值不能伪造能力', () => {
   const ui = deriveUiState(snapshot({ backend: { ...snapshot().backend, canSwipe: true, canText: true, canRotate: true } }), nativeFrame);
-  for (const name of ['swipe', 'text', 'rotate', 'page', 'device', 'appTheme', 'emulator', 'physicalDevice']) {
-    assert.equal(ui.capabilities[name].status, 'unsupported', name);
-    assert.ok(ui.capabilities[name].reason.length > 0, name);
+  for (const name of ['swipe', 'text', 'rotate', 'page', 'device', 'appTheme']) {
+    assert.equal(ui.capabilities[name].status, 'unavailable', name);
+    assert.match(ui.capabilities[name].reason, /等待原生控制能力状态/, name);
+    assert.equal(deriveUiState(null, null).capabilities[name].status, 'pending', name);
+  }
+  for (const name of ['emulator', 'physicalDevice']) {
+    assert.equal(ui.capabilities[name].status, 'blocked', name);
+    assert.match(ui.capabilities[name].reason, /核验|尚待接入/, name);
   }
   const runningWithoutClick = deriveUiState(snapshot({ backend: { ...snapshot().backend, canClick: false } }), nativeFrame);
   assert.equal(runningWithoutClick.capabilities.click.status, 'unsupported');
   assert.equal(runningWithoutClick.inputAllowed, false);
   assert.doesNotMatch(runningWithoutClick.previewLabel, /可交互/);
+});
+
+test('原生控制报告保留实验与阻塞状态及原因，执行信任和 SDK 门禁优先', () => {
+  const names = { swipe: 'touch', text: 'text', rotate: 'orientation', page: 'page', device: 'profile', appTheme: 'colorMode' };
+  const control = { experimentalEnabled: false, inputReady: false, capabilities: Object.values(names).map((name) => ({
+    name, status: 'experimental', reason: `${name} 公开协议已接入；NOT_RUN 等待实际 SDK 验收`,
+  })) };
+  const ui = deriveUiState(snapshot(), nativeFrame, control);
+  for (const [name, nativeName] of Object.entries(names)) {
+    assert.equal(ui.capabilities[name].status, 'experimental', name);
+    assert.equal(ui.capabilities[name].reason, control.capabilities.find((item) => item.name === nativeName).reason);
+  }
+  const reported = { ...control, capabilities: [{ name: 'text', status: 'available', reason: '当前原生后端明确报告支持字符提交' },
+    { name: 'orientation', status: 'blocked', reason: '设备方向配置尚未确认' }] };
+  assert.deepEqual(deriveUiState(snapshot(), nativeFrame, reported).capabilities.text, { status: 'available', reason: reported.capabilities[0].reason });
+  assert.deepEqual(deriveUiState(snapshot(), nativeFrame, reported).capabilities.rotate, { status: 'blocked', reason: reported.capabilities[1].reason });
+  assert.equal(deriveUiState(snapshot(), nativeFrame, reported).capabilities.swipe.status, 'unavailable', '缺失单项能力不能继承其他能力');
+  for (const [state, status] of [[snapshot({ trusted: false }), 'pending'],
+    [snapshot({ backend: { ...snapshot().backend, available: false, reason: 'SDK_MISSING' } }), 'unavailable']]) {
+    for (const name of Object.keys(names)) assert.equal(deriveUiState(state, nativeFrame, reported).capabilities[name].status, status, name);
+  }
+  const device = { reason: 'HDC 设备已连接；签名、部署与画面传输仍未核验', hdcPresent: true, deploymentReady: true, frameReady: false };
+  const withDevice = deriveUiState(snapshot(), nativeFrame, control, device);
+  for (const name of ['emulator', 'physicalDevice']) assert.deepEqual(withDevice.capabilities[name], { status: 'blocked', reason: device.reason });
 });
 
 test('最新帧邮箱合并一帧内通知并拒绝旧会话、构建和顺序', () => {

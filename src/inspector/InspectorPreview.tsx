@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MutableRefObject } from 'react';
 import type { InspectorBounds, InspectorNode, InspectorTree, InteractionMode, SelectionContext } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
@@ -54,7 +54,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
   const surfaceWidth = frame?.width ?? 0;
   const surfaceHeight = frame?.height ?? 0;
   const index = useMemo(() => tree && matched ? createHitIndex(tree.nodes, surfaceWidth, surfaceHeight) : null, [tree, surfaceWidth, surfaceHeight, matched]);
-  async function requestTree(requested: BinaryPreviewFrame): Promise<InspectionResult> {
+  const requestTree = useCallback(async (requested: BinaryPreviewFrame): Promise<InspectionResult> => {
     if (!bridge.transfer) throw new Error('缺少桌面桥接。');
     queryPending.current = true;
     lastQueryAt.current = performance.now();
@@ -68,7 +68,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
       if (pendingTreeRequest.current === request) pendingTreeRequest.current = null;
       queryPending.current = false;
     }
-  }
+  }, [bridge, targetId, sessionId]);
   useEffect(() => () => { selectionSerial.current++; }, []);
   useEffect(() => {
     setSelection(null); setTree(null); setTreeAnchor(null); setCandidates([]); inspectionCache.current = null; selectionSerial.current++;
@@ -129,7 +129,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
     }
     timer = setTimeout(() => void query(), 0);
     return () => { live = false; clearTimeout(timer); };
-  }, [stage.visible, interactionMode, frameIdentity, current, bridge, queryRevision, targetId, sessionId]);
+  }, [stage.visible, interactionMode, frameIdentity, current, bridge, queryRevision, targetId, sessionId, requestTree]);
   async function select(bounds: InspectorBounds, node: InspectorNode | null, hits: InspectorNode[]) {
     const actual = frameRef.current;
     if (!actual || !current || !bridge.transfer || activity.current.mode !== 'inspect' || !activity.current.visible) { onError?.('当前画面不可选择，请等待有效原生画面后重选。'); return; }

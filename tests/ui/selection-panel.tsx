@@ -5,41 +5,26 @@ import { SelectionPanel } from '../../src/inspector/SelectionPanel.tsx';
 import { SelectionOverlay } from '../../src/inspector/SelectionOverlay.tsx';
 import { createHitIndex } from '../../src/inspector/selection-model.ts';
 import type { UiBridge, DataCommand } from '../../src/ipc/client.ts';
-import type { AgentCapabilities, AgentSessionList, InspectorBounds, InspectorNode, RequestScope, SelectionContext } from '../../src/ipc/model.ts';
+import type { InspectorBounds, InspectorNode, RequestScope, SelectionContext } from '../../src/ipc/model.ts';
 import '../../src/styles.css';
 import '../../src/inspector/inspector.css';
 
-const scenarios = ['not-connected-empty', 'not-connected-filled', 'verified-empty', 'verified-filled', 'busy-filled', 'assisted-filled',
+const scenarios = ['idle-empty', 'idle-filled', 'pending-inspect', 'confirmed-offer', 'inspect-failure',
   'overlay-pointer', 'overlay-semantic', 'overlay-keyboard'] as const;
 type Scenario = typeof scenarios[number];
 const requested = new URLSearchParams(location.search).get('scenario');
-const scenario: Scenario = scenarios.includes(requested as Scenario) ? requested as Scenario : 'not-connected-empty';
+const scenario: Scenario = scenarios.includes(requested as Scenario) ? requested as Scenario : 'idle-empty';
 const scope = { targetId: 'layout-fixture-target', sessionId: 'layout-fixture-session' };
 const calls: string[] = [];
-const progress = { imageReads: 0, sessionReads: 0, selectedContexts: 0 };
+const progress = { imageReads: 0, inspectReads: 0, selectedContexts: 0 };
 const eventSelections: { nodeId: string | null; bounds: InspectorBounds }[] = [];
 const eventNode: InspectorNode = { nodeId: 'fixture-center-button', componentType: 'Button', parentId: null, children: [],
   bounds: { x: 120, y: 260, width: 120, height: 120 }, visible: true, attributes: [], page: 'UI fixture only', depth: 0, paintOrder: 1 };
 const eventIndex = createHitIndex([eventNode], 360, 640);
 const delay = () => new Promise<void>((done) => window.setTimeout(done, 25));
-const capabilities: AgentCapabilities = { identifyCurrentSession: true, directSend: true, images: true,
-  fileReferences: true, busyState: true, receipt: true, cancelPending: true };
 const now = Date.now();
 const expiry = now + 600_000;
-const connected = scenario.startsWith('verified') || scenario === 'busy-filled';
 const workspaceName = 'ArkDock UI layout fixture · 很长的工程名用于验证窄窗中的初始操作可见性与换行行为';
-const binding = { bindingId: 'fixture-binding', agentKind: 'codex' as const, targetId: scope.targetId,
-  process: { pid: 1, startedAt: 'UI fixture only' }, workspaceId: 'fixture-workspace', agentSessionId: 'fixture-agent-session',
-  conversationOrThreadId: 'fixture-thread-with-long-synthetic-identifier-for-narrow-layout-visibility',
-  transportKind: 'explicitBridge' as const, writable: true, capabilities, observedAt: now, expiresAt: expiry,
-  reason: 'TEST bridge only; no external session', transportInstanceId: 'fixture-transport', agentVersion: 'fixture-version',
-  verifiedAt: now, bindingEvidence: 'Synthetic verified binding for layout checks only' };
-const sessions: AgentSessionList = { adapters: [], bindings: connected ? [binding] : [],
-  registrations: connected ? [{ registrationId: 'fixture-registration', agentKind: 'codex', agentVersion: 'fixture-version',
-    transportKind: 'explicitBridge', transportInstanceId: binding.transportInstanceId, agentSessionId: binding.agentSessionId,
-    conversationOrThreadId: binding.conversationOrThreadId, workspaceId: 'fixture-workspace',
-    workspaceRoot: 'D:/UI-fixture-only/not-a-real-project', pid: 1, capabilities, observedAt: now, expiresAt: expiry,
-    busy: scenario === 'busy-filled', reason: 'Synthetic layout session only' }] : [] };
 let selection: SelectionContext = { selectionId: 'sel-layout-fixture-0123456789abcdef', workspaceId: 'fixture-workspace',
   workspaceName, sessionId: scope.sessionId, buildId: 'fixture-build', generation: 1, frameSequence: 1,
   selectionKind: 'component', inspectionExactFrameMatch: false,
@@ -53,7 +38,7 @@ let selection: SelectionContext = { selectionId: 'sel-layout-fixture-0123456789a
     line: 128, reason: '源码位置仅是合成候选。该说明故意保留较长文字，验证面板会将详细证据折叠且不会把修改意见和 Agent 操作挤出初始视口。' },
   screenshot: { artifactId: 'fixture-screenshot', format: 'jpeg', width: 360, height: 640, byteLength: 0, sha256: 'fixture-only' },
   crop: { artifactId: 'fixture-crop', format: 'jpeg', width: 280, height: 48, byteLength: 0, sha256: 'fixture-only' },
-  userInstruction: scenario.endsWith('empty') ? '' : '仅验证布局，不发送、不修改源码。', createdAt: now, expiresAt: expiry };
+  userInstruction: scenario === 'idle-empty' ? '' : '仅验证布局，不发送、不修改源码。', createdAt: now, expiresAt: expiry };
 
 async function testImage(crop: boolean): Promise<ArrayBuffer> {
   const canvas = document.createElement('canvas');
@@ -69,13 +54,18 @@ async function testTransfer(command: DataCommand, args: Record<string, unknown>,
   calls.push(command);
   if (requestScope.targetId !== scope.targetId || requestScope.sessionId !== scope.sessionId) throw new Error('TEST scope mismatch');
   await delay();
-  if (command === 'agent_session_list') { progress.sessionReads++; return sessions; }
   if (command === 'selection_read_image') { const bytes = await testImage(Boolean(args.crop)); progress.imageReads++; return bytes; }
   if (command === 'selection_update_instruction') { selection = { ...selection, userInstruction: String(args.userInstruction) }; return selection; }
-  if (command === 'agent_assisted_inspect' && scenario === 'assisted-filled') return { confirmationId: 'fixture-offer',
+  if (command === 'agent_assisted_inspect') {
+    progress.inspectReads++;
+    if (scenario === 'pending-inspect') return new Promise<never>(() => {});
+    if (scenario === 'inspect-failure') throw new Error('TEST fixture cannot confirm an empty target composer');
+    if (scenario !== 'confirmed-offer') throw new Error('TEST fixture has no inspected composer');
+    return { confirmationId: 'fixture-offer',
     targetId: scope.targetId, app: 'Synthetic TEST Agent', pid: 1,
     composerName: 'TEST composer · very long synthetic input area description for layout', expiresAt: expiry,
     reason: '这是测试桥接返回的辅助填写提议，不会检查任何外部窗口。此长说明用于检查辅助填写状态的按钮是否仍在初始视口中。' };
+  }
   // Do not implement prompt, prepare, send, fill, pairing, export, or clipboard routes.
   throw new Error(`TEST fixture refuses side effect: ${command}`);
 }
@@ -88,7 +78,7 @@ declare global { interface Window { __ARKDOCK_SELECTION_LAYOUT__: {
 } } }
 window.__ARKDOCK_SELECTION_LAYOUT__ = { scenario, calls, progress, eventSelections, requestAssisted: () => {
   const control = [...document.querySelectorAll<HTMLButtonElement>('.agent-delivery button')]
-    .find((button) => button.textContent === '检查当前目标输入框');
+    .find((button) => button.textContent === '检查目标输入框');
   if (!control || control.disabled) return false;
   control.click(); return true;
 } };
@@ -115,7 +105,7 @@ function Demo() {
             {overlayScenario && <SelectionOverlay width={360} height={640} index={eventIndex} regionMode={false}
               selected={selected?.componentBounds ?? null} select={commit} />}
             <output className="inspection-status"><span>已选择合成组件</span><button>框选</button><button>刷新树</button></output>
-            {selected && <SelectionPanel key={selected.selectionId} selection={selected} stale={false} candidates={candidates} sessions={sessions}
+            {selected && <SelectionPanel key={selected.selectionId} selection={selected} stale={false} candidates={candidates}
               scope={scope} bridge={bridge} choose={() => {}} close={() => {}} updated={setSelected}/>}
           </div>
         </section>

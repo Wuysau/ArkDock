@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import type { AppSnapshot, NativeControlState, PreviewKey } from './ipc/model.ts';
 import type { FrameStore } from './frame-store.ts';
@@ -51,6 +51,7 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
   const activation = useRef(0);
   const focusingScreen = useRef(false);
   const releasePending = useRef(false);
+  const nativeInputRef = useRef(nativeInput); nativeInputRef.current = nativeInput;
   const [textState, setTextState] = useState<'idle' | 'waiting' | 'ready'>('idle');
   const [inputFeedback, setInputFeedback] = useState<string | null>(null);
   const [available, setAvailable] = useState({ width: 0, height: 0, horizontalInset: 0, verticalInset: 0 });
@@ -84,31 +85,32 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
   const textEnabled = Boolean(canClick && nativeInput && controlState?.experimentalEnabled && controlAvailable(controlState, 'text'));
   const focusState = useRef({ snapshot, controlState, textEnabled, visible }); focusState.current = { snapshot, controlState, textEnabled, visible };
   const interactionKey = JSON.stringify([displayed?.sessionId, displayed?.buildId, displayed?.generation, displayed?.width, displayed?.height]);
-  function releaseCapture() {
+  const releaseCapture = useCallback(() => {
     const active = pointer.current; pointer.current = null;
     if (active?.element.hasPointerCapture(active.id)) {
       try { active.element.releasePointerCapture(active.id); } catch { /* Native cancellation still runs if the WebView already lost capture. */ }
     }
-  }
-  function cancelGesture() {
+  }, []);
+  const cancelGesture = useCallback(() => {
     activation.current++; releasePending.current = false; releaseCapture();
     setTextState('idle');
-    if (nativeInput) void nativeInput.cancel();
-  }
-  useEffect(() => { if (!canClick) { cancelGesture(); textInput.current?.blur(); } }, [canClick]);
+    if (nativeInputRef.current) void nativeInputRef.current.cancel();
+  }, [releaseCapture]);
+  useEffect(() => { if (!canClick) { cancelGesture(); textInput.current?.blur(); } }, [canClick, cancelGesture]);
   useEffect(() => {
+    const activations = activation, releases = releasePending;
     textInput.current?.blur(); setTextState('idle'); setInputFeedback(null);
     return () => {
-      activation.current++; releasePending.current = false; releaseCapture();
+      activations.current++; releases.current = false; releaseCapture();
       if (nativeInput) void nativeInput.cancel();
     };
-  }, [interactionKey, nativeInput]);
+  }, [interactionKey, nativeInput, releaseCapture]);
   useEffect(() => {
     const blur = () => { cancelGesture(); textInput.current?.blur(); };
     const hide = () => { if (!focusState.current.visible) { cancelGesture(); textInput.current?.blur(); } };
     window.addEventListener('blur', blur); document.addEventListener('visibilitychange', hide);
     return () => { window.removeEventListener('blur', blur); document.removeEventListener('visibilitychange', hide); };
-  }, [nativeInput]);
+  }, [cancelGesture]);
   function pointAt(element: HTMLButtonElement, actual: PreviewFrame, x: number, y: number, clamp = false) {
     const canvas = element.querySelector('canvas'); if (!canvas) return null;
     const bounds = canvas.getBoundingClientRect();
@@ -233,9 +235,9 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
       {stale && <output className="frame-stale" data-testid="stale-frame">{snapshot?.build.error
         ? '旧画面 · 当前代码构建失败' : '旧画面 · 等待当前构建'} · 画面版本 {frame?.generation}</output>}
       {frame && !canClick && interactionMode === 'interact' && <span className="frame-input-note">{busy || inputPaused || !configurationReady ? '原生操作处理中，暂缓输入' : ui.capabilities.click.reason}</span>}
-      {frame && interactionMode === 'interact' && (inputError || inputFeedback) && <output className="native-input-feedback" role="status">{inputError ?? inputFeedback}</output>}
+      {frame && interactionMode === 'interact' && (inputError || inputFeedback) && <output className="native-input-feedback">{inputError ?? inputFeedback}</output>}
       {textEnabled && <div className="native-input-bar">
-        {textState !== 'idle' && <output className="native-input-status" role="status">{textState === 'waiting'
+        {textState !== 'idle' && <output className="native-input-status">{textState === 'waiting'
           ? '已捕获局部输入 · 等待原生点击释放；文字暂存'
           : '文字输入已打开 · 发送至已点击的原生输入框'}</output>}
         <button className="native-input-toggle" onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}

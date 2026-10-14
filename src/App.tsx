@@ -28,6 +28,7 @@ import { targetLifecycleKey } from './dock-ripple.ts';
 import { displayTransitioning, nextDisplayRequestId } from './display-state.ts';
 import { createOrbAutoHidePreferenceSync, nativeOrbPreferenceChanged, readOrbAutoHide, saveOrbAutoHide, settledOrbChoice } from './orb-preferences.ts';
 import { useNativeControls } from './preview/useNativeControls.ts';
+import type { NativeStageInput } from './PreviewStage.tsx';
 import { PreviewControlToolbar, PreviewPageSelect } from './preview/PreviewControlToolbar.tsx';
 import { DeviceRuntimePanel } from './preview/DeviceRuntimePanel.tsx';
 import './preview/preview-controls.css';
@@ -165,8 +166,13 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const controls = useNativeControls({ bridge, snapshot: state, store,
     visible: previewVisible && !panel && runtimeKind === 'native' && interactionMode === 'interact',
     windowVisible: previewVisible && runtimeKind === 'native', wake: () => frameController.current?.wake() });
-  const nativeInput = useMemo(() => ({ start: controls.start, move: controls.input.move.bind(controls.input),
-    end: controls.input.end.bind(controls.input), cancel: controls.cancelInput, text: controls.text, key: controls.key }), [controls.input]);
+  const controlsRef = useRef(controls); controlsRef.current = controls;
+  // Keep stage input identity stable across snapshots while dispatching through current controls.
+  const nativeInput = useMemo<NativeStageInput>(() => ({
+    start: (frame, x, y) => controlsRef.current.start(frame, x, y),
+    move: controls.input.move.bind(controls.input), end: controls.input.end.bind(controls.input),
+    cancel: () => controlsRef.current.cancelInput(), text: (text) => controlsRef.current.text(text), key: (key) => controlsRef.current.key(key),
+  }), [controls.input]);
   const receive = useCallback((value: AppSnapshot) => {
     const updated = applySnapshot(stateRef.current, value);
     if (updated === stateRef.current) return;
@@ -274,13 +280,14 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   }, [connected, nativeReady, motionTargetKey, state?.sessionId, orbAutoHide]);
   useEffect(() => {
     if (cancelRequested.current) return;
-    const target = state?.target;
-    if (!state || !target || state.display.mode !== 'expanded') return;
+    const actual = stateRef.current;
+    const target = actual?.target;
+    if (!actual || !target || actual.display.mode !== 'expanded') return;
     const lifecycle = `${target.id}:${target.process.pid}:${target.process.startedAt}`;
-    if (state.phase === 'selectProject' && automaticPanels.current.projects !== lifecycle) {
+    if (actual.phase === 'selectProject' && automaticPanels.current.projects !== lifecycle) {
       automaticPanels.current.projects = lifecycle; setPanel('projects');
-    } else if (state.phase === 'untrusted' && state.sessionId && automaticPanels.current.trust !== state.sessionId) {
-      automaticPanels.current.trust = state.sessionId; setPanel('trust');
+    } else if (actual.phase === 'untrusted' && actual.sessionId && automaticPanels.current.trust !== actual.sessionId) {
+      automaticPanels.current.trust = actual.sessionId; setPanel('trust');
     }
   }, [state?.phase, state?.sessionId, state?.target, state?.display.mode]);
   useEffect(() => {

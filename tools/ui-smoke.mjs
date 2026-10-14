@@ -93,9 +93,9 @@ try {
       await settings(); await clickText(theme); await closePanel();
       for(const [width,height] of [[360,640],[440,820],[520,960]]) {
         await resizeLogical(width,height);
-        const controls=await view.evaluate('({bridge:!!window.__TAURI__,header:!!document.querySelector(".header"),toolbar:!!document.querySelector(".preview-toolbar"),footer:document.querySelector(".footer").getBoundingClientRect().bottom,disabledPage:document.querySelector("select[aria-label=页面或组件]").disabled,disabledModes:[...document.querySelectorAll("select[aria-label=运行方式] option")].slice(1).every(item=>item.disabled)})');
+        const controls=await view.evaluate('({bridge:!!window.__TAURI__,header:!!document.querySelector(".header"),toolbar:!!document.querySelector(".preview-toolbar"),footer:document.querySelector(".footer").getBoundingClientRect().bottom,disabledPage:document.querySelector("select[aria-label=原生应用页面]").disabled,runtimeModes:[...document.querySelectorAll("select[aria-label=运行方式] option")].map(item=>item.value),toolbarInert:!!document.querySelector(".preview-toolbar").closest("[inert]"),toolbarHidden:document.querySelector("[aria-label=展开预览控制栏]").closest(".chrome-top").hidden})');
         assert.equal(controls.bridge,true); assert.equal(controls.header,true); assert.equal(controls.toolbar,true);
-        assert.ok(controls.footer<=height); assert.equal(controls.disabledPage,true); assert.equal(controls.disabledModes,true);
+        assert.ok(controls.footer<=height); assert.equal(controls.disabledPage,true); assert.deepEqual(controls.runtimeModes,["native","emulator","physicalDevice"]); assert.equal(controls.toolbarInert,true); assert.equal(controls.toolbarHidden,true);
         await capture(`${theme==='深色'?'dark':'light'}-${width}x${height}`);
       }
     }
@@ -112,21 +112,24 @@ try {
     assert.ok((await appearance()).duration.split(',').some(value=>Number.parseFloat(value)>=.12)); await closePanel();
   });
   await check('Chinese project search, modal Tab confinement, Esc and restored trigger focus',async()=>{
-    await click('[aria-label="更多操作"]'); await clickText('选择当前工程'); assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'搜索工程');
+    await click('[aria-label="更多操作"]'); await clickText('选择当前工程'); assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'筛选已列出的工程候选');
     await view.send('Input.insertText',{text:'不存在的工程 中文搜索'});
-    assert.equal(await view.evaluate('document.querySelector("input[aria-label=搜索工程]").value'),'不存在的工程 中文搜索');
-    assert.equal(await view.evaluate('document.querySelector(".no-results h3").textContent'),'没有匹配的工程');
+    assert.equal(await view.evaluate('document.querySelector("input[aria-label=筛选已列出的工程候选]").value'),'不存在的工程 中文搜索');
+    assert.equal(await view.evaluate('document.querySelector(".no-results h3").textContent'),'没有匹配的工程候选');
     await view.evaluate('document.querySelector("dialog button[aria-label=关闭面板]").focus()'); await key('Tab',true);
     assert.equal(await view.evaluate('document.activeElement?.closest("dialog")!==null'),true);
     await key('Escape'); assert.equal(await view.evaluate('!!document.querySelector("dialog")'),false);
     assert.equal(await view.evaluate('document.activeElement?.getAttribute("aria-label")'),'更多操作'); assert.equal(action('info',handle).visible,true);
   });
   await check('Diagnostics, SDK and capability panels show actual unavailable reasons',async()=>{
-    await click('[aria-label="打开诊断"]'); assert.equal(await view.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志'); await capture('diagnostics'); await closePanel();
+    await click('[aria-label="更多操作"]'); await clickText('运行日志'); assert.equal(await view.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志'); await capture('diagnostics'); await closePanel();
     await click('[aria-label="更多操作"]'); await clickText('设备与原生工具链'); assert.equal(await view.evaluate('document.querySelector("dialog h3").textContent'),'连接真实原生运行时');
     await closePanel(); await click('[aria-label="更多操作"]'); await clickText('预览能力');
-    const unavailable=await view.evaluate('[...document.querySelectorAll(".capability-list > div")].filter(item=>["拖拽 / 滑动","文字输入 / IME","设备方向","鸿蒙应用主题","页面切换","设备切换","模拟器","真机"].includes(item.querySelector("strong").textContent)).map(item=>({status:item.querySelector(".badge").textContent,reason:item.querySelector("p").textContent}))');
-    assert.equal(unavailable.length,8); for(const capability of unavailable) { assert.equal(capability.status,'unsupported'); assert.ok(capability.reason.length>5); } await closePanel();
+    const unavailable=await view.evaluate('[...document.querySelectorAll(".capability-list > div")].filter(item=>["拖拽 / 滑动","字符提交 / 已核按键","设备方向","鸿蒙应用主题","页面切换","设备切换","模拟器","真机"].includes(item.querySelector("strong").textContent)).map(item=>({status:item.querySelector(".badge").textContent,reason:item.querySelector("p").textContent}))');
+    const actual=await view.evaluate('window.__TAURI__.core.invoke("snapshot").then(state=>({target:state.target,project:state.project}))');
+    assert.equal(actual.target,null,'Dedicated UI acceptance has no target; capability booleans cannot bypass association');
+    assert.equal(actual.project,null,'Unbound capability reasons must require an actual project');
+    assert.equal(unavailable.length,8); for(const capability of unavailable) { assert.equal(capability.status,'pending'); assert.ok(capability.reason.includes('关联实际工程')); } await closePanel();
   });
   await check('Real minimize button minimizes only ArkDock; restore and native resize work',async()=>{
     const before=action('info',handle); await click('[aria-label="最小化窗口"]'); await pause(250);

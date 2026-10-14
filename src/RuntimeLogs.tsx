@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AppSnapshot, Diagnostic } from './ipc/model.ts';
 import { diagnosticText } from './diagnostics.ts';
 import { dockingStatus } from './request-state.ts';
@@ -77,7 +77,7 @@ const LogRecord = memo(function LogRecord({ diagnostic, rowKey }: { diagnostic: 
 
 const LogViewport = memo(function LogViewport({ diagnostics, order }: { diagnostics: ReadonlyArray<Diagnostic>; order: LogOrder }) {
   const rows = useMemo(() => sortedRows(diagnostics, order), [diagnostics, order]);
-  const viewport = useRef<HTMLDivElement>(null);
+  const viewport = useRef<HTMLElement>(null);
   const readingLatest = useRef(true);
   const anchors = useRef<ScrollAnchor[]>([]);
   const previousRows = useRef<LogRow[]>([]);
@@ -85,7 +85,7 @@ const LogViewport = memo(function LogViewport({ diagnostics, order }: { diagnost
   const previousScrollTop = useRef(0);
   const [unread, setUnread] = useState(0);
 
-  function rememberPosition() {
+  const rememberPosition = useCallback(() => {
     const surface = viewport.current;
     if (!surface) return;
     const latest = order === 'latest' ? surface.scrollTop <= latestThreshold
@@ -108,7 +108,7 @@ const LogViewport = memo(function LogViewport({ diagnostics, order }: { diagnost
       if (visible.length === 6) break;
     }
     anchors.current = visible;
-  }
+  }, [order]);
 
   function returnToLatest() {
     const surface = viewport.current;
@@ -148,17 +148,18 @@ const LogViewport = memo(function LogViewport({ diagnostics, order }: { diagnost
     previousRows.current = rows;
     previousOrder.current = order;
     rememberPosition();
-  }, [rows, order]);
+  }, [rows, order, rememberPosition]);
 
   return <div className="runtime-log-history" onWheel={(event) => event.stopPropagation()}>
     <div className="runtime-log-updates">
       <span>{unread > 0 ? `有 ${unread} 条新日志` : order === 'latest' ? '最新日志在顶部' : '最新日志在底部'}</span>
       <button type="button" onClick={returnToLatest} aria-label="返回最新运行日志">返回最新</button>
+      <button type="button" onClick={() => viewport.current?.focus()} aria-label="聚焦运行日志，可用方向键和翻页键浏览">浏览日志</button>
     </div>
-    <div ref={viewport} className="runtime-log-viewport" role="region" aria-label="运行日志记录，可滚动浏览" tabIndex={0} onScroll={rememberPosition}>
+    <section ref={viewport} className="runtime-log-viewport" aria-label="运行日志记录，可滚动浏览" tabIndex={-1} onScroll={rememberPosition}>
       {rows.length > 0 ? rows.map((row) => <LogRecord key={row.key} diagnostic={row.diagnostic} rowKey={row.key} />)
         : <div className="no-results"><Icon name="log" size={30} /><p>暂无诊断记录，编译错误总数未知。</p></div>}
-    </div>
+    </section>
   </div>;
 }, (previous, next) => previous.order === next.order && sameRecords(previous.diagnostics, next.diagnostics));
 
@@ -200,7 +201,7 @@ export function RuntimeLogs({ snapshot }: { snapshot: AppSnapshot | null }) {
       {docking && <p>贴附诊断：{docking.detail}</p>}
       {snapshot?.build.error && <p className="build-error">{snapshot.build.error}</p>}
     </div>
-    {copyStatus && <p className="runtime-log-copy-status" role="status">{copyStatus}</p>}
+    {copyStatus && <output className="runtime-log-copy-status">{copyStatus}</output>}
     <LogViewport diagnostics={diagnostics} order={order} />
   </section>;
 }

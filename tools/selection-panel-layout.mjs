@@ -8,7 +8,7 @@ import { join, resolve, sep } from 'node:path';
 
 const fixtureUrl = 'http://127.0.0.1:1420/selection-ui-demo.html';
 const sizes = [[360, 820], [440, 820], [360, 640]];
-const scenarios = ['not-connected-empty', 'not-connected-filled', 'verified-empty', 'verified-filled', 'busy-filled', 'assisted-filled'];
+const scenarios = ['idle-empty', 'idle-filled', 'pending-inspect', 'confirmed-offer', 'inspect-failure'];
 const eventScenarios = ['overlay-pointer', 'overlay-semantic', 'overlay-keyboard'];
 const eventsOnly = process.argv.includes('--events-only');
 const layoutsOnly = process.argv.includes('--layouts-only');
@@ -122,7 +122,8 @@ async function connectDebugger(port, path) {
 function geometryExpression() {
   return `(() => {
     const panel=document.querySelector('.selection-panel');
-    const names={instruction:'#selection-instruction',agentHeader:'.agent-delivery > header',mode:'.agent-mode',primary:'.agent-delivery .selection-primary'};
+    const names={instruction:'#selection-instruction',agentHeader:'.agent-delivery > header',mode:'.agent-mode',primary:'.agent-delivery .selection-primary',inspect:'.agent-delivery > .composer-actions button'};
+    if(document.querySelector('.agent-confirmation'))names.confirm='.agent-confirmation .primary-button';
     const rect=r=>({left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height});
     const controls=Object.entries(names).map(([name,selector])=>{
       const element=document.querySelector(selector);if(!element)return{name,missing:true};
@@ -146,7 +147,9 @@ function geometryExpression() {
       scrolled:[...document.querySelectorAll('*')].filter(e=>e.scrollTop||e.scrollLeft).map(e=>({tag:e.tagName,class:e.className,top:e.scrollTop,left:e.scrollLeft})),
       instruction:document.querySelector('#selection-instruction')?.value,calls:[...state.calls],progress:{...state.progress},
       mode:document.querySelector('.agent-mode')?.textContent,primary:document.querySelector('.selection-primary')?.textContent,
-      primaryDisabled:document.querySelector('.selection-primary')?.disabled,banner:document.querySelector('.selection-demo-banner').textContent};
+      primaryDisabled:document.querySelector('.selection-primary')?.disabled,inspectDisabled:document.querySelector('.agent-delivery > .composer-actions button')?.disabled,
+      confirmation:document.querySelector('.agent-confirmation')?.textContent,notice:document.querySelector('.composer-notice')?.textContent,
+      banner:document.querySelector('.selection-demo-banner').textContent};
   })()`;
 }
 
@@ -154,11 +157,15 @@ async function load(scenario, width, height) {
   await driver.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   await driver.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await driver.send('Page.navigate', { url: `${fixtureUrl}?scenario=${scenario}` });
-  await until(() => driver.evaluate(`window.__ARKDOCK_SELECTION_LAYOUT__?.scenario===${JSON.stringify(scenario)}&&document.querySelector('.selection-panel')&&window.__ARKDOCK_SELECTION_LAYOUT__.progress.imageReads===2&&window.__ARKDOCK_SELECTION_LAYOUT__.progress.sessionReads>=1&&[...document.querySelectorAll('.selection-images img')].length===2&&[...document.querySelectorAll('.selection-images img')].every(i=>i.complete&&i.naturalWidth>0)`), 'Fixture did not settle after image/session tasks');
+  await until(() => driver.evaluate(`window.__ARKDOCK_SELECTION_LAYOUT__?.scenario===${JSON.stringify(scenario)}&&document.querySelector('.selection-panel')&&window.__ARKDOCK_SELECTION_LAYOUT__.progress.imageReads===2&&[...document.querySelectorAll('.selection-images img')].length===2&&[...document.querySelectorAll('.selection-images img')].every(i=>i.complete&&i.naturalWidth>0)`), 'Fixture did not settle after image tasks');
   await pause(100);
-  if (scenario === 'assisted-filled') {
+  assert.deepEqual(await driver.evaluate('window.__ARKDOCK_SELECTION_LAYOUT__.calls'), ['selection_read_image', 'selection_read_image'], 'Mount must not inspect, pair or send to an Agent');
+  assert.equal(await driver.evaluate('!!document.querySelector(".agent-confirmation")'), false, 'Confirmation requires explicit inspection');
+  if (['pending-inspect', 'confirmed-offer', 'inspect-failure'].includes(scenario)) {
     assert.equal(await driver.evaluate('window.__ARKDOCK_SELECTION_LAYOUT__.requestAssisted()'), true);
-    await until(() => driver.evaluate('document.querySelector(".agent-mode")?.textContent==="辅助填写"'), 'Synthetic assisted offer not rendered');
+    const expected = scenario === 'pending-inspect' ? 'document.querySelector(".selection-primary")?.textContent.trim()==="正在处理…"&&window.__ARKDOCK_SELECTION_LAYOUT__.progress.inspectReads===1'
+      : scenario === 'confirmed-offer' ? '!!document.querySelector(".agent-confirmation")' : 'document.querySelector(".composer-notice")?.textContent.includes("TEST fixture cannot confirm")';
+    await until(() => driver.evaluate(expected), 'Synthetic inspection state not rendered');
     await pause(100);
   }
 }
@@ -168,7 +175,9 @@ async function checkScenario(scenario, width, height) {
   try {
     await load(scenario, width, height);
     const geometry = await driver.evaluate(geometryExpression()); const failures = [];
-    for (const control of geometry.controls) {
+    // The initial copy/inspect actions stay visible. A returned offer adds a
+    // secondary confirmation below them, reachable through the panel's own scroll.
+    for (const control of geometry.controls.filter(control => control.name !== 'confirm')) {
       if (control.missing || !control.inside) failures.push(`${control.name} is clipped or absent`);
       if (control.missing || !control.centerHit) failures.push(`${control.name} center cannot be hit`);
     }
@@ -176,15 +185,34 @@ async function checkScenario(scenario, width, height) {
     if (geometry.activeElement !== 'BODY') failures.push('Fixture focused a control before geometry measurement');
     if (geometry.app.width !== width || geometry.app.height !== height) failures.push('App logical size differs from requested size');
     if (geometry.banner.trim() !== 'UI 布局验证 · 非原生预览') failures.push('Explicit non-native banner missing');
-    const expectedMode = scenario.startsWith('verified') || scenario === 'busy-filled' ? '直接连接' : scenario === 'assisted-filled' ? '辅助填写' : '复制提示词';
-    const expectedPrimary = expectedMode === '直接连接' ? '发送到当前 Agent' : expectedMode === '辅助填写' ? '填入 Agent 输入框' : '复制修改要求';
+    const expectedMode = '由你发送';
+    const expectedPrimary = scenario === 'pending-inspect' ? '正在处理…' : '复制修改要求';
     if (geometry.mode !== expectedMode || geometry.primary !== expectedPrimary) failures.push('Capability label is not truthful');
-    if (geometry.primaryDisabled !== (scenario.endsWith('empty') || scenario === 'busy-filled')) failures.push('Empty/busy primary disabled state is incorrect');
-    const sideEffects = geometry.calls.filter((command) => !['selection_read_image', 'agent_session_list', ...(scenario === 'assisted-filled' ? ['agent_assisted_inspect'] : [])].includes(command));
+    if (geometry.primaryDisabled !== (scenario === 'idle-empty' || scenario === 'pending-inspect') || geometry.inspectDisabled !== geometry.primaryDisabled) failures.push('Empty/pending action disabled state is incorrect');
+    if (Boolean(geometry.confirmation) !== (scenario === 'confirmed-offer')) failures.push('Inspection confirmation state is incorrect');
+    if (scenario === 'confirmed-offer' && (!geometry.confirmation.includes('只填写已确认的空输入框') || geometry.controls.find(control=>control.name==='confirm')?.disabled)) failures.push('Explicit fill confirmation is unavailable or misleading');
+    if (scenario === 'inspect-failure' && !geometry.notice?.includes('可复制修改要求后手动粘贴')) failures.push('Inspection failure does not explain manual fallback');
+    const inspecting = ['pending-inspect', 'confirmed-offer', 'inspect-failure'].includes(scenario);
+    if (geometry.progress.inspectReads !== Number(inspecting)) failures.push('Inspection must run once and only after explicit action');
+    const sideEffects = geometry.calls.filter((command) => !['selection_read_image', ...(inspecting ? ['agent_assisted_inspect'] : [])].includes(command));
     if (sideEffects.length) failures.push(`Unexpected bridge side effect: ${sideEffects}`);
     const screenshot = join(evidence, `${scenario}-${width}x${height}.png`);
     const image = await driver.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
     writeFileSync(screenshot, Buffer.from(image.data, 'base64'));
+    if (scenario === 'idle-empty' || scenario === 'pending-inspect') assert.equal(await driver.evaluate('window.__ARKDOCK_SELECTION_LAYOUT__.requestAssisted()'), false, 'Disabled inspect must refuse another request');
+    if (scenario === 'confirmed-offer') {
+      let confirmation = geometry.controls.find(control => control.name === 'confirm');
+      for (let attempts = 0; attempts < 8 && (!confirmation?.inside || !confirmation.centerHit); attempts++) {
+        const point = await driver.evaluate('(()=>{const r=document.querySelector(".selection-panel").getBoundingClientRect();return{x:r.right-18,y:r.bottom-18};})()');
+        await driver.send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: 100 });
+        await pause(60);
+        confirmation = (await driver.evaluate(geometryExpression())).controls.find(control => control.name === 'confirm');
+      }
+      assert.ok(confirmation?.inside && confirmation.centerHit && !confirmation.disabled, 'Explicit confirmation must be reachable and hit-testable inside the scrollable panel');
+      await driver.evaluate('[...document.querySelectorAll(".agent-confirmation button")].find(e=>e.textContent.trim()==="取消").click()');
+      await until(()=>driver.evaluate('!document.querySelector(".agent-confirmation")'), 'Explicit offer cancellation did not clear confirmation');
+      assert.equal(await driver.evaluate('window.__ARKDOCK_SELECTION_LAYOUT__.calls.some(e=>e==="agent_assisted_fill")'), false, 'Inspect/cancel must not fill a composer');
+    }
     const status = failures.length ? 'FAIL' : 'PASS';
     report.checks.push({ status, name, failures, geometry, screenshot });
     console.log(`${status} ${name}${failures.length ? `: ${failures.join('; ')}` : ''}`);

@@ -69,14 +69,39 @@ async function load(scenario = 'welcome', theme = 'dark', width = 440, height = 
   await driver.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }, { name: 'prefers-color-scheme', value: theme }] });
   await driver.send('Page.navigate', { url: `${url}?scenario=${scenario}&theme=${theme}` });
   await waitUntil(() => driver.evaluate('!!window.__ARKDOCK_DEMO__ && !!document.querySelector(".app") && !!document.querySelector("footer").dataset.preview'), 'Demo application state did not initialize');
+  if (['running', 'recovery', 'stale', 'diagnostics'].includes(scenario)) await waitUntil(()=>driver.evaluate('document.querySelector(".native-frame")?.dataset.renderStatus==="displayed"'), 'Fixture calibration bitmap was not actually presented');
+  if (['stale', 'diagnostics'].includes(scenario)) await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.current().phase==="stale"'), 'Build failure must follow actual bitmap presentation');
   await pause(320);
 }
-async function scenario(value) { await driver.evaluate(`window.__ARKDOCK_DEMO__.setScenario(${JSON.stringify(value)})`); await pause(35); }
+async function scenario(value) { await driver.evaluate(`window.__ARKDOCK_DEMO__.setScenario(${JSON.stringify(value)})`); await pause(35); if(['running','recovery'].includes(value))await waitUntil(()=>driver.evaluate('document.querySelector(".native-frame")?.dataset.sessionId===window.__ARKDOCK_DEMO__.current().sessionId&&document.querySelector(".native-frame")?.dataset.renderStatus==="displayed"'),'Current scenario frame did not present'); }
 async function click(selector, text) {
-  const point = await driver.evaluate(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(selector)})].find(e => ${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : 'true'}); if (!e || e.disabled) return null; const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+  const hiddenToolbar = await driver.evaluate(`(() => {const e=[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : 'true'});return e?.closest('.chrome-top')?.dataset.open==='false' && !e.classList.contains('preview-chrome-trigger');})()`);
+  if(hiddenToolbar){
+    await driver.evaluate('document.querySelector(".toolbar-trigger").focus({preventScroll:true})');
+    await key('Enter');
+    await waitUntil(()=>driver.evaluate('document.querySelector(".chrome-top")?.dataset.open==="true"'),'Preview toolbar did not reveal');await pause(220);
+  }
+  let point = await driver.evaluate(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(selector)})].find(e => ${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : 'true'}); if (!e || e.disabled) return null; e.scrollIntoView({block:'nearest',inline:'nearest'}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
   assert.ok(point, `Clickable element ${selector} ${text ?? ''}`);
+  await driver.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await waitUntil(async()=>{
+    const settled=await driver.evaluate(`(() => {const e=[...document.querySelectorAll(${JSON.stringify(selector)})].find(e=>${text ? `e.textContent.trim() === ${JSON.stringify(text)}` : 'true'});if(!e||e.disabled||e.closest('[inert]'))return null;const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);return r.width>0&&r.height>0&&(hit===e||e.contains(hit))?{x,y}:null;})()`);
+    if(settled)point=settled;return Boolean(settled);
+  },`Element did not become hit-testable: ${selector} ${text??''}`);
   await driver.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
   await driver.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+}
+async function menuItem(text) {
+  if(await driver.evaluate('!!document.querySelector("dialog")')) {await key('Escape');await waitUntil(()=>driver.evaluate('!document.querySelector("dialog")'),'Previous sheet did not close');}
+  await click('[aria-label="更多操作"]');
+  await waitUntil(()=>driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")==="更多操作"'),'Menu did not open');
+  await click('dialog button',text);
+}
+async function cancelDiscoveryAssociation() {
+  await click('[aria-label="展开工程信息"]');
+  await waitUntil(()=>driver.evaluate('document.querySelector(".workspace-card")?.dataset.expanded==="true"'),'Discovery actions did not expand');
+  await pause(250);
+  await click('.workspace-detail-actions button','取消关联');
 }
 async function key(value, options = {}) {
   const virtualCode = { Tab: 9, Escape: 27, Enter: 13, ArrowDown: 40 }[value];
@@ -183,7 +208,7 @@ try {
   await check('V1: all explicit scenarios at 360×640 / 440×820 / 520×960 in dark and light; no outer scroll', async () => {
     for (const [width, height] of sizes) for (const theme of ['dark', 'light']) for (const name of scenarios) {
       await load(name, theme, width, height);
-      if (name === 'diagnostics') { await click('[aria-label="打开诊断"]'); await pause(280); }
+      if (name === 'diagnostics') { await menuItem('运行日志'); await pause(280); }
       const bounds = await driver.evaluate('({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,banner:document.querySelector(".ui-demo-banner").textContent,app:document.querySelector(".app").getBoundingClientRect().toJSON(),footer:document.querySelector("footer").getBoundingClientRect().toJSON()})');
       assert.ok(bounds.banner.includes('UI 演示 · 非原生渲染'));
       assert.ok(bounds.scrollWidth <= width, `${name}/${theme}/${width}: horizontal overflow`);
@@ -218,7 +243,7 @@ try {
     await load('weak'); assert.equal((await state()).workspace, 'selecting'); assert.equal(await driver.evaluate('document.querySelectorAll(".candidate").length'), 1);
     assert.equal((await state()).fixture.project, null);
     await load('multi'); assert.equal(await driver.evaluate('document.querySelectorAll(".candidate").length'), 6);
-    await click('input[aria-label="搜索工程"]'); await driver.send('Input.insertText', { text: 'quick-action' }); await pause(40);
+    await click('input[aria-label="筛选已列出的工程候选"]'); await driver.send('Input.insertText', { text: 'quick-action' }); await pause(40);
     assert.equal(await driver.evaluate('document.querySelectorAll(".candidate").length'), 1);
     await key('Tab'); await key('Tab');
     // Focus the matching native button through the actual tab sequence before Enter.
@@ -230,7 +255,7 @@ try {
     await key('Enter'); await pause(80); assert.equal((await state()).fixture.project.name, 'quick-action'); assert.equal((await state()).fixture.trusted, false);
   });
   await check('V2: zero candidates has directory fallback; unsupported directory action reports actual reason', async () => {
-    await load('none'); await click('button', '选择工程目录'); await pause(50);
+    await load('none'); await click('button', '手动选择工程目录'); await pause(50);
     assert.ok((await driver.evaluate('document.body.textContent')).includes('UI 演示不打开系统目录对话框'));
   });
   await check('V2: obsolete discovery snapshot cannot replace newer target and cancellation stays cancelled', async () => {
@@ -238,19 +263,19 @@ try {
     const active = (await state()).fixture.target.id;
     await driver.evaluate('window.__ARKDOCK_DEMO__.emitOldState()'); await pause(40);
     assert.equal((await state()).fixture.target.id, active); assert.equal((await state()).binding, 'bound'); assert.equal((await state()).workspace, 'discovering');
-    await click('button', '取消关联'); await pause(80);
-    assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.some(e=>e.command==="cancel_discovery"||e.command==="detach")'), true);
+    await menuItem('解除当前绑定'); await pause(80);
+    assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.some(e=>e.command==="detach")'), true);
     await driver.evaluate('window.__ARKDOCK_DEMO__.emitOldState()'); await pause(40);
     assert.notEqual((await state()).workspace, 'discovering');
   });
   await check('V2: cancellation survives newly identified session and never detaches a newer target', async () => {
     await load('discovering'); await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("detach","command")');
-    await click('button','取消关联'); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Deferred cancellation was not requested');
+    await cancelDiscoveryAssociation(); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Deferred cancellation was not requested');
     await scenario('reliable'); await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');
     await waitUntil(async()=>!(await state()).fixture.target,'Cancel did not invalidate the newly discovered session on the same target');
     assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(e=>e.command==="detach").length'),2);
     await load('discovering'); await driver.evaluate('window.__ARKDOCK_DEMO__.deferNext("detach","command")');
-    await click('button','取消关联'); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Second deferred cancellation was not requested');
+    await cancelDiscoveryAssociation(); await waitUntil(()=>driver.evaluate('window.__ARKDOCK_DEMO__.hasDeferred()'),'Second deferred cancellation was not requested');
     await driver.evaluate('window.__ARKDOCK_DEMO__.switchTarget()'); await pause(40); const targetId=(await state()).fixture.target.id;
     await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()'); await pause(80);
     assert.equal((await state()).fixture.target.id,targetId);assert.equal((await state()).workspace,'discovering');
@@ -265,13 +290,13 @@ try {
     assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'工程信任');
   });
   await check('V3: build completion without current frame waits; old session frame rejected', async () => {
-    await load('waiting'); assert.equal((await state()).preview, 'waitingFrame'); assert.equal(await driver.evaluate('!!document.querySelector(".native-frame")'), false);
+    await load('waiting'); assert.equal((await state()).preview, 'waitingFrame'); assert.equal(await driver.evaluate('!!document.querySelector(".native-frame[data-render-status=displayed]")'), false);
     await scenario('running'); assert.equal((await state()).preview, 'running');
     await driver.evaluate('window.__ARKDOCK_DEMO__.switchTarget();window.__ARKDOCK_DEMO__.emitOldFrame()'); await pause(50);
-    assert.equal(await driver.evaluate('!!document.querySelector(".native-frame")'), false);
+    assert.equal(await driver.evaluate('!!document.querySelector(".native-frame[data-render-status=displayed]")'), false);
   });
   await check('V3: failed build retains clearly stale image, disables input, and recovery accepts current frame', async () => {
-    await load('stale'); assert.equal((await state()).preview, 'stale'); assert.equal(await driver.evaluate('!!document.querySelector(".native-frame")'), true);
+    await load('stale'); assert.equal((await state()).preview, 'stale'); assert.equal(await driver.evaluate('!!document.querySelector(".native-frame[data-render-status=displayed]")'), true);
     assert.equal(await driver.evaluate('document.querySelector(".native-surface").disabled'), true);
     assert.ok((await driver.evaluate('document.body.textContent')).includes('旧画面'));
     await scenario('recovery'); assert.equal((await state()).preview, 'running'); assert.equal(await driver.evaluate('document.querySelector(".native-surface").disabled'), false);
@@ -281,13 +306,13 @@ try {
     const call = await driver.evaluate('window.__ARKDOCK_DEMO__.calls.find(e=>e.command==="click_preview")');
     assert.ok(call); assert.ok(Math.abs(call.args.x - 180) <= 1 && Math.abs(call.args.y - 320) <= 1);
     await click('[aria-label="手动刷新"]'); await pause(40); assert.equal((await state()).preview, 'building');
-    await click('[aria-label="停止预览"]'); await pause(40); assert.equal((await state()).preview, 'stopped');
+    await click('[aria-label="停止原生预览"]'); await pause(40); assert.equal((await state()).preview, 'stopped');
   });
-  await check('V3: unsupported orientation and application theme remain disabled with reasons', async () => {
+  await check('V3: missing independent orientation and theme control states remain unavailable with reasons', async () => {
     await load('running'); await click('[aria-label="预览能力"]'); await pause(60);
     const controls = await driver.evaluate('[...document.querySelectorAll(".capability-list>div")].map(e=>({text:e.textContent,status:e.querySelector(".badge")?.textContent,reason:e.querySelector("p")?.textContent}))');
-    assert.ok(controls.some(e => /方向|旋转/.test(e.text) && e.status === 'unsupported' && e.reason));
-    assert.ok(controls.some(e => /应用.*主题/.test(e.text) && e.status === 'unsupported' && e.reason));
+    assert.ok(controls.some(e => /方向|旋转/.test(e.text) && e.status === 'unavailable' && e.reason));
+    assert.ok(controls.some(e => /应用.*主题/.test(e.text) && e.status === 'unavailable' && e.reason));
   });
   await check('V4: panel receives focus, traps Tab, Esc closes, and restores trigger focus', async () => {
     await load('running'); await click('[aria-label="更多操作"]'); await click('button', '偏好设置'); await pause(40);
@@ -306,13 +331,13 @@ try {
     await waitUntil(()=>driver.evaluate('[...document.querySelectorAll("dialog button")].some(e=>e.textContent.trim()==="手动刷新" && e.disabled)'),'Pending action button did not enter confirmed disabled state');
     await waitUntil(()=>driver.evaluate('!!document.activeElement?.closest("dialog")'),'Disabling the focused action lost modal focus');
     await key('Escape');await waitUntil(()=>driver.evaluate('!document.querySelector("dialog")'),'Controls sheet did not close before opening diagnostics');
-    await click('[aria-label="打开诊断"]');await waitUntil(()=>driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")==="运行日志"'),'Diagnostics did not open before releasing the delayed response');
+    await menuItem('运行日志');await waitUntil(()=>driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")==="运行日志"'),'Diagnostics did not open before releasing the delayed response');
     assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志');
     await driver.evaluate('window.__ARKDOCK_DEMO__.releaseDeferred()');await pause(80);
     assert.equal(await driver.evaluate('document.querySelector("dialog")?.getAttribute("aria-label")'),'运行日志');
   });
   await check('V4: error toast cannot steal modal focus and becomes dismissible after the sheet closes', async () => {
-    await load('none');await click('button','选择工程目录');await pause(50);
+    await load('none');await click('button','手动选择工程目录');await pause(50);
     assert.equal(await driver.evaluate('document.querySelector("[aria-label=关闭提示]")?.disabled'),true);
     for(let index=0;index<14;index++)await key('Tab');
     assert.equal(await driver.evaluate('!!document.activeElement?.closest("dialog")'),true);
@@ -320,7 +345,7 @@ try {
     assert.equal(await driver.evaluate('!!document.querySelector(".toast")'),false);
   });
   await check('V4: real CSS motion starts and rapid events replace prior transitions; reduced motion eliminates loops/displacement', async () => {
-    await load('running'); await click('[aria-label="打开诊断"]');
+    await load('running'); await menuItem('运行日志');
     const opening = await driver.evaluate('[...document.getAnimations()].map(e=>({name:e.animationName,playState:e.playState,timing:e.effect.getComputedTiming(),transform:getComputedStyle(e.effect.target).transform}))');
     motion.push({ event: 'open diagnostics', elapsed: 0, animations: opening });
     assert.ok(opening.some(e => e.playState === 'running' && Number(e.timing.duration) > 1), 'No running panel animation observed');
@@ -329,22 +354,22 @@ try {
     assert.equal((await state()).preview, 'running');
     assert.equal(await driver.evaluate('document.getAnimations().filter(e=>e.playState==="running" && e.effect.getComputedTiming().iterations!==Infinity).length'), 0);
     await driver.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
-    await click('[aria-label="打开诊断"]'); await pause(40);
+    await menuItem('运行日志'); await pause(40);
     const reduced = await driver.evaluate('[...document.getAnimations()].filter(e=>e.playState==="running").map(e=>({duration:e.effect.getComputedTiming().duration,iterations:e.effect.getComputedTiming().iterations,transform:getComputedStyle(e.effect.target).transform}))');
     motion.push({ event: 'system reduced motion', animations: reduced });
     assert.ok(reduced.every(e => Number(e.duration) <= 1 && e.iterations !== Infinity));
   });
   await check('V4: Chinese composition is confined to search input and does not trigger window dragging', async () => {
-    await load('multi'); await click('input[aria-label="搜索工程"]');
+    await load('multi'); await click('input[aria-label="筛选已列出的工程候选"]');
     await driver.send('Input.imeSetComposition', { text: '中文', selectionStart: 2, selectionEnd: 2 });
     await driver.send('Input.insertText', { text: '中文' }); await pause(50);
-    assert.ok((await driver.evaluate('document.querySelector("input[aria-label=搜索工程]").value')).includes('中文'));
+    assert.ok((await driver.evaluate('document.querySelector("input[aria-label=筛选已列出的工程候选]").value')).includes('中文'));
     assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.some(e=>e.command==="begin_drag")'), false);
   });
   await check('V4: explicit reduced-motion preference cancels panel movement independently of system media', async () => {
     await load('running'); await click('[aria-label="更多操作"]'); await click('button', '偏好设置');
     await click('button', '减少动画'); await key('Escape'); await pause(40);
-    await click('[aria-label="打开诊断"]'); await pause(40);
+    await menuItem('运行日志'); await pause(40);
     const active = await driver.evaluate('[...document.getAnimations()].filter(e=>e.playState==="running").map(e=>({duration:e.effect.getComputedTiming().duration,iterations:e.effect.getComputedTiming().iterations}))');
     assert.ok(active.every(e=>Number(e.duration)<=1 && e.iterations!==Infinity));
     motion.push({event:'explicit reduced-motion setting with system no-preference',animations:active});
