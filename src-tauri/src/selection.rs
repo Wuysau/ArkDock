@@ -981,12 +981,10 @@ fn meaningful_compact_attribute(name: &str, value: &str) -> bool {
         (
             "padding" | "margin" | "borderRadius" | "space" | "gap" | "flexGrow" | "layoutWeight",
             _,
-        ) => {
-            !value
-                .trim_end_matches(['v', 'p', 'x', 'f', '%'])
-                .parse::<f64>()
-                .is_ok_and(|number| number == 0.0)
-        }
+        ) => !value
+            .trim_end_matches(['v', 'p', 'x', 'f', '%'])
+            .parse::<f64>()
+            .is_ok_and(|number| number == 0.0),
         _ => true,
     }
 }

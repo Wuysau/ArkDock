@@ -103,7 +103,9 @@ impl DeviceRuntimeAdapter {
                     return self.blocked(&reason);
                 }
                 if !cfg!(windows) {
-                    return self.blocked("DEVICE_RUNTIME_UNSUPPORTED_PLATFORM: this adapter is Windows-local only");
+                    return self.blocked(
+                        "DEVICE_RUNTIME_UNSUPPORTED_PLATFORM: this adapter is Windows-local only",
+                    );
                 }
                 // Do not run `list targets` through windows_process.rs: that
                 // runner combines stderr and stdout, and the installed client's
@@ -119,8 +121,9 @@ impl DeviceRuntimeAdapter {
                     return self.blocked("DEVICE_CONNECTION_CONSENT_REQUIRED: selecting a target does not authorize deployment");
                 }
                 let id = request.target_id.as_ref().ok_or("DEVICE_TARGET_REQUIRED")?;
-                let target = self.targets.iter().find(|target| &target.id == id)
-                    .ok_or("DEVICE_TARGET_NOT_OBSERVED: discovery must provide this exact target")?;
+                let target = self.targets.iter().find(|target| &target.id == id).ok_or(
+                    "DEVICE_TARGET_NOT_OBSERVED: discovery must provide this exact target",
+                )?;
                 if target.connection_state != "Connected" {
                     return self.blocked("DEVICE_TARGET_NOT_CONNECTED: authorize and reconnect the selected target on the device");
                 }
@@ -178,7 +181,10 @@ impl DeviceRuntimeAdapter {
     }
 
     fn require_selected(&self, request: &DeviceRuntimeRequest) -> Result<(), String> {
-        let selected = self.selected_target_id.as_ref().ok_or("DEVICE_TARGET_SELECTION_REQUIRED")?;
+        let selected = self
+            .selected_target_id
+            .as_ref()
+            .ok_or("DEVICE_TARGET_SELECTION_REQUIRED")?;
         if request.target_id.as_ref() != Some(selected) || request.kind != self.kind {
             return Err("STALE_DEVICE_TARGET_SELECTION".into());
         }
@@ -211,13 +217,19 @@ impl DeviceRuntimeAdapter {
 }
 
 fn validate_identity(identity: &NativeControlIdentity) -> Result<(), String> {
-    for value in [&identity.workspace_id, &identity.session_id, &identity.build_id] {
+    for value in [
+        &identity.workspace_id,
+        &identity.session_id,
+        &identity.build_id,
+    ] {
         if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
             return Err("INVALID_DEVICE_RUNTIME_IDENTITY".into());
         }
     }
-    if identity.width == 0 || identity.height == 0
-        || identity.width > 4096 || identity.height > 4096
+    if identity.width == 0
+        || identity.height == 0
+        || identity.width > 4096
+        || identity.height > 4096
         || u64::from(identity.width) * u64::from(identity.height) > 8_388_608
     {
         return Err("INVALID_DEVICE_RUNTIME_SURFACE".into());
@@ -232,7 +244,9 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
             return Err("HDC_SDK_ROOT_NOT_ABSOLUTE".into());
         }
         reject_reparse_ancestors(sdk)?;
-        let root = sdk.canonicalize().map_err(|error| format!("HDC_SDK_INACCESSIBLE: {error}"))?;
+        let root = sdk
+            .canonicalize()
+            .map_err(|error| format!("HDC_SDK_INACCESSIBLE: {error}"))?;
         if !root.is_dir() {
             return Err("HDC_SDK_NOT_DIRECTORY".into());
         }
@@ -242,7 +256,9 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
             match fs::symlink_metadata(&path) {
                 Ok(_) => {
                     reject_reparse_ancestors(&path)?;
-                    let path = path.canonicalize().map_err(|error| format!("HDC_FILE_INACCESSIBLE: {error}"))?;
+                    let path = path
+                        .canonicalize()
+                        .map_err(|error| format!("HDC_FILE_INACCESSIBLE: {error}"))?;
                     if !path.starts_with(&root) {
                         return Err("HDC_FILE_OUTSIDE_SDK".into());
                     }
@@ -257,14 +273,23 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         if candidates.len() > 1 {
             return Err("HDC_TOOL_AMBIGUOUS: choose a specific SDK toolchain root; no executable was selected automatically".into());
         }
-        let path = candidates.first().ok_or("HDC_MISSING: no hdc.exe found at bounded SDK toolchain locations")?;
+        let path = candidates
+            .first()
+            .ok_or("HDC_MISSING: no hdc.exe found at bounded SDK toolchain locations")?;
         let mut file = File::open(path).map_err(|error| format!("HDC_FILE_OPEN: {error}"))?;
-        let metadata = file.metadata().map_err(|error| format!("HDC_FILE_METADATA: {error}"))?;
-        if !metadata.is_file() || is_reparse(&metadata) || metadata.len() < 2 || metadata.len() > TOOL_SIZE_LIMIT {
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("HDC_FILE_METADATA: {error}"))?;
+        if !metadata.is_file()
+            || is_reparse(&metadata)
+            || metadata.len() < 2
+            || metadata.len() > TOOL_SIZE_LIMIT
+        {
             return Err("HDC_FILE_REJECTED: regular bounded executable required".into());
         }
         let mut header = [0u8; 2];
-        file.read_exact(&mut header).map_err(|error| format!("HDC_FILE_HEADER: {error}"))?;
+        file.read_exact(&mut header)
+            .map_err(|error| format!("HDC_FILE_HEADER: {error}"))?;
         if header != *b"MZ" {
             return Err("HDC_FILE_NOT_WINDOWS_EXECUTABLE".into());
         }
@@ -273,8 +298,12 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         let mut total = 2u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
-            let read = file.read(&mut buffer).map_err(|error| format!("HDC_FILE_READ: {error}"))?;
-            if read == 0 { break; }
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| format!("HDC_FILE_READ: {error}"))?;
+            if read == 0 {
+                break;
+            }
             total += read as u64;
             if total > TOOL_SIZE_LIMIT {
                 return Err("HDC_FILE_LIMIT_EXCEEDED".into());
@@ -284,7 +313,10 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         if total != metadata.len() {
             return Err("HDC_FILE_CHANGED_DURING_OBSERVATION".into());
         }
-        let path = path.to_str().ok_or("HDC_PATH_ENCODING_UNSUPPORTED")?.to_owned();
+        let path = path
+            .to_str()
+            .ok_or("HDC_PATH_ENCODING_UNSUPPORTED")?
+            .to_owned();
         Ok((path, format!("{:x}", hash.finalize())))
     })();
     match observed {
@@ -299,8 +331,11 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
 
 fn reject_reparse_ancestors(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
-        if ancestor.as_os_str().is_empty() { continue; }
-        let metadata = fs::symlink_metadata(ancestor).map_err(|error| format!("HDC_PATH_INACCESSIBLE: {error}"))?;
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(ancestor)
+            .map_err(|error| format!("HDC_PATH_INACCESSIBLE: {error}"))?;
         if is_reparse(&metadata) {
             return Err("HDC_REPARSE_PATH_REJECTED".into());
         }
@@ -309,12 +344,16 @@ fn reject_reparse_ancestors(path: &Path) -> Result<(), String> {
 }
 
 fn is_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() { return true; }
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         metadata.file_attributes() & 0x400 != 0
     }
     #[cfg(not(windows))]
-    { false }
+    {
+        false
+    }
 }

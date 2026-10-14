@@ -167,14 +167,11 @@ pub fn automatic_candidate(
     // host active scope.
     if candidates.iter().any(|other| {
         other.id != candidate.id
-            && other
-                .evidence
-                .iter()
-                .any(|evidence| {
-                    active_workspace_source(&evidence.source)
-                        && evidence.active_scope
-                        && current_target(evidence, target, now)
-                })
+            && other.evidence.iter().any(|evidence| {
+                active_workspace_source(&evidence.source)
+                    && evidence.active_scope
+                    && current_target(evidence, target, now)
+            })
     }) {
         return None;
     }

@@ -58,7 +58,8 @@ pub fn validate_binary_frame_envelope(frame: &BinaryFrame) -> Result<(), FrameRe
     }
     if !(50..=MAX_SURFACE_DIMENSION).contains(&metadata.width)
         || !(50..=MAX_SURFACE_DIMENSION).contains(&metadata.height)
-        || u64::from(metadata.width) * u64::from(metadata.height) > MAX_SURFACE_PIXELS {
+        || u64::from(metadata.width) * u64::from(metadata.height) > MAX_SURFACE_PIXELS
+    {
         return Err(FrameReject::InvalidDimensions);
     }
     if metadata.rotation != 0 {
@@ -88,15 +89,26 @@ pub fn parse_jpeg40(
     sequence: u64,
     captured_at: u64,
 ) -> Result<BinaryFrame, String> {
-    parse_jpeg40_for_surface(data, task, sequence, captured_at, SURFACE_WIDTH, SURFACE_HEIGHT)
+    parse_jpeg40_for_surface(
+        data,
+        task,
+        sequence,
+        captured_at,
+        SURFACE_WIDTH,
+        SURFACE_HEIGHT,
+    )
 }
 
 /// Same verified JPEG40 header, matched to a Rust-admitted native surface.
 /// This does not accept arbitrary header variants or rotate pixels in CSS.
 #[cfg(windows)]
 pub fn parse_jpeg40_for_surface(
-    data: &[u8], task: &BuildTask, sequence: u64, captured_at: u64,
-    expected_width: u32, expected_height: u32,
+    data: &[u8],
+    task: &BuildTask,
+    sequence: u64,
+    captured_at: u64,
+    expected_width: u32,
+    expected_height: u32,
 ) -> Result<BinaryFrame, String> {
     if data.len() < JPEG40_HEADER_BYTES + 4
         || data.len() > MAX_JPEG40_PACKET_BYTES
@@ -160,7 +172,8 @@ impl BinaryFrame {
     /// Wire format: a 4-byte little-endian JSON length, UTF-8 metadata, raw JPEG.
     /// The metadata and image have independent limits before the packet is allocated.
     pub fn packet(&self) -> Result<Vec<u8>, String> {
-        validate_binary_frame_envelope(self).map_err(|error| format!("FRAME_PAYLOAD: {error:?}"))?;
+        validate_binary_frame_envelope(self)
+            .map_err(|error| format!("FRAME_PAYLOAD: {error:?}"))?;
         let metadata = serde_json::to_vec(&self.metadata)
             .map_err(|error| format!("FRAME_METADATA: {error}"))?;
         if metadata.len() > MAX_BINARY_METADATA_BYTES {
@@ -177,7 +190,8 @@ impl BinaryFrame {
     /// Native collection and the binary transport never call this automatically.
     #[cfg(windows)]
     pub fn legacy_png(&self) -> Result<NativeFrame, String> {
-        validate_binary_frame_envelope(self).map_err(|error| format!("FRAME_PAYLOAD: {error:?}"))?;
+        validate_binary_frame_envelope(self)
+            .map_err(|error| format!("FRAME_PAYLOAD: {error:?}"))?;
         let image = decode_jpeg(self)?;
         let mut png = Cursor::new(Vec::new());
         image

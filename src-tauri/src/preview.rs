@@ -82,7 +82,10 @@ impl NativePreviewer {
     ) -> Result<control::ControlReceiver, String> {
         #[cfg(windows)]
         {
-            self.runtime.as_ref().ok_or("PREVIEW_SESSION_REQUIRED")?.control(request, operation_id)
+            self.runtime
+                .as_ref()
+                .ok_or("PREVIEW_SESSION_REQUIRED")?
+                .control(request, operation_id)
         }
         #[cfg(not(windows))]
         {
@@ -93,17 +96,27 @@ impl NativePreviewer {
 
     pub fn cancel_controls(&self) {
         #[cfg(windows)]
-        if let Some(runtime) = &self.runtime { runtime.cancel_controls(); }
+        if let Some(runtime) = &self.runtime {
+            runtime.cancel_controls();
+        }
     }
 
     pub fn control_runtime_state(&self) -> Option<control::RuntimeControlState> {
         #[cfg(windows)]
-        { self.runtime.as_ref().map(|runtime| runtime.control_runtime_state()) }
+        {
+            self.runtime
+                .as_ref()
+                .map(|runtime| runtime.control_runtime_state())
+        }
         #[cfg(not(windows))]
-        { None }
+        {
+            None
+        }
     }
 
-    pub fn configured_sdk(&self) -> Option<PathBuf> { self.sdk.clone() }
+    pub fn configured_sdk(&self) -> Option<PathBuf> {
+        self.sdk.clone()
+    }
 
     pub fn request_inspection(
         &self,

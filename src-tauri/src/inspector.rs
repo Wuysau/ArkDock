@@ -89,7 +89,8 @@ pub fn parse_tree(
         || displayed.protocol_version != 1
         || !(50..=crate::preview::frames::MAX_SURFACE_DIMENSION).contains(&displayed.width)
         || !(50..=crate::preview::frames::MAX_SURFACE_DIMENSION).contains(&displayed.height)
-        || u64::from(displayed.width) * u64::from(displayed.height) > crate::preview::frames::MAX_SURFACE_PIXELS
+        || u64::from(displayed.width) * u64::from(displayed.height)
+            > crate::preview::frames::MAX_SURFACE_PIXELS
         || raw.received_at < raw.requested_at
         || raw.query_id == 0
     {

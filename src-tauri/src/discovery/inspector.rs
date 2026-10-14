@@ -472,15 +472,32 @@ fn inspect_application(
 
 fn declared_library_contains_input(modules: &[Value], input: &Path, app_root: &Path) -> bool {
     modules.iter().any(|module| {
-        let Some(name) = module.get("name").and_then(Value::as_str) else { return false; };
-        let Some(source) = module.get("srcPath").and_then(Value::as_str) else { return false; };
-        if name.is_empty() || metadata_field(source).is_err() { return false; }
-        let Ok(root) = safe_module_root(app_root, source) else { return false; };
-        if !input.starts_with(&root) && !root.starts_with(input) { return false; }
-        let Ok(manifest) = read_json5_within(&root.join("src/main/module.json5"), &root) else { return false; };
-        let Some(config) = manifest.get("module").filter(|value| value.is_object()) else { return false; };
+        let Some(name) = module.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(source) = module.get("srcPath").and_then(Value::as_str) else {
+            return false;
+        };
+        if name.is_empty() || metadata_field(source).is_err() {
+            return false;
+        }
+        let Ok(root) = safe_module_root(app_root, source) else {
+            return false;
+        };
+        if !input.starts_with(&root) && !root.starts_with(input) {
+            return false;
+        }
+        let Ok(manifest) = read_json5_within(&root.join("src/main/module.json5"), &root) else {
+            return false;
+        };
+        let Some(config) = manifest.get("module").filter(|value| value.is_object()) else {
+            return false;
+        };
         config.get("name").and_then(Value::as_str) == Some(name)
-            && matches!(config.get("type").and_then(Value::as_str), Some("har" | "shared"))
+            && matches!(
+                config.get("type").and_then(Value::as_str),
+                Some("har" | "shared")
+            )
     })
 }
 
@@ -773,7 +790,8 @@ mod tests {
             &library,
             Environment::WindowsLocal,
             evidence(&library, Environment::WindowsLocal),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].project.module, "entry");
         assert!(candidates[0].valid && !candidates[0].auto_eligible);
@@ -783,23 +801,45 @@ mod tests {
     fn hap_feature_remains_selectable_while_har_and_hsp_are_not_applications() {
         let repo = tempfile::tempdir().unwrap();
         make_monorepo_app(repo.path());
-        let modules = [("entry", "entry"), ("screen", "feature"), ("utils", "har"), ("common", "shared")];
+        let modules = [
+            ("entry", "entry"),
+            ("screen", "feature"),
+            ("utils", "har"),
+            ("common", "shared"),
+        ];
         for (name, kind) in modules {
             let root = repo.path().join(name).join("src/main");
             fs::create_dir_all(&root).unwrap();
-            fs::write(root.join("module.json5"),
-                serde_json::json!({"module":{"name":name,"type":kind}}).to_string()).unwrap();
+            fs::write(
+                root.join("module.json5"),
+                serde_json::json!({"module":{"name":name,"type":kind}}).to_string(),
+            )
+            .unwrap();
         }
-        fs::write(repo.path().join("build-profile.json5"),
+        fs::write(
+            repo.path().join("build-profile.json5"),
             serde_json::json!({"modules":modules.map(|(name,_)|
-                serde_json::json!({"name":name,"srcPath":name}))}).to_string()).unwrap();
-        let candidates = inspect_directory(repo.path(), Environment::WindowsLocal,
-            evidence(repo.path(), Environment::WindowsLocal)).unwrap();
+                serde_json::json!({"name":name,"srcPath":name}))})
+            .to_string(),
+        )
+        .unwrap();
+        let candidates = inspect_directory(
+            repo.path(),
+            Environment::WindowsLocal,
+            evidence(repo.path(), Environment::WindowsLocal),
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().all(|item| item.valid && matches!(item.project.module.as_str(), "entry" | "screen")));
+        assert!(candidates
+            .iter()
+            .all(|item| item.valid && matches!(item.project.module.as_str(), "entry" | "screen")));
         let library = repo.path().join("common/src/main");
-        let from_library = inspect_directory(&library, Environment::WindowsLocal,
-            evidence(&library, Environment::WindowsLocal)).unwrap();
+        let from_library = inspect_directory(
+            &library,
+            Environment::WindowsLocal,
+            evidence(&library, Environment::WindowsLocal),
+        )
+        .unwrap();
         assert_eq!(from_library.len(), 2); // Multiple application modules still need a choice.
     }
 
