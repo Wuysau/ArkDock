@@ -89,7 +89,7 @@ impl Engine {
                 self.frames
                     .lock()
                     .ok()?
-                    .retained
+                    .retained()
                     .back()
                     .map(|frame| (frame.metadata.width, frame.metadata.height))
             })

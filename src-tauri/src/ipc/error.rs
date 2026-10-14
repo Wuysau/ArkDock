@@ -2546,6 +2546,40 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_shape_is_stable_for_the_frontend() {
+        let error = IpcError::from_message("TRUST_REQUIRED: detail");
+        let value: serde_json::Value = serde_json::to_value(&error).unwrap();
+        let object = value.as_object().expect("IpcError serializes as an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "category",
+                "code",
+                "details",
+                "message",
+                "recovery",
+                "retryable"
+            ]
+        );
+        assert_eq!(object["code"], "TRUST_REQUIRED");
+        assert_eq!(object["category"], "trust");
+        assert_eq!(object["recovery"], "confirmTrust");
+        assert_eq!(object["retryable"], false);
+        assert!(object["message"].as_str().is_some_and(|m| !m.is_empty()));
+        // The optional field is present as null when there is nothing to add.
+        let bare = serde_json::to_value(IpcError::from_message("TRUST_REQUIRED")).unwrap();
+        assert!(bare["details"].is_null());
+        // A round trip through JSON keeps every field, so the frontend type is faithful.
+        let parsed: IpcError = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.code, error.code);
+        assert_eq!(parsed.category, error.category);
+        assert_eq!(parsed.recovery, error.recovery);
+        assert_eq!(parsed.retryable, error.retryable);
+    }
+
+    #[test]
     fn non_idempotent_operations_are_never_retryable() {
         for spec in ERROR_TABLE {
             if matches!(spec.category, ErrorCategory::Agent) {
