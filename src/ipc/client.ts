@@ -1,4 +1,5 @@
 import type { AppSnapshot, CommandArgs, CommandResults, NativeFrame, PreviewVisibility, RequestScope } from './model.ts';
+import { normalizeError } from './errors.ts';
 
 interface DesktopBridge {
   core: { invoke<T>(command: string, args?: object): Promise<T> };
@@ -24,13 +25,20 @@ export const nativeBridge: UiBridge = {
 
 export function desktopAvailable(): boolean { return Boolean(window.__TAURI__); }
 
+/**
+ * The single product entry to native commands. Every reply is an `AppSnapshot`;
+ * every native failure is normalized here so no display layer has to interpret a
+ * thrown value. Normalization never retries: Agent delivery, credential and
+ * project-trust commands keep exactly one attempt.
+ */
 export async function request<K extends keyof CommandArgs>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope?: RequestScope): Promise<AppSnapshot> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。请在 Windows 11 使用 pnpm dev 启动 ArkDock 独立应用。');
   if (command !== 'snapshot' && !scope) throw new Error('缺少当前目标/预览会话，请等待后端状态同步。');
   if (command === 'read_preview_frame') throw new Error('二进制帧需要使用 readPreviewFrame；不能按状态快照读取。');
   if (command === 'get_motion_metrics') throw new Error('动效计数需要使用 readMotionMetrics；不能按业务快照读取。');
-  return desktop.core.invoke<AppSnapshot>(command, command === 'snapshot' ? args : { ...args, scope });
+  try { return await desktop.core.invoke<AppSnapshot>(command, command === 'snapshot' ? args : { ...args, scope }); }
+  catch (reason) { throw normalizeError(reason); }
 }
 
 export async function readMotionMetrics(scope: RequestScope): Promise<CommandResults['get_motion_metrics']> {
@@ -39,6 +47,11 @@ export async function readMotionMetrics(scope: RequestScope): Promise<CommandRes
   return desktop.core.invoke<CommandResults['get_motion_metrics']>('get_motion_metrics', { scope });
 }
 
+/**
+ * The binary transport keeps its own structured `PreviewProtocolError` identity:
+ * the frame controller reads that exact value, and a normalized copy would drop
+ * the identity that the IPC contract pins. The controller normalizes at use.
+ */
 export async function readPreviewFrame(scope: RequestScope, protocolVersion: number, consumerId: string): Promise<CommandResults['read_preview_frame']> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。');
@@ -55,7 +68,8 @@ export async function transfer<K extends DataCommand>(command: K, args: Omit<Com
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。');
   if (!scope.targetId || !scope.sessionId) throw new Error('需要当前目标与原生预览会话。');
-  return desktop.core.invoke<CommandResults[K]>(command, { ...args, scope });
+  try { return await desktop.core.invoke<CommandResults[K]>(command, { ...args, scope }); }
+  catch (reason) { throw normalizeError(reason); }
 }
 
 export async function observe(state: (value: AppSnapshot) => void, frame: (value: NativeFrame) => void, visibility?: (visible: boolean) => void): Promise<() => void> {

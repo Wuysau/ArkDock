@@ -2,6 +2,7 @@ import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
 import type { MutableRefObject } from 'react';
 import type { InspectorBounds, InspectorNode, InspectorTree, InteractionMode, SelectionContext } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError } from '../ipc/errors.ts';
 import type { BinaryPreviewFrame } from '../preview/frame-types.ts';
 import { PreviewStage } from '../PreviewStage.tsx';
 import type { PreviewStageProps } from '../PreviewStage.tsx';
@@ -20,7 +21,7 @@ export interface InspectorActions {
 }
 export function InspectorPreview({ bridge, interactionMode, exit, actions, onProblem, onError, ...stage }: PreviewStageProps & {
   bridge: UiBridge; interactionMode: InteractionMode; exit: () => void;
-  actions?: MutableRefObject<InspectorActions | null>; onProblem?: (reason: string | null) => void; onError?: (reason: string) => void;
+  actions?: MutableRefObject<InspectorActions | null>; onProblem?: (reason: string | null) => void; onError?: (reason: unknown) => void;
 }) {
   const displayed = useSyncExternalStore(stage.store.subscribeDisplayed, stage.store.getDisplayed, stage.store.getDisplayed);
   const frame: BinaryPreviewFrame | null = displayed && 'jpeg' in displayed ? displayed : null;
@@ -122,7 +123,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
       } catch (error) {
         if (!live) return;
         inspectionCache.current = null;
-        setTree(null); setTreeAnchor(null); setRegionMode(true); setQueryProblem(String(error));
+        setTree(null); setTreeAnchor(null); setRegionMode(true); setQueryProblem(describeError(error));
       } finally {
         if (live) timer = setTimeout(() => void query(), 750);
       }
@@ -199,7 +200,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
       setSelection(created);
       const confirmedTree = selectedTree;
       setCandidates(confirmedTree ? hits.flatMap((hit) => { const updated = confirmedTree.nodes.find((item) => item.nodeId === hit.nodeId); return updated ? [updated] : []; }) : hits);
-    } catch (error) { if (isCurrent()) onError?.(`选择未保存：${String(error)}`); }
+    } catch (error) { if (isCurrent()) onError?.(`选择未保存：${describeError(error)}`); }
     finally {
       if (selectionPending.current === serial) selectionPending.current = null;
       if (isActive() && !isCurrent()) onError?.('画面或构建已变化，本次选择未显示，请重新选择。');

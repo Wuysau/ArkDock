@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { AppSnapshot } from './ipc/model.ts';
+import { describeError } from './ipc/errors.ts';
 import type { FrameStore } from './frame-store.ts';
 import { deriveUiState } from './view-state.ts';
 import type { NativeControls } from './preview/useNativeControls.ts';
@@ -46,7 +47,7 @@ export function PreviewCapabilities({ snapshot, store, busy, refresh, controls }
         <button disabled={!ready('resolution') || !validResolution} onClick={() => void controls.submit({ action: 'setResolution', ...resolution })}>应用原生尺寸</button></details>
       <p className="muted">文字输入支持局部输入焦点的 Unicode 提交及已核验按键。完整 IME 预编辑、候选事务与原生光标编辑仍受协议限制。</p>
       {(controls.pending || state?.operations.some((operation) => ['queued', 'awaitingFrame'].includes(operation.phase))) && <div className="panel-actions"><output>{controls.pending ? `请求处理中：${controls.pending}` : '等待原生画面与配置确认'}</output><button onClick={() => void controls.cancel()}>取消原生操作</button></div>}
-      {controls.error && <output className="native-control-error" role="alert">{controls.error}</output>}
+      {controls.error && <output className="native-control-error" role="alert">{describeError(controls.error)}</output>}
       {state?.operations.length ? <details className="native-control-receipts"><summary>最近原生控制回执</summary>{state.operations.slice(-8).reverse().map((operation) => <article key={operation.operationId}>
         <strong>{operation.action} · {operation.phase}</strong><p>{operation.reason}</p><small>命令接受：{operation.commandAccepted ? '是' : '未确认'} · 有效帧：{operation.frameObserved ? '已观察' : '未观察'} · 像素改变：{operation.pixelsChanged ? '已核验' : '未独立核验'} · 配置确认：{operation.configurationConfirmed ? '是' : '未确认'}</small>
       </article>)}</details> : null}

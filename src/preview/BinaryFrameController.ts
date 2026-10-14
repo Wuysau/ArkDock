@@ -1,5 +1,6 @@
 import type { AppSnapshot, NativeFrame, RequestScope } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError, isUnsupportedOperation } from '../ipc/errors.ts';
 import type { FrameStore } from '../frame-store.ts';
 import { FRAME_PROTOCOL_VERSION, parseBinaryFrame } from './frame-decoder.ts';
 
@@ -18,10 +19,9 @@ interface Options {
   consumerId?: string;
 }
 interface Lease { scope: RequestScope; identity: string; consumerId: string; acknowledged: boolean; closed: boolean }
-const unsupported = (error: unknown) => {
-  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : String(error);
-  return code.includes('PROTOCOL_VERSION_UNSUPPORTED') || /(?:command.*not found|unknown command)/i.test(code);
-};
+// The negotiated protocol version is the only transport failure that may fall back
+// to the legacy image channel; every other failure stays BLOCKED with its reason.
+const unsupported = (error: unknown) => isUnsupportedOperation(error);
 const identity = (state: AppSnapshot | null) => state?.target && state.project && state.sessionId && state.trusted && state.backend.available
   && state.phase !== 'stopped' && state.phase !== 'crashed' ? JSON.stringify([state.target.id, state.target.process.pid,
     state.target.process.startedAt, state.project.id, state.project.environment, state.project.workspaceRoot, state.project.appRoot,
@@ -92,7 +92,7 @@ export class BinaryFrameController {
     } catch (error) {
       if (this.disposed || this.lease !== lease || lease.closed) return;
       this.metrics.errors++;
-      this.change(unsupported(error) ? 'legacy' : 'blocked', String(error));
+      this.change(unsupported(error) ? 'legacy' : 'blocked', describeError(error));
     }
   }
   private async disable(lease: Lease) {
