@@ -15,11 +15,33 @@ Windows window events ──> target lifecycle ──> project evidence and user
 - `protocol/model.json` is the IPC source of truth. `tools/generate-ipc.mjs` creates the Rust and TypeScript models; generated files are checked in and verified for drift.
 - `src/ipc/` is the only product frontend entry to native commands. Components do not invoke Tauri directly.
 - `src-tauri/src/windowing/` manages independent top-level windows, docking, layout, effects, and lifecycle.
-- `src-tauri/src/discovery/` reads project evidence and returns candidates without running project configuration or build scripts.
+- `src-tauri/src/discovery/` reads project evidence and returns candidates without running project configuration or build scripts. `discovery/classification.rs` owns the candidate display category, so evidence freshness and target identity are decided once, in Rust.
 - `src-tauri/src/workspace.rs` owns project identity, explicit trust, and persisted preferences.
 - `src-tauri/src/scheduler.rs` serializes builds and rejects stale sessions, tasks, and frames.
 - `src-tauri/src/preview/` probes supported toolchains and owns native Previewer execution and frame transport.
 - `src-tauri/src/selection.rs` and `src-tauri/src/agent/` manage scoped Inspector selections and explicitly available Agent transports.
+
+### Session coordinator
+
+`src-tauri/src/desktop.rs` is the one coordinator: a single worker thread owns the
+`Engine`, and hooks, watchers and window callbacks only enqueue lightweight messages.
+It delegates cohesive policy to sibling modules, which never own state of their own:
+
+| Module | Owns | Never does |
+| --- | --- | --- |
+| `desktop/association.rs` | workspace identity, active-workspace consistency, and the association decision | start or stop execution, read the filesystem for new evidence |
+| `desktop/session.rs` | preview lifecycle: teardown order, the execution gate, stop versus suspend | decide association or read evidence |
+| `desktop/frame_delivery.rs` | the bounded latest-first frame mailbox and its identity checks | publish state or schedule builds |
+| `desktop/diagnostics.rs` | the bounded, scope-stamped diagnostic list | decide phases or retry |
+| `desktop/inspection.rs` | Inspector, selection and native control use cases | touch window or camera state |
+| `desktop/agent_delivery.rs` | every Agent command surface, pairing commit, and assisted work | bypass pairing or delivery authorization |
+| `desktop/native_controls.rs` | native control and device runtime IPC | widen a scope that the coordinator rejected |
+| `desktop/visibility.rs` | reading the process's own main HWND visibility | dispatch to the WebView thread |
+
+`src-tauri/src/ipc/error.rs` is the only place where an internal `Result<T, String>`
+becomes the structured `IpcError` contract. Every code has one category, message,
+`retryable` flag and recovery hint, and the vocabulary is checked against
+`protocol/model.json` by test.
 
 ## State and data flow
 
@@ -28,6 +50,16 @@ Window identity is represented by opaque runtime tokens; raw native handles are 
 Build, preview, and selection operations carry the current target and session scope. The backend validates the scope and rejects late results. Binary frames are validated against workspace, session, build, generation, sequence, dimensions, and payload before display. A build failure may retain a visibly stale image, but stale pixels cannot receive input as if they belonged to the latest build.
 
 Inspector selection uses backend-observed frame and component metadata. Source locations remain candidates until independently verified against the current trusted project. Agent session labels and manually entered thread IDs do not grant conversation write access; only an implemented, authorized transport with a matching receipt may report a submission.
+
+Candidate display categories come from the same backend snapshot, not from a second
+frontend implementation of the evidence rules. A category is presentation only: it
+never grants automatic association, execution trust, or build permission.
+
+Commands report failures through one structured `IpcError` (`code`, `category`,
+`message`, `retryable`, `recovery`, optional sanitized `details`). Unknown internal
+failures degrade to `INTERNAL` without echoing the original text, and non-idempotent
+operations are never marked retryable, so a client cannot turn a started Agent send or
+pairing write into an automatic duplicate.
 
 ## Native preview
 

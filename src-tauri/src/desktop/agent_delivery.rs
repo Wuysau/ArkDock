@@ -376,3 +376,67 @@ pub(crate) async fn agent_assisted_fill(
         .await?,
     )
 }
+
+// Agent session binding and delivery commands live with the rest of the Agent use-case
+// boundary, so one module owns every Agent command surface.
+#[tauri::command]
+pub(crate) async fn agent_session_list(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<AgentSessionList, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::AgentList).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_session_bind(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    draft: AgentBindingDraft,
+) -> Result<AgentSessionBinding, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::AgentBind(draft)).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_prepare(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    selection_id: String,
+    binding_id: Option<String>,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(
+        data_request(
+            window,
+            service,
+            scope,
+            DataAction::DeliveryPrepare(selection_id, binding_id),
+        )
+        .await?,
+    )
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_send(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: String,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::DeliverySend(request_id)).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_status(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: String,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(
+        data_request(
+            window,
+            service,
+            scope,
+            DataAction::DeliveryStatus(request_id),
+        )
+        .await?,
+    )
+}
