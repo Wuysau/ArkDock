@@ -20,10 +20,20 @@ const target = { id: 'demo-target', title: 'native-counter — Windows Terminal'
 function candidate(index: number, reliable = false): Candidate {
   const names = ['native-counter', 'harmony-store', 'quick-action', 'feature-lab', '中文长名称组件工程', 'terminal-preview'];
   const name = names[index % names.length];
+  // Mirrors `discovery::classification`: only lifecycle-verified active-scope
+  // evidence makes a candidate `current`, and history evidence can never do so.
+  // The backend owns this field, so the fixture has to mirror the same rules.
+  const source = reliable ? 'registration' : index === 1 ? 'history' : 'title';
+  const category = reliable ? 'current' : source === 'history' ? 'history' : 'suggested';
+  // `categoryExpiresAt` only schedules a change where the category really is time
+  // bound: the verified current candidate stops being `current` when its evidence
+  // expires. Suggested and history rows have no scheduled category change.
+  const evidenceExpiresAt = stamp + 60_000;
   return {
     id: `demo-candidate-${index}`, project: { ...project, id: `demo-project-${index}`, name, workspaceRoot: `D:\\Projects\\Harmony\\${name}`, appRoot: `D:\\Projects\\Harmony\\${name}`, module: index === 4 ? 'feature' : 'entry' },
-    evidence: [{ source: reliable ? 'registration' : index === 1 ? 'history' : 'title', targetId: target.id, process: target.process, sessionId: reliable ? 'demo-source-session' : null, observedAt: stamp, expiresAt: stamp + 60_000, environment: 'windowsLocal', rawPath: `D:\\Projects\\Harmony\\${name}`, verifiable: reliable, activeScope: reliable }],
-    valid: index !== 5, autoEligible: reliable,
+    evidence: [{ source, targetId: target.id, process: target.process, sessionId: reliable ? 'demo-source-session' : null, observedAt: stamp, expiresAt: evidenceExpiresAt, environment: 'windowsLocal', rawPath: `D:\\Projects\\Harmony\\${name}`, verifiable: reliable, activeScope: reliable }],
+    valid: index !== 5, autoEligible: reliable, category,
+    categoryExpiresAt: category === 'current' ? evidenceExpiresAt : 0,
     reasons: [reliable ? '来自当前会话；生命周期与工程结构已核验' : index === 5 ? '目录不可访问；需要重新选择有效工程' : index === 1 ? '曾关联此窗口；当前活动工程仍需确认' : '路径待确认；窗口标题不能证明当前工程'],
   };
 }
