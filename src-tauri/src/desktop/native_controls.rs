@@ -565,7 +565,7 @@ pub(crate) async fn preview_control_state(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<NativeControlState, String> {
+) -> Result<NativeControlState, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::ControlState).await?,
     )
@@ -576,7 +576,7 @@ pub(crate) async fn preview_control_enable(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     enabled: bool,
-) -> Result<NativeControlState, String> {
+) -> Result<NativeControlState, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::ControlEnable(enabled))
             .await?,
@@ -588,7 +588,7 @@ pub(crate) async fn preview_control_submit(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request: NativeControlRequest,
-) -> Result<NativeControlReceipt, String> {
+) -> Result<NativeControlReceipt, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::ControlSubmit(request))
             .await?,
@@ -600,7 +600,7 @@ pub(crate) async fn preview_control_cancel(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     identity: NativeControlIdentity,
-) -> Result<NativeControlReceipt, String> {
+) -> Result<NativeControlReceipt, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::ControlCancel(identity))
             .await?,
@@ -611,7 +611,7 @@ pub(crate) async fn device_runtime_state(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<DeviceRuntimeState, String> {
+) -> Result<DeviceRuntimeState, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::DeviceState).await?,
     )
@@ -622,7 +622,7 @@ pub(crate) async fn device_runtime_action(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request: DeviceRuntimeRequest,
-) -> Result<DeviceRuntimeState, String> {
+) -> Result<DeviceRuntimeState, IpcError> {
     inspection::decode_data(
         inspection::data_request(window, service, scope, DataAction::DeviceAction(request)).await?,
     )

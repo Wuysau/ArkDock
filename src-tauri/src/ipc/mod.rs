@@ -1,7 +1,10 @@
+pub mod error;
 pub mod model;
 
 use model::{AppSnapshot, RequestScope};
 
+/// Internal identity checks keep returning bounded strings; [`error::IpcError`] is the
+/// explicit conversion boundary that turns them into the structured wire contract.
 pub fn validate_scope(snapshot: &AppSnapshot, scope: &RequestScope) -> Result<(), String> {
     if scope.target_id.as_deref() != snapshot.target.as_ref().map(|t| t.id.as_str())
         || scope.session_id != snapshot.session_id

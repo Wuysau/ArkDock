@@ -3,7 +3,7 @@
 use crate::discovery::resolve;
 use crate::discovery::{
     automatic_candidate, current_active_evidence, inspect_directory, path_environment,
-    resolution_complete,
+    resolution_complete, WORKSPACE_OBSERVATION_TTL_MS,
 };
 #[cfg(windows)]
 use crate::discovery::{
@@ -235,6 +235,9 @@ struct Engine {
     own_handle: isize,
     associated_manually: bool,
     next_workspace_probe: Instant,
+    /// Wall-clock instant at which candidate display semantics may change; `0` means
+    /// nothing is scheduled. Set from the published snapshot, never from the frontend.
+    next_candidate_recheck_at: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -244,7 +247,9 @@ enum DiscoveryMode {
 }
 
 const WORKSPACE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
-const WORKSPACE_OBSERVATION_TTL_MS: u64 = 15_000;
+/// When a candidate deadline has already passed without changing the displayed
+/// category, recheck on this bounded interval instead of every actor tick.
+const CANDIDATE_RECHECK_INTERVAL_MS: u64 = 1_000;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -471,6 +476,9 @@ impl Engine {
         self.sync_control_lifecycle();
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
+        // Candidate categories are backend truth: they are recomputed for the snapshot
+        // that is emitted, never derived again by the frontend.
+        self.grade_candidates();
         if let Some(selections) = &self.selections {
             let _ = selections.sync_runtime(&self.snapshot, now());
         }
@@ -478,6 +486,40 @@ impl Engine {
             *state = self.snapshot.clone();
         }
         let _ = self.app.emit("arkdock:state", &self.snapshot);
+    }
+    /// Recomputes candidate display semantics and records when they may move.
+    /// Returns whether any candidate's visible category changed.
+    fn grade_candidates(&mut self) -> bool {
+        let Some(target) = self.snapshot.target.clone() else {
+            self.next_candidate_recheck_at = 0;
+            return false;
+        };
+        let observed = now();
+        let observation = self.snapshot.workspace_observation.clone();
+        let applied = crate::discovery::classification::apply(
+            &mut self.snapshot.candidates,
+            &target,
+            observation.as_ref(),
+            observed,
+        );
+        self.next_candidate_recheck_at = if applied.next_recheck_at == 0 {
+            0
+        } else if applied.next_recheck_at > observed {
+            applied.next_recheck_at
+        } else {
+            observed.saturating_add(CANDIDATE_RECHECK_INTERVAL_MS)
+        };
+        applied.changed
+    }
+    /// Expired evidence must stop presenting a "current workspace" candidate even when
+    /// no window event or file change arrives to publish another snapshot.
+    fn refresh_candidate_semantics(&mut self) {
+        if self.next_candidate_recheck_at == 0 || now() < self.next_candidate_recheck_at {
+            return;
+        }
+        if self.grade_candidates() {
+            self.publish();
+        }
     }
     fn diagnostic(&mut self, code: &str, message: String, status: CheckStatus) {
         if self.snapshot.diagnostics.len() >= 128 {
@@ -1345,6 +1387,7 @@ impl Engine {
     }
     fn tick(&mut self) {
         self.probe_workspace();
+        self.refresh_candidate_semantics();
         if !self.associated_manually && self.snapshot.project.is_some() {
             let active =
                 self.snapshot.target.as_ref().and_then(|target| {
@@ -1514,35 +1557,36 @@ async fn request(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     action: Action,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let sender = service.sender.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<AppSnapshot, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Action(scope, action, send))
-            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
-        receive
+            .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
+        let result = receive
             .recv_timeout(Duration::from_secs(15))
-            .map_err(|_| "REQUEST_TIMEOUT".to_owned())?
+            .map_err(|_| IpcError::from("REQUEST_TIMEOUT"))?;
+        result.map_err(IpcError::from)
     })
     .await
-    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
+    .map_err(|_| "REQUEST_WORKER_FAILED")?
 }
 #[tauri::command]
 async fn snapshot(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
-    service.snapshot()
+    service.snapshot().map_err(IpcError::from)
 }
 #[tauri::command]
 async fn minimize_window(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let snapshot = service.snapshot()?;
     validate_scope(&snapshot, &scope)?;
@@ -1555,7 +1599,7 @@ async fn collapse_to_orb(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1570,7 +1614,7 @@ async fn expand_from_orb(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1585,7 +1629,7 @@ async fn hide_to_tray(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1600,7 +1644,7 @@ async fn show_from_tray(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1615,7 +1659,7 @@ async fn set_orb_auto_hide(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     enabled: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::OrbAutoHide(enabled)).await
 }
 #[tauri::command]
@@ -1624,7 +1668,7 @@ async fn set_motion_preferences(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     preferences: MotionSettings,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Motion(preferences)).await
 }
 #[tauri::command]
@@ -1632,7 +1676,7 @@ async fn get_display_mode(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::DisplaySnapshot).await
 }
 #[tauri::command]
@@ -1640,27 +1684,28 @@ async fn get_motion_metrics(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<MotionMetrics, String> {
+) -> Result<MotionMetrics, IpcError> {
     check_window(&window)?;
     let sender = service.sender.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<MotionMetrics, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Metrics(scope, send))
-            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
-        receive
+            .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
+        let result = receive
             .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "REQUEST_TIMEOUT".to_owned())?
+            .map_err(|_| IpcError::from("REQUEST_TIMEOUT"))?;
+        result.map_err(IpcError::from)
     })
     .await
-    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
+    .map_err(|_| "REQUEST_WORKER_FAILED")?
 }
 #[tauri::command]
 async fn close_window(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let snapshot = service.snapshot()?;
     validate_scope(&snapshot, &scope)?;
@@ -1673,7 +1718,7 @@ async fn begin_drag(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     let snapshot = request(window.clone(), service, scope, Action::BeginDrag).await?;
     window.start_dragging().map_err(|e| e.to_string())?;
     Ok(snapshot)
@@ -1683,7 +1728,7 @@ async fn maximize_pair(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::MaximizePair).await
 }
 #[tauri::command]
@@ -1691,7 +1736,7 @@ async fn restore_pair(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::RestorePair).await
 }
 #[tauri::command]
@@ -1699,7 +1744,7 @@ async fn rediscover(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Rediscover).await
 }
 #[tauri::command]
@@ -1708,7 +1753,7 @@ async fn select_candidate(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     candidate_id: String,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if candidate_id.len() > 256 {
         return Err("INVALID_CANDIDATE".into());
     }
@@ -1719,7 +1764,7 @@ async fn select_directory(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -1741,7 +1786,7 @@ async fn inspect_directory_path(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     path: String,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let directory = absolute_directory_input(&path)?;
@@ -1752,7 +1797,7 @@ async fn configure_sdk(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -1773,7 +1818,7 @@ async fn detach(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Detach).await
 }
 #[tauri::command]
@@ -1783,7 +1828,7 @@ async fn set_trust(
     scope: RequestScope,
     project_id: String,
     trusted: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if project_id.len() > 256 {
         return Err("INVALID_PROJECT".into());
     }
@@ -1794,7 +1839,7 @@ async fn refresh_preview(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Refresh).await
 }
 #[tauri::command]
@@ -1802,18 +1847,20 @@ async fn stop_preview(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Stop).await
 }
 
-fn protocol_error(message: String, received_protocol_version: u32) -> PreviewProtocolError {
+/// Binary frame commands share the same error vocabulary as every other command; the
+/// protocol shape additionally carries the expected and received frame protocol version.
+fn protocol_error(
+    error: impl Into<IpcError>,
+    received_protocol_version: u32,
+) -> PreviewProtocolError {
+    let error = error.into();
     PreviewProtocolError {
-        code: message
-            .split(':')
-            .next()
-            .unwrap_or("PREVIEW_ERROR")
-            .to_owned(),
-        message,
+        code: crate::ipc::error::wire_name(&error.code),
+        message: error.message,
         expected_protocol_version: BINARY_FRAME_PROTOCOL_VERSION,
         received_protocol_version,
     }
@@ -1863,7 +1910,7 @@ async fn read_preview_frame(
     protocol_version: u32,
     consumer_id: String,
 ) -> Result<tauri::ipc::Response, PreviewProtocolError> {
-    let result = (|| {
+    let result = (|| -> Result<Vec<u8>, IpcError> {
         check_window(&window)?;
         if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
             return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
@@ -1876,6 +1923,7 @@ async fn read_preview_frame(
             .lock()
             .map_err(|_| "FRAME_UNAVAILABLE")?
             .take_current(&snapshot, &consumer_id)
+            .map_err(IpcError::from)
     })();
     result
         .map(tauri::ipc::Response::new)
@@ -1887,7 +1935,7 @@ async fn arrange_side_by_side(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     consent: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Arrange(consent)).await
 }
 
@@ -1900,7 +1948,7 @@ async fn click_preview(
     generation: u64,
     x: u32,
     y: u32,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if build_id.len() > 256
         || x >= crate::preview::frames::MAX_SURFACE_DIMENSION
         || y >= crate::preview::frames::MAX_SURFACE_DIMENSION
@@ -2056,6 +2104,7 @@ pub fn run() {
                     own_handle,
                     associated_manually: false,
                     next_workspace_probe: Instant::now() + WORKSPACE_PROBE_INTERVAL,
+                    next_candidate_recheck_at: 0,
                 };
                 match selection_result {
                     Ok(store) => engine.selections = Some(store),
