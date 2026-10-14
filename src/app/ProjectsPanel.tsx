@@ -1,8 +1,7 @@
-import { useEffect, useState } from 'react';
 import type { AppSnapshot } from '../ipc/model.ts';
 import { filterCandidates } from '../view-state.ts';
 import { displayPath } from '../path-display.ts';
-import { groupCandidates, nextDisplayDeadline, observationAge } from './candidates.ts';
+import { groupCandidates, observationAge } from './candidates.ts';
 import { CandidateList } from './CandidateList.tsx';
 import { Icon } from '../Icon.tsx';
 
@@ -11,24 +10,14 @@ import { Icon } from '../Icon.tsx';
  * backend already verified, offers an explicit directory fallback, and asks the
  * user to confirm which candidate is the current workspace.
  */
-export function ProjectsPanel({ snapshot, connected, busy, search, onSearch, directoryPath, onDirectoryPath, inspectDirectory, chooseDirectory, rediscover, select }: {
-  snapshot: AppSnapshot | null; connected: boolean; busy: boolean;
+export function ProjectsPanel({ snapshot, connected, busy, now, search, onSearch, directoryPath, onDirectoryPath, inspectDirectory, chooseDirectory, rediscover, select }: {
+  snapshot: AppSnapshot | null; connected: boolean; busy: boolean; now: number;
   search: string; onSearch: (value: string) => void;
   directoryPath: string; onDirectoryPath: (value: string) => void;
   inspectDirectory: () => void; chooseDirectory: () => void; rediscover: () => void; select: (id: string) => void;
 }) {
-  const [observationTime, setObservationTime] = useState(Date.now);
-  // The backend republishes when a candidate's display category moves; this
-  // deadline only re-renders the observation sentence for its own validity window.
-  useEffect(() => {
-    const now = Date.now();
-    const next = nextDisplayDeadline(snapshot, now);
-    if (next === null) return;
-    const timeout = window.setTimeout(() => setObservationTime(Date.now()), next - now + 1);
-    return () => window.clearTimeout(timeout);
-  }, [snapshot, observationTime]);
-
-  const now = Math.max(observationTime, Date.now());
+  // Candidate reliability is time bound: the display clock is armed by the caller
+  // from the backend's own deadlines, and the panel re-labels from `now`.
   const candidates = filterCandidates(snapshot?.candidates ?? [], search);
   const grouped = groupCandidates(candidates);
   const observation = snapshot?.workspaceObservation;

@@ -28,6 +28,7 @@ import { useNotices } from './app/notices.ts';
 import { useNavigation } from './app/useNavigation.ts';
 import { panelNames } from './app/navigation.ts';
 import type { Panel } from './app/navigation.ts';
+import { nextDisplayDeadline } from './app/candidates.ts';
 import { recoveryOffer, recoveryText } from './app/recovery.ts';
 import type { RecoveryIntent } from './app/recovery.ts';
 import { useDesktopSession } from './app/useDesktopSession.ts';
@@ -69,6 +70,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('interact');
   const [runtimeKind, setRuntimeKind] = useState<'native' | 'emulator' | 'physicalDevice'>('native');
   const [inspectorProblem, setInspectorProblem] = useState<string | null>(null);
+  const [displayClock, setDisplayClock] = useState(Date.now);
   const inspectorActions = useRef<InspectorActions | null>(null);
   const displayRequestId = useRef(0);
   const inputPending = useRef(false);
@@ -101,6 +103,21 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const previewVisible = session.previewVisible && runtimeKind === 'native';
 
   useEffect(() => { applyTheme(theme); }, [theme]);
+
+  // Display semantics are time bound, and the backend reports when they may move.
+  // Re-reading `snapshot` at that deadline converges the view without recomputing a
+  // category here; the reply is revision gated, so a late answer cannot regress it.
+  useEffect(() => {
+    if (!connected || !state) return;
+    const now = Date.now();
+    const next = nextDisplayDeadline(state, now);
+    if (next === null) return;
+    const timeout = window.setTimeout(() => {
+      setDisplayClock(Date.now());
+      void bridge.request('snapshot', {}).then(receive).catch(() => undefined);
+    }, next - now + 1);
+    return () => window.clearTimeout(timeout);
+  }, [connected, bridge, receive, state]);
 
   // A committed snapshot is the only place that changes UI ownership. Native orb
   // choices are adopted once queued writes settled, a target lifecycle change
@@ -248,7 +265,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       {state?.layoutRequired && <aside className="layout-notice"><Icon name="monitor" size={18} /><div><p>右侧空间不足。并排布局会调整目标窗口。</p><label><input type="checkbox" checked={layoutConsent} onChange={(event) => setLayoutConsent(event.target.checked)} />同意调整目标窗口</label></div><button disabled={!layoutConsent || busy} onClick={() => { void act('arrange_side_by_side', { consent: true }); setLayoutConsent(false); }}>应用布局</button></aside>}
     </div>
     {panel && <Sheet key={panel} returnFocus={anchor.current} title={panelNames[panel]} kind={panel === 'diagnostics' ? 'diagnostics' : panel} close={() => navigate(null)}>
-      {panel === 'projects' && <ProjectsPanel snapshot={state} connected={connected} busy={busy} search={search} onSearch={setSearch}
+      {panel === 'projects' && <ProjectsPanel snapshot={state} connected={connected} busy={busy} now={Math.max(displayClock, Date.now())} search={search} onSearch={setSearch}
         directoryPath={directoryPath} onDirectoryPath={setDirectoryPath}
         inspectDirectory={() => void inspectPath()} chooseDirectory={() => void chooseDirectory()}
         rediscover={() => void act('rediscover', {})} select={(id) => void select(id)} />}
