@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AgentDelivery, AssistedOffer, RequestScope, SelectionContext } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError } from '../ipc/errors.ts';
 
 /** Copy or fill a confirmed composer. This UI never queues or submits an Agent message. */
 export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired, hasInstruction, save, busy }: {
@@ -34,7 +35,7 @@ export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired
     const requested = identity;
     active.current = true; setWorking(true); busy(true); setNotice('');
     try { await task(requested); }
-    catch (error) { if (stillCurrent(requested)) setNotice(String(error)); }
+    catch (error) { if (stillCurrent(requested)) setNotice(describeError(error)); }
     finally {
       active.current = false;
       if (alive.current) { setWorking(false); busy(false); }
@@ -57,7 +58,7 @@ export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired
         const result = await bridge.transfer!('agent_assisted_inspect', {}, { targetId, sessionId });
         if (stillCurrent(requested) && result.targetId === targetId) setOffer(result);
       } catch (error) {
-        if (stillCurrent(requested)) setNotice(`无法确认可填写的输入框：${String(error)}\n可复制修改要求后手动粘贴。`);
+        if (stillCurrent(requested)) setNotice(`无法确认可填写的输入框：${describeError(error)}\n可复制修改要求后手动粘贴。`);
       }
     });
   }

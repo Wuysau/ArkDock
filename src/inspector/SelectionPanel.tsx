@@ -3,6 +3,7 @@ import { AgentDeliveryPanel } from './AgentDeliveryPanel.tsx';
 import type { InspectorNode, SelectionContext } from '../ipc/model.ts';
 import { Icon } from '../Icon.tsx';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError } from '../ipc/errors.ts';
 import type { RequestScope } from '../ipc/model.ts';
 
 export function SelectionPanel({ selection, stale, candidates, scope, bridge, choose, close, updated }: {
@@ -58,7 +59,7 @@ export function SelectionPanel({ selection, stale, candidates, scope, bridge, ch
         await bridge.transfer('selection_export_image', { selectionId: selection.selectionId, crop: action === 'crop' }, scope);
         if (stillCurrent(requested)) setNotice(action === 'crop' ? '裁剪截图已导出。' : '真实原生截图已导出。');
       } else setNotice('选择上下文和修改意见已保存；MCP 读取仍需显式授权。');
-    } catch (error) { if (stillCurrent(requested)) setNotice(String(error)); }
+    } catch (error) { if (stillCurrent(requested)) setNotice(describeError(error)); }
     finally { active.current = false; if (alive.current) setWorking(false); }
   }
   const node = selection.selectedNode;
