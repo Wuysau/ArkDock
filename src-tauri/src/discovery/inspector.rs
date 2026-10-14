@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::ipc::model::{Candidate, Environment, Evidence, ProjectRef};
 
 use super::environment_name;
+use super::PENDING;
 
 const MAX_ASCENT: usize = 12;
 const MAX_CONFIG_BYTES: u64 = 1_048_576;
@@ -461,6 +462,8 @@ fn inspect_application(
                 valid: true,
                 auto_eligible: false,
                 reasons,
+                category: PENDING,
+                category_expires_at: 0,
             });
         }
     }
@@ -651,6 +654,8 @@ fn invalid_module(
         valid: false,
         auto_eligible: false,
         reasons: vec![reason.into()],
+        category: PENDING,
+        category_expires_at: 0,
     })
 }
 

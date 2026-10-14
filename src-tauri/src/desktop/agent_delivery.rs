@@ -296,7 +296,7 @@ pub(crate) async fn agent_pair_create(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     agent_kind: AgentKind,
-) -> Result<AgentPairing, String> {
+) -> Result<AgentPairing, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -330,7 +330,7 @@ pub(crate) async fn agent_pair_revoke(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<bool, String> {
+) -> Result<bool, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::PairRevoke).await?)
 }
 #[tauri::command]
@@ -339,7 +339,7 @@ pub(crate) async fn agent_registration_bind(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     registration_id: String,
-) -> Result<AgentSessionBinding, String> {
+) -> Result<AgentSessionBinding, IpcError> {
     decode_data(
         data_request(
             window,
@@ -355,7 +355,7 @@ pub(crate) async fn agent_assisted_inspect(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AssistedOffer, String> {
+) -> Result<AssistedOffer, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::AssistedInspect).await?)
 }
 #[tauri::command]
@@ -365,7 +365,7 @@ pub(crate) async fn agent_assisted_fill(
     scope: RequestScope,
     confirmation_id: String,
     selection_id: String,
-) -> Result<AgentDelivery, String> {
+) -> Result<AgentDelivery, IpcError> {
     decode_data(
         data_request(
             window,

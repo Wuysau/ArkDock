@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::ipc::model::{Candidate, Environment, Evidence, EvidenceSource, ProjectRef, TargetInfo};
 
 use super::registration::RegistrationRegistry;
-use super::{environment_name, fresh, inspect_directory, project_id, MAX_EVIDENCE_TTL_MS};
+use super::{environment_name, fresh, inspect_directory, project_id, MAX_EVIDENCE_TTL_MS, PENDING};
 
 const SOURCE_INCOMPLETE_REASON: &str =
     "Evidence source resolution incomplete; automatic association is blocked";
@@ -197,6 +197,13 @@ fn current_target(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
         })
 }
 
+/// Fresh evidence bound to the current target token and process lifetime, whether or not
+/// it proves the host's active workspace. Display classification uses this; automatic
+/// association additionally requires [`strong`] evidence.
+pub fn current_target_evidence(evidence: &Evidence, target: &TargetInfo, now: u64) -> bool {
+    current_target(evidence, target, now)
+}
+
 fn active_workspace_source(source: &EvidenceSource) -> bool {
     matches!(
         source,
@@ -285,6 +292,7 @@ fn unavailable_candidate(evidence: &Evidence, reason: String) -> Candidate {
         evidence: vec![evidence.clone()], valid: false, auto_eligible: false,
         reasons: vec![format!("Read-only project validation failed: {reason}"),
             format!("Path is retained in its {} environment; no cross-environment conversion was attempted", environment_name(&evidence.environment))],
+        category: PENDING, category_expires_at: 0,
     }
 }
 
@@ -387,6 +395,8 @@ mod tests {
             valid: true,
             auto_eligible: false,
             reasons: vec![],
+            category: PENDING,
+            category_expires_at: 0,
         }
     }
     #[test]

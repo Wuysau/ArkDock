@@ -1,5 +1,10 @@
 //! Bounded, read-only workspace discovery. Discovery never authorizes execution.
 
+/// Candidate display semantics are consumed by the desktop session coordinator. The
+/// module stays compiled and tested without the desktop feature so its evidence rules
+/// are covered by the base test run; `dead_code` is allowed only in that configuration.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod classification;
 mod inspector;
 pub mod registration;
 mod resolver;
@@ -8,14 +13,24 @@ pub(crate) mod windows_tabs;
 
 pub use inspector::{inspect_directory, path_environment, project_id};
 pub use resolver::{
-    automatic_candidate, current_active_evidence, resolution_complete, resolve,
-    resolve_with_sources, TitleResolver, WorkspaceResolver,
+    automatic_candidate, current_active_evidence, current_target_evidence, resolution_complete,
+    resolve, resolve_with_sources, TitleResolver, WorkspaceResolver,
 };
 
 use crate::ipc::model::{Environment, Evidence};
 
 /// Registration and active-scope evidence expires quickly; timestamps are Unix milliseconds.
 pub const MAX_EVIDENCE_TTL_MS: u64 = 120_000;
+
+/// A workspace observation is only trustworthy inside this window; the frontend and the
+/// backend both use this single bound.
+pub const WORKSPACE_OBSERVATION_TTL_MS: u64 = 15_000;
+
+/// Candidates are constructed by read-only inspection before display semantics exist.
+/// [`classification::apply`] always replaces this placeholder before a snapshot is
+/// published, so a partially built candidate can never reach the frontend with a
+/// guessed category.
+pub(crate) use classification::PENDING;
 
 pub(crate) fn environment_name(environment: &Environment) -> &'static str {
     match environment {
