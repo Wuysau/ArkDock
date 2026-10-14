@@ -26,6 +26,44 @@
 `scope` 为 `{ targetId, sessionId }`。不要缓存旧 scope 后操作新的目标或会话；
 后端会拒绝迟到请求。前端不接收 HWND，不启动 SDK，不访问 Shell 或进程插件。
 
+## 结构化错误契约
+
+除三个二进制帧命令外，所有命令失败时返回生成类型 `IpcError`：
+
+| 字段 | 意义 |
+| --- | --- |
+| `code` | 机器可识别的稳定错误码，取值来自 `protocol/model.json` 的 `ErrorCode` |
+| `category` | 错误所属领域：`validation`、`state`、`trust`、`environment`、`storage`、`discovery`、`toolchain`、`transport`、`selection`、`agent`、`internal` |
+| `message` | 与错误码绑定、可直接呈现的安全描述；不包含本地路径或窗口标题 |
+| `retryable` | 在当前条件下重试**同一个**请求是否安全；非幂等操作（Agent 发送、配对、信任确认、可能已开始的请求）恒为 `false` |
+| `recovery` | 稳定的恢复建议：`none`、`correctRequest`、`retryRequest`、`awaitCurrentOperation`、`refreshSnapshot`、`reselectTarget`、`reselectProject`、`confirmTrust`、`configureSdk`、`restartPreview`、`rediscover`、`readDiagnostics` |
+| `details` | 可选、已脱敏的补充诊断；未知错误不携带该字段 |
+
+前端必须按 `code` 分支，不要按 `message` 文本或字符串前缀判断。未被契约识别的
+内部错误会统一退化为 `INTERNAL`，且不携带原始文本；详细原因只出现在
+`arkdock:state` 的 `diagnostics` 运行日志中。`retryable` 为 `true` 时才可自动重试，
+且 `awaitCurrentOperation`、`refreshSnapshot` 等提示要求先重新读取状态。
+
+二进制帧命令保留 `PreviewProtocolError` 形状，但其 `code` 取自同一份错误码表，
+因此同一失败在两条路径上的含义一致。
+
+## 候选展示语义
+
+`Candidate` 的后端字段即权威语义，前端不再重新推导证据时效或目标身份：
+
+| 字段 | 意义 |
+| --- | --- |
+| `valid` | 该目录当前是否存在可预览的鸿蒙应用模块 |
+| `autoEligible` | 后端已唯一验证、可自动关联；与执行信任无关 |
+| `category` | 展示分类：`current`（当前工作区已核验）、`suggested`（需要确认）、`manual`（指定目录的只读验证结果）、`history`（历史关联，不代表当前工作区） |
+| `categoryExpiresAt` | 该分类可能变化的时间（Unix 毫秒）；`0` 表示当前没有计划变化 |
+
+只有「与当前目标令牌和进程生命周期一致、且生命周期核验过的活动作用域证据」才能
+进入 `current`；人工指定与历史关联永远不能进入 `current`。分类、有效性与执行信任
+互相独立：历史或人工候选不会因此获得自动关联或构建权限。证据过期、工程切换、
+PID 复用和会话变化都会由后端重新判定；`categoryExpiresAt` 到达后前端重新读取
+`snapshot` 即可，不要在 React 侧复算分类。
+
 ## 二进制帧与兼容入口
 
 Rust `PreviewBackend::binary_frame()` 取出最新一帧 `BinaryFrame`；JPEG 原始压缩
@@ -58,7 +96,8 @@ await request('disable_binary_preview_frames', { protocolVersion: 1, consumerId 
 停止、解除、换工程、撤销信任和 main WebView 重新加载
 会释放缓存并恢复兼容模式。新会话需要重新协商；旧 scope 不能关闭新会话的传输。
 二进制命令失败返回生成类型 `PreviewProtocolError`：`code`、`message`、
-`expectedProtocolVersion`、`receivedProtocolVersion`。收到
+`expectedProtocolVersion`、`receivedProtocolVersion`。`code` 与 `IpcError.code`
+取自同一份 `ErrorCode` 词表，`message` 同样是与错误码绑定的安全描述。收到
 `PROTOCOL_VERSION_UNSUPPORTED` 时停止读取并显示版本不兼容，不自动猜测格式。
 
 封包布局：4 字节小端元数据长度、UTF-8 JSON 元数据、原始 JPEG 载荷。

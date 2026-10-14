@@ -3,7 +3,7 @@
 use crate::discovery::resolve;
 use crate::discovery::{
     automatic_candidate, current_active_evidence, inspect_directory, path_environment,
-    resolution_complete,
+    resolution_complete, WORKSPACE_OBSERVATION_TTL_MS,
 };
 #[cfg(windows)]
 use crate::discovery::{
@@ -21,9 +21,15 @@ use crate::windowing::{WindowController, WindowUpdate};
 use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
 mod agent_delivery;
+mod association;
+mod diagnostics;
+mod frame_delivery;
 mod inspection;
 mod native_controls;
+mod session;
 mod visibility;
+use association::{workspace_observation, AssociationDecision};
+use frame_delivery::FrameDelivery;
 use inspection::{DataAction, DataResult, PendingInspection};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -92,96 +98,6 @@ struct Service {
     frames: Arc<Mutex<FrameDelivery>>,
 }
 
-#[derive(Default)]
-struct FrameDelivery {
-    binary_enabled: bool,
-    binary_session: Option<String>,
-    consumer_id: Option<String>,
-    latest: Option<BinaryFrame>,
-    retained: VecDeque<BinaryFrame>,
-}
-impl FrameDelivery {
-    fn enable(
-        &mut self,
-        protocol_version: u32,
-        session_id: &str,
-        consumer_id: &str,
-    ) -> Result<(), String> {
-        if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
-            return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
-        }
-        if session_id.is_empty() || session_id.len() > 256 {
-            return Err("PREVIEW_SESSION_REQUIRED".into());
-        }
-        if consumer_id.is_empty() || consumer_id.len() > 128 {
-            return Err("INVALID_FRAME_CONSUMER".into());
-        }
-        self.binary_enabled = true;
-        self.binary_session = Some(session_id.to_owned());
-        self.consumer_id = Some(consumer_id.to_owned());
-        Ok(())
-    }
-    fn push(&mut self, frame: BinaryFrame) {
-        if self.retained.len() >= 8 {
-            self.retained.pop_front();
-        }
-        while !self.retained.is_empty()
-            && self.retained.iter().map(|f| f.payload.len()).sum::<usize>() + frame.payload.len()
-                > 4 * 1024 * 1024
-        {
-            self.retained.pop_front();
-        }
-        self.retained.push_back(frame.clone());
-        self.latest = Some(frame);
-    }
-    fn clear(&mut self) {
-        self.latest = None;
-        self.binary_enabled = false;
-        self.binary_session = None;
-        self.consumer_id = None;
-        self.retained.clear();
-    }
-    fn disable(&mut self, consumer_id: &str) -> Result<(), String> {
-        if self.consumer_id.as_deref() != Some(consumer_id) {
-            return Err("STALE_FRAME_CONSUMER".into());
-        }
-        self.binary_enabled = false;
-        self.binary_session = None;
-        self.consumer_id = None;
-        // Keep the most recent real frame for explicitly chosen screenshot contexts.
-        Ok(())
-    }
-    fn take_current(&mut self, state: &AppSnapshot, consumer_id: &str) -> Result<Vec<u8>, String> {
-        if !self.binary_enabled {
-            return Err("BINARY_TRANSPORT_NOT_ENABLED".into());
-        }
-        if self.consumer_id.as_deref() != Some(consumer_id) {
-            return Err("STALE_FRAME_CONSUMER".into());
-        }
-        if self.binary_session.as_deref() != state.session_id.as_deref() {
-            self.clear();
-            return Err("STALE_SESSION".into());
-        }
-        let Some(frame) = self.latest.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let metadata = &frame.metadata;
-        if !state.trusted
-            || state.phase != Phase::Running
-            || state.build.stale
-            || state.session_id.as_deref() != Some(&metadata.session_id)
-            || state.project.as_ref().map(|project| project.id.as_str())
-                != Some(metadata.workspace_id.as_str())
-            || state.build.build_id.as_deref() != Some(&metadata.build_id)
-            || state.build.generation != metadata.generation
-            || state.build.displayed_generation != Some(metadata.generation)
-        {
-            self.latest = None;
-            return Err("STALE_FRAME".into());
-        }
-        self.latest.take().ok_or("FRAME_UNAVAILABLE")?.packet()
-    }
-}
 impl Service {
     fn snapshot(&self) -> Result<AppSnapshot, String> {
         self.state
@@ -235,6 +151,9 @@ struct Engine {
     own_handle: isize,
     associated_manually: bool,
     next_workspace_probe: Instant,
+    /// Wall-clock instant at which candidate display semantics may change; `0` means
+    /// nothing is scheduled. Set from the published snapshot, never from the frontend.
+    next_candidate_recheck_at: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -244,7 +163,9 @@ enum DiscoveryMode {
 }
 
 const WORKSPACE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
-const WORKSPACE_OBSERVATION_TTL_MS: u64 = 15_000;
+/// When a candidate deadline has already passed without changing the displayed
+/// category, recheck on this bounded interval instead of every actor tick.
+const CANDIDATE_RECHECK_INTERVAL_MS: u64 = 1_000;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -301,122 +222,6 @@ fn frame_changes_state(snapshot: &AppSnapshot, build: &BuildStatus) -> bool {
     snapshot.phase != Phase::Running || snapshot.build != *build
 }
 
-/// Close execution at the gate itself: tick must never inherit an untrusted live Job.
-struct ExecutionGate {
-    phase: Phase,
-    trusted: bool,
-}
-
-fn execution_gate(
-    trusted: bool,
-    available: bool,
-    reason: &str,
-    suspend: impl FnOnce(),
-) -> ExecutionGate {
-    let phase = if !trusted {
-        suspend();
-        Phase::Untrusted
-    } else if !available {
-        suspend();
-        if reason.starts_with("SDK_MISSING") {
-            Phase::SdkMissing
-        } else {
-            Phase::ProtocolBlocked
-        }
-    } else {
-        Phase::Building
-    };
-    // Resource teardown does not change the independently verified project permission.
-    ExecutionGate { phase, trusted }
-}
-
-fn normalized_workspace_path(path: &str) -> String {
-    let value = path.replace('/', "\\");
-    let value = value
-        .strip_prefix("\\\\?\\UNC\\")
-        .map(|unc| format!("\\\\{unc}"))
-        .or_else(|| value.strip_prefix("\\\\?\\").map(str::to_owned))
-        .unwrap_or(value);
-    value.trim_end_matches('\\').to_ascii_lowercase()
-}
-
-fn workspace_path_matches(project: &ProjectRef, raw_path: &str) -> bool {
-    if path_environment(Path::new(raw_path)) != project.environment {
-        return false;
-    }
-    // Canonicalization is read-only and only applies to already identified Windows paths.
-    // WSL and remote identities are never opened as, or converted to, local filesystem paths.
-    let resolved = if project.environment == Environment::WindowsLocal {
-        Path::new(raw_path)
-            .canonicalize()
-            .ok()
-            .and_then(|path| path.to_str().map(str::to_owned))
-            .unwrap_or_else(|| raw_path.to_owned())
-    } else {
-        raw_path.to_owned()
-    };
-    let active = normalized_workspace_path(&resolved);
-    let app = normalized_workspace_path(&project.app_root);
-    let workspace = normalized_workspace_path(&project.workspace_root);
-    active == workspace || active == app || active.starts_with(&format!("{app}\\"))
-}
-
-fn workspace_observation(
-    candidates: &[Candidate],
-    target: &TargetInfo,
-    observed: u64,
-    host_observation: Option<WorkspaceObservation>,
-) -> WorkspaceObservation {
-    if !resolution_complete(candidates) {
-        return WorkspaceObservation {
-            status: WorkspaceStatus::Suggested,
-            project_name: host_observation.and_then(|observation| observation.project_name),
-            active_path: None,
-            reason: "Workspace evidence collection is incomplete; the current workspace cannot be reliably resolved".into(),
-            observed_at: observed,
-        };
-    }
-    let mut active_paths = Vec::new();
-    for evidence in candidates.iter().flat_map(|candidate| &candidate.evidence) {
-        if current_active_evidence(evidence, target, observed)
-            && !active_paths.iter().any(|path: &String| {
-                normalized_workspace_path(path) == normalized_workspace_path(&evidence.raw_path)
-            })
-        {
-            active_paths.push(evidence.raw_path.clone());
-        }
-    }
-    if active_paths.len() > 1 {
-        return WorkspaceObservation {
-            status: WorkspaceStatus::Suggested,
-            project_name: host_observation.and_then(|observation| observation.project_name),
-            active_path: None,
-            reason: "Current workspace sources disagree; automatic association is suspended".into(),
-            observed_at: observed,
-        };
-    }
-    if let Some(path) = active_paths.pop() {
-        return WorkspaceObservation {
-            status: WorkspaceStatus::Verified,
-            project_name: host_observation
-                .as_ref()
-                .and_then(|observation| observation.project_name.clone()),
-            active_path: Some(path),
-            reason:
-                "Current workspace path is supported by lifecycle-verified active-scope evidence"
-                    .into(),
-            observed_at: observed,
-        };
-    }
-    host_observation.unwrap_or(WorkspaceObservation {
-        status: WorkspaceStatus::Unknown,
-        project_name: None,
-        active_path: None,
-        reason: "The current active workspace has not been reliably identified; history is only a suggestion".into(),
-        observed_at: observed,
-    })
-}
-
 fn absolute_directory_input(value: &str) -> Result<PathBuf, String> {
     if value.len() > 4096 {
         return Err("INVALID_DIRECTORY_PATH: enter a bounded absolute directory path".into());
@@ -471,6 +276,9 @@ impl Engine {
         self.sync_control_lifecycle();
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
+        // Candidate categories are backend truth: they are recomputed for the snapshot
+        // that is emitted, never derived again by the frontend.
+        self.grade_candidates();
         if let Some(selections) = &self.selections {
             let _ = selections.sync_runtime(&self.snapshot, now());
         }
@@ -479,47 +287,50 @@ impl Engine {
         }
         let _ = self.app.emit("arkdock:state", &self.snapshot);
     }
-    fn diagnostic(&mut self, code: &str, message: String, status: CheckStatus) {
-        if self.snapshot.diagnostics.len() >= 128 {
-            self.snapshot.diagnostics.remove(0);
+    /// Recomputes candidate display semantics and records when they may move.
+    /// Returns whether any candidate's visible category changed.
+    fn grade_candidates(&mut self) -> bool {
+        let Some(target) = self.snapshot.target.clone() else {
+            self.next_candidate_recheck_at = 0;
+            return false;
+        };
+        let observed = now();
+        let observation = self.snapshot.workspace_observation.clone();
+        let applied = crate::discovery::classification::apply(
+            &mut self.snapshot.candidates,
+            &target,
+            observation.as_ref(),
+            observed,
+        );
+        self.next_candidate_recheck_at = if applied.next_recheck_at == 0 {
+            0
+        } else if applied.next_recheck_at > observed {
+            applied.next_recheck_at
+        } else {
+            observed.saturating_add(CANDIDATE_RECHECK_INTERVAL_MS)
+        };
+        applied.changed
+    }
+    /// Expired evidence must stop presenting a "current workspace" candidate even when
+    /// no window event or file change arrives to publish another snapshot.
+    fn refresh_candidate_semantics(&mut self) {
+        if self.next_candidate_recheck_at == 0 || now() < self.next_candidate_recheck_at {
+            return;
         }
-        self.snapshot.diagnostics.push(Diagnostic {
-            code: code.into(),
-            message,
-            status,
-            observed_at: now(),
+        if self.grade_candidates() {
+            self.publish();
+        }
+    }
+    fn diagnostic(&mut self, code: &str, message: String, status: CheckStatus) {
+        // The scope is captured before the mutable borrow so a diagnostic is attributed
+        // to the project/session that produced it, never to one being replaced.
+        let scope = diagnostics::DiagnosticScope {
             workspace_id: self.snapshot.project.as_ref().map(|p| p.id.clone()),
             session_id: self.snapshot.session_id.clone(),
             build_id: self.scheduler.status().build_id,
             backend_id: Some(self.snapshot.backend.id.clone()),
-        });
-    }
-    fn suspend_execution(&mut self) {
-        // Automatic workspace changes also invalidate user-confirmed assisted offers.
-        self.cancel_assisted();
-        self.backend.cancel_controls();
-        self.controls.reset();
-        self.device_runtime.cancel();
-        self.inspection_tree = None;
-        self.inspection_anchor = None;
-        if let Some(pending) = self.inspection.take() {
-            let _ = pending.reply.send(Err("STALE_INSPECTOR_SESSION".into()));
-        }
-        if let Ok(mut frames) = self.frames.lock() {
-            frames.clear();
-        }
-        self.watcher.take();
-        self.backend.stop();
-        self.scheduler.stop();
-        self.watch_pending = Arc::new(Mutex::new(PendingWatch::default()));
-        self.snapshot.session_id = None;
-        self.snapshot.session_ref = None;
-        self.snapshot.trusted = false;
-    }
-    fn close_session(&mut self) {
-        self.suspend_execution();
-        self.snapshot.project = None;
-        self.associated_manually = false;
+        };
+        diagnostics::record(&mut self.snapshot.diagnostics, scope, code, message, status);
     }
     fn apply_window(&mut self, update: WindowUpdate) {
         // Display surfaces are independent of project execution and preview delivery.
@@ -629,51 +440,14 @@ impl Engine {
         let current_observation =
             workspace_observation(&candidates, &target, observed, observation.clone());
         if matches!(mode, DiscoveryMode::Lightweight) {
-            for candidate in &self.snapshot.candidates {
-                if candidate.evidence.iter().any(|evidence| {
-                    evidence.source == EvidenceSource::Manual
-                        && evidence.target_id.as_deref() == Some(target.id.as_str())
-                        && evidence.process.as_ref() == Some(&target.process)
-                }) && !(current_observation.status == WorkspaceStatus::Verified
-                    && current_observation
-                        .active_path
-                        .as_ref()
-                        .is_some_and(|path| !workspace_path_matches(&candidate.project, path)))
-                {
-                    if let Some(current) =
-                        candidates.iter_mut().find(|item| item.id == candidate.id)
-                    {
-                        current.evidence.extend(
-                            candidate
-                                .evidence
-                                .iter()
-                                .filter(|evidence| evidence.source == EvidenceSource::Manual)
-                                .cloned(),
-                        );
-                    } else {
-                        let mut manual = candidate.clone();
-                        manual
-                            .evidence
-                            .retain(|evidence| evidence.source == EvidenceSource::Manual);
-                        manual.auto_eligible = false;
-                        candidates.push(manual);
-                    }
-                }
-            }
-        }
-        // Polls retain historical suggestions without repeatedly inspecting every old project.
-        if matches!(mode, DiscoveryMode::Lightweight) {
-            for candidate in &self.snapshot.candidates {
-                if !candidate.evidence.is_empty()
-                    && candidate
-                        .evidence
-                        .iter()
-                        .all(|evidence| evidence.source == EvidenceSource::History)
-                    && !candidates.iter().any(|current| current.id == candidate.id)
-                {
-                    candidates.push(candidate.clone());
-                }
-            }
+            // A poll carries the user's manual choice and historical suggestions forward
+            // without re-inspecting every old root; neither becomes automatically eligible.
+            association::carry_forward_previous_candidates(
+                &self.snapshot.candidates,
+                &mut candidates,
+                &target,
+                &current_observation,
+            );
         }
         // History is separate from current-window evidence, including when its path matches.
         if let Some(store) = self
@@ -755,102 +529,82 @@ impl Engine {
         }
         Ok(())
     }
+    /// Applies the association policy to the current candidate set.
+    ///
+    /// The decision itself lives in `association::decide`; this method only performs the
+    /// side effects it names, in order, so a release always closes the old session before
+    /// a replacement can be associated.
     fn reconcile_workspace(&mut self, target: &TargetInfo, observed: u64) -> Result<(), String> {
-        let automatic = automatic_candidate(&self.snapshot.candidates, target, observed);
-        if let Some(project) = self.snapshot.project.as_ref() {
-            let different_project = automatic.as_ref().is_some_and(|id| {
-                self.snapshot
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.id == *id && candidate.project.id != project.id)
-            });
-            let conflicting = different_project
-                || self.snapshot.candidates.iter().any(|candidate| {
-                    candidate.evidence.iter().any(|evidence| {
-                        current_active_evidence(evidence, target, observed)
-                            && !workspace_path_matches(project, &evidence.raw_path)
-                    })
-                })
-                || self
-                    .snapshot
-                    .workspace_observation
-                    .as_ref()
-                    .is_some_and(|observation| {
-                        observation.status == WorkspaceStatus::Verified
-                            && observation
-                                .active_path
-                                .as_ref()
-                                .is_some_and(|path| !workspace_path_matches(project, path))
-                    });
-            let unchanged = automatic.as_ref().is_some_and(|id| {
-                self.snapshot
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.id == *id && candidate.project.id == project.id)
-            });
-            if conflicting || (!self.associated_manually && !unchanged) {
+        let decision = association::decide(
+            &self.snapshot.candidates,
+            target,
+            self.snapshot.workspace_observation.as_ref(),
+            self.snapshot.project.as_ref(),
+            self.associated_manually,
+            observed,
+        );
+        let rebind = match decision {
+            AssociationDecision::Hold => {
+                self.refresh_binding_evidence();
+                // Fresh metadata for the same workspace must not restart a preview or lift Stop.
+                return Ok(());
+            }
+            AssociationDecision::AwaitSelection => {
+                self.snapshot.phase = Phase::SelectProject;
+                return Ok(());
+            }
+            AssociationDecision::Associate { project_id } => Some(project_id),
+            AssociationDecision::Release { reason, rebind } => {
                 // Stop watcher/build/runtime before the old workspace can emit another frame.
                 self.close_session();
                 self.snapshot.phase = Phase::SelectProject;
                 self.diagnostic(
-                    "WORKSPACE_EVIDENCE_CHANGED",
+                    reason,
                     "Current workspace evidence changed or is no longer reliable; the previous association was suspended".into(),
                     CheckStatus::Blocked,
                 );
-            } else {
-                if let Some(session) = &mut self.snapshot.session_ref {
-                    let mut evidence: Vec<_> = self
-                        .snapshot
-                        .candidates
-                        .iter()
-                        .filter(|candidate| candidate.project.id == project.id)
-                        .flat_map(|candidate| candidate.evidence.iter().cloned())
-                        .collect();
-                    if self.associated_manually {
-                        for manual in session
-                            .binding_evidence
-                            .iter()
-                            .filter(|evidence| evidence.source == EvidenceSource::Manual)
-                        {
-                            if !evidence.contains(manual) {
-                                evidence.push(manual.clone());
-                            }
-                        }
-                    }
-                    session.binding_evidence = evidence;
-                }
-                // Fresh metadata for the same workspace must not restart a preview or lift Stop.
-                return Ok(());
+                rebind
             }
+        };
+        let Some(id) = rebind else {
+            return Ok(());
+        };
+        let project = self
+            .snapshot
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .ok_or("CANDIDATE_DISAPPEARED")?
+            .project
+            .clone();
+        self.associate(project, false)
+    }
+    /// Rebinds only the evidence of an association that is still supported by current
+    /// host evidence.
+    fn refresh_binding_evidence(&mut self) {
+        let Some(project_id) = self.snapshot.project.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+        let Some(previous) = self
+            .snapshot
+            .session_ref
+            .as_ref()
+            .map(|session| session.binding_evidence.clone())
+        else {
+            return;
+        };
+        let refreshed = association::refreshed_binding_evidence(
+            &self.snapshot.candidates,
+            &project_id,
+            &previous,
+            self.associated_manually,
+        );
+        if let Some(session) = &mut self.snapshot.session_ref {
+            session.binding_evidence = refreshed;
         }
-        if let Some(id) = automatic {
-            let project = self
-                .snapshot
-                .candidates
-                .iter()
-                .find(|c| c.id == id)
-                .ok_or("CANDIDATE_DISAPPEARED")?
-                .project
-                .clone();
-            self.associate(project, false)?;
-        } else {
-            self.snapshot.phase = Phase::SelectProject;
-        }
-        Ok(())
     }
     fn discovery_failed(&mut self, error: &str) {
-        for candidate in &mut self.snapshot.candidates {
-            candidate.auto_eligible = false;
-            for evidence in &mut candidate.evidence {
-                if !matches!(
-                    evidence.source,
-                    EvidenceSource::History | EvidenceSource::Manual
-                ) {
-                    evidence.verifiable = false;
-                    evidence.active_scope = false;
-                }
-            }
-        }
+        association::revoke_unverified_evidence(&mut self.snapshot.candidates);
         self.snapshot.workspace_observation = Some(WorkspaceObservation {
             status: WorkspaceStatus::Unknown,
             project_name: None,
@@ -896,20 +650,11 @@ impl Engine {
         }
         let observed = now();
         if explicitly_selected
-            && self
-                .snapshot
-                .workspace_observation
-                .as_ref()
-                .is_some_and(|observation| {
-                    observation.status == WorkspaceStatus::Verified
-                        && observation.observed_at <= observed
-                        && observed.saturating_sub(observation.observed_at)
-                            < WORKSPACE_OBSERVATION_TTL_MS
-                        && observation
-                            .active_path
-                            .as_ref()
-                            .is_some_and(|path| !workspace_path_matches(&project, path))
-                })
+            && association::conflicts_with_active_workspace(
+                &project,
+                self.snapshot.workspace_observation.as_ref(),
+                observed,
+            )
         {
             return Err("WORKSPACE_CONFLICT: the host's current project differs from this directory; rediscover its current workspace".into());
         }
@@ -938,35 +683,26 @@ impl Engine {
             return Err("PROJECT_CHANGED_OR_INVALID".into());
         }
         self.current_target()?;
-        let mut binding_evidence = self
-            .snapshot
-            .candidates
-            .iter()
-            .find(|c| c.project.id == project.id)
-            .map(|c| c.evidence.clone())
-            .unwrap_or_default();
-        if explicitly_selected {
-            binding_evidence.push(evidence);
-        } else if self.associated_manually {
-            if let Some(session) = &self.snapshot.session_ref {
-                for manual in session
-                    .binding_evidence
-                    .iter()
-                    .filter(|evidence| evidence.source == EvidenceSource::Manual)
-                {
-                    if !binding_evidence.contains(manual) {
-                        binding_evidence.push(manual.clone());
-                    }
-                }
-            }
-        }
-        let manual = explicitly_selected
-            || (self.associated_manually
-                && self
-                    .snapshot
-                    .project
-                    .as_ref()
-                    .is_some_and(|current| current.id == project.id));
+        let binding_evidence = association::binding_evidence(
+            &self.snapshot.candidates,
+            &project.id,
+            self.snapshot
+                .session_ref
+                .as_ref()
+                .map(|session| session.binding_evidence.as_slice())
+                .unwrap_or_default(),
+            explicitly_selected.then(|| evidence.clone()),
+            self.associated_manually,
+        );
+        let manual = association::is_manual_association(
+            explicitly_selected,
+            self.associated_manually,
+            self.snapshot
+                .project
+                .as_ref()
+                .map(|current| current.id.as_str()),
+            &project.id,
+        );
         self.close_session();
         self.associated_manually = manual;
         self.serial += 1;
@@ -1087,24 +823,6 @@ impl Engine {
             self.snapshot.phase = Phase::SelectProject;
         }
         Ok(())
-    }
-    fn gate_preview(&mut self) {
-        let Some(project) = self.snapshot.project.as_ref() else {
-            return;
-        };
-        self.snapshot.trusted = self
-            .store
-            .as_ref()
-            .is_some_and(|store| store.is_trusted(project));
-        let reason = self.snapshot.backend.reason.clone();
-        let decision = execution_gate(
-            self.snapshot.trusted,
-            self.snapshot.backend.available,
-            &reason,
-            || self.suspend_execution(),
-        );
-        self.snapshot.phase = decision.phase;
-        self.snapshot.trusted = decision.trusted;
     }
     fn handle(&mut self, scope: RequestScope, action: Action) -> Result<AppSnapshot, String> {
         validate_scope(&self.snapshot, &scope)?;
@@ -1227,21 +945,7 @@ impl Engine {
                 }
                 self.scheduler.request_refresh(now());
             }
-            Action::Stop => {
-                self.backend.cancel_controls();
-                self.controls.reset();
-                self.device_runtime.cancel();
-                if let Ok(mut frames) = self.frames.lock() {
-                    frames.clear();
-                }
-                self.watcher.take();
-                self.watch_pending = Arc::new(Mutex::new(PendingWatch::default()));
-                self.backend.stop();
-                self.scheduler.stop();
-                self.snapshot.session_id = None;
-                self.snapshot.session_ref = None;
-                self.snapshot.phase = Phase::Stopped;
-            }
+            Action::Stop => self.stop_execution(),
             Action::BinaryFrames(version, consumer_id) => {
                 if !self.snapshot.trusted {
                     return Err("TRUST_REQUIRED".into());
@@ -1345,18 +1049,26 @@ impl Engine {
     }
     fn tick(&mut self) {
         self.probe_workspace();
+        self.refresh_candidate_semantics();
         if !self.associated_manually && self.snapshot.project.is_some() {
-            let active =
-                self.snapshot.target.as_ref().and_then(|target| {
-                    automatic_candidate(&self.snapshot.candidates, target, now())
-                });
-            let current = self.snapshot.project.as_ref().is_some_and(|project| {
-                self.snapshot.candidates.iter().any(|candidate| {
-                    active.as_deref() == Some(candidate.id.as_str())
-                        && candidate.project.id == project.id
-                })
-            });
-            if !current {
+            // The claim must still be supported by a current automatic candidate; the
+            // freshness gate itself lives in the association policy.
+            let target = self.snapshot.target.clone();
+            let project_id = self
+                .snapshot
+                .project
+                .as_ref()
+                .map(|project| project.id.clone());
+            let expired = match (target, project_id) {
+                (Some(target), Some(project_id)) => !association::association_still_current(
+                    &self.snapshot.candidates,
+                    &target,
+                    &project_id,
+                    now(),
+                ),
+                _ => false,
+            };
+            if expired {
                 self.close_session();
                 self.snapshot.phase = Phase::SelectProject;
                 self.snapshot.workspace_observation = Some(WorkspaceObservation {
@@ -1458,11 +1170,7 @@ impl Engine {
                 let legacy = self
                     .frames
                     .lock()
-                    .map(|frames| {
-                        !frames.binary_enabled
-                            || frames.binary_session.as_deref()
-                                != Some(frame.metadata.session_id.as_str())
-                    })
+                    .map(|frames| frames.wants_legacy_delivery(&frame.metadata.session_id))
                     .unwrap_or(false);
                 if legacy {
                     #[cfg(windows)]
@@ -1514,35 +1222,36 @@ async fn request(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     action: Action,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let sender = service.sender.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<AppSnapshot, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Action(scope, action, send))
-            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
-        receive
+            .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
+        let result = receive
             .recv_timeout(Duration::from_secs(15))
-            .map_err(|_| "REQUEST_TIMEOUT".to_owned())?
+            .map_err(|_| IpcError::from("REQUEST_TIMEOUT"))?;
+        result.map_err(IpcError::from)
     })
     .await
-    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
+    .map_err(|_| "REQUEST_WORKER_FAILED")?
 }
 #[tauri::command]
 async fn snapshot(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
-    service.snapshot()
+    service.snapshot().map_err(IpcError::from)
 }
 #[tauri::command]
 async fn minimize_window(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let snapshot = service.snapshot()?;
     validate_scope(&snapshot, &scope)?;
@@ -1555,7 +1264,7 @@ async fn collapse_to_orb(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1570,7 +1279,7 @@ async fn expand_from_orb(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1585,7 +1294,7 @@ async fn hide_to_tray(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1600,7 +1309,7 @@ async fn show_from_tray(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     request_id: u64,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(
         window,
         service,
@@ -1615,7 +1324,7 @@ async fn set_orb_auto_hide(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     enabled: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::OrbAutoHide(enabled)).await
 }
 #[tauri::command]
@@ -1624,7 +1333,7 @@ async fn set_motion_preferences(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     preferences: MotionSettings,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Motion(preferences)).await
 }
 #[tauri::command]
@@ -1632,7 +1341,7 @@ async fn get_display_mode(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::DisplaySnapshot).await
 }
 #[tauri::command]
@@ -1640,27 +1349,28 @@ async fn get_motion_metrics(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<MotionMetrics, String> {
+) -> Result<MotionMetrics, IpcError> {
     check_window(&window)?;
     let sender = service.sender.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<MotionMetrics, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Metrics(scope, send))
-            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
-        receive
+            .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
+        let result = receive
             .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "REQUEST_TIMEOUT".to_owned())?
+            .map_err(|_| IpcError::from("REQUEST_TIMEOUT"))?;
+        result.map_err(IpcError::from)
     })
     .await
-    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
+    .map_err(|_| "REQUEST_WORKER_FAILED")?
 }
 #[tauri::command]
 async fn close_window(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     let snapshot = service.snapshot()?;
     validate_scope(&snapshot, &scope)?;
@@ -1673,7 +1383,7 @@ async fn begin_drag(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     let snapshot = request(window.clone(), service, scope, Action::BeginDrag).await?;
     window.start_dragging().map_err(|e| e.to_string())?;
     Ok(snapshot)
@@ -1683,7 +1393,7 @@ async fn maximize_pair(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::MaximizePair).await
 }
 #[tauri::command]
@@ -1691,7 +1401,7 @@ async fn restore_pair(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::RestorePair).await
 }
 #[tauri::command]
@@ -1699,7 +1409,7 @@ async fn rediscover(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Rediscover).await
 }
 #[tauri::command]
@@ -1708,7 +1418,7 @@ async fn select_candidate(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     candidate_id: String,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if candidate_id.len() > 256 {
         return Err("INVALID_CANDIDATE".into());
     }
@@ -1719,7 +1429,7 @@ async fn select_directory(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -1741,7 +1451,7 @@ async fn inspect_directory_path(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     path: String,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let directory = absolute_directory_input(&path)?;
@@ -1752,7 +1462,7 @@ async fn configure_sdk(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -1773,7 +1483,7 @@ async fn detach(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Detach).await
 }
 #[tauri::command]
@@ -1783,7 +1493,7 @@ async fn set_trust(
     scope: RequestScope,
     project_id: String,
     trusted: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if project_id.len() > 256 {
         return Err("INVALID_PROJECT".into());
     }
@@ -1794,7 +1504,7 @@ async fn refresh_preview(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Refresh).await
 }
 #[tauri::command]
@@ -1802,18 +1512,20 @@ async fn stop_preview(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Stop).await
 }
 
-fn protocol_error(message: String, received_protocol_version: u32) -> PreviewProtocolError {
+/// Binary frame commands share the same error vocabulary as every other command; the
+/// protocol shape additionally carries the expected and received frame protocol version.
+fn protocol_error(
+    error: impl Into<IpcError>,
+    received_protocol_version: u32,
+) -> PreviewProtocolError {
+    let error = error.into();
     PreviewProtocolError {
-        code: message
-            .split(':')
-            .next()
-            .unwrap_or("PREVIEW_ERROR")
-            .to_owned(),
-        message,
+        code: crate::ipc::error::wire_name(&error.code),
+        message: error.message,
         expected_protocol_version: BINARY_FRAME_PROTOCOL_VERSION,
         received_protocol_version,
     }
@@ -1863,7 +1575,7 @@ async fn read_preview_frame(
     protocol_version: u32,
     consumer_id: String,
 ) -> Result<tauri::ipc::Response, PreviewProtocolError> {
-    let result = (|| {
+    let result = (|| -> Result<Vec<u8>, IpcError> {
         check_window(&window)?;
         if protocol_version != BINARY_FRAME_PROTOCOL_VERSION {
             return Err("PROTOCOL_VERSION_UNSUPPORTED".into());
@@ -1876,6 +1588,7 @@ async fn read_preview_frame(
             .lock()
             .map_err(|_| "FRAME_UNAVAILABLE")?
             .take_current(&snapshot, &consumer_id)
+            .map_err(IpcError::from)
     })();
     result
         .map(tauri::ipc::Response::new)
@@ -1887,7 +1600,7 @@ async fn arrange_side_by_side(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     consent: bool,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     request(window, service, scope, Action::Arrange(consent)).await
 }
 
@@ -1900,7 +1613,7 @@ async fn click_preview(
     generation: u64,
     x: u32,
     y: u32,
-) -> Result<AppSnapshot, String> {
+) -> Result<AppSnapshot, IpcError> {
     if build_id.len() > 256
         || x >= crate::preview::frames::MAX_SURFACE_DIMENSION
         || y >= crate::preview::frames::MAX_SURFACE_DIMENSION
@@ -1966,11 +1679,11 @@ pub fn run() {
             inspection::selection_prompt,
             inspection::selection_read_image,
             inspection::selection_export_image,
-            inspection::agent_session_list,
-            inspection::agent_session_bind,
-            inspection::agent_delivery_prepare,
-            inspection::agent_delivery_send,
-            inspection::agent_delivery_status,
+            agent_delivery::agent_session_list,
+            agent_delivery::agent_session_bind,
+            agent_delivery::agent_delivery_prepare,
+            agent_delivery::agent_delivery_send,
+            agent_delivery::agent_delivery_status,
             agent_delivery::agent_pair_create,
             agent_delivery::agent_pair_revoke,
             agent_delivery::agent_registration_bind,
@@ -2056,6 +1769,7 @@ pub fn run() {
                     own_handle,
                     associated_manually: false,
                     next_workspace_probe: Instant::now() + WORKSPACE_PROBE_INTERVAL,
+                    next_candidate_recheck_at: 0,
                 };
                 match selection_result {
                     Ok(store) => engine.selections = Some(store),
@@ -2162,171 +1876,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transport_teardown_releases_pixels_and_restores_legacy_delivery() {
-        let mut delivery = FrameDelivery::default();
-        delivery.enable(1, "s", "consumer").unwrap();
-        delivery.clear();
-        assert!(!delivery.binary_enabled);
-    }
-    #[test]
-    fn obsolete_consumer_cannot_close_same_session_successor() {
-        let mut delivery = FrameDelivery::default();
-        delivery.enable(1, "session", "old").unwrap();
-        delivery.enable(1, "session", "new").unwrap();
-        assert_eq!(delivery.disable("old").unwrap_err(), "STALE_FRAME_CONSUMER");
-        assert!(delivery.binary_enabled);
-        assert_eq!(delivery.consumer_id.as_deref(), Some("new"));
-        delivery.disable("new").unwrap();
-        assert!(!delivery.binary_enabled);
-        assert!(delivery.enable(1, "session", "").is_err());
-    }
-
-    #[test]
-    fn binary_delivery_is_bounded_versioned_and_rejects_a_replaced_session() {
-        use crate::preview::frames::BinaryFrame;
-        let mut state = initial(crate::preview::probe(None));
-        state.session_id = Some("s".into());
-        state.trusted = true;
-        state.phase = Phase::Running;
-        state.build.build_id = Some("b".into());
-        state.build.generation = 1;
-        state.build.displayed_generation = Some(1);
-        state.project = Some(ProjectRef {
-            id: "w".into(),
-            name: "test".into(),
-            environment: Environment::WindowsLocal,
-            workspace_root: "test".into(),
-            app_root: "test".into(),
-            module: "entry".into(),
-            variant: "default".into(),
-            sdk_id: None,
-        });
-        let frame = |sequence| BinaryFrame {
-            metadata: BinaryFrameMetadata {
-                protocol_version: 1,
-                workspace_id: "w".into(),
-                session_id: "s".into(),
-                build_id: "b".into(),
-                generation: 1,
-                sequence,
-                width: 360,
-                height: 640,
-                captured_at: 1,
-                rotation: 0,
-                format: NativeFrameFormat::Jpeg,
-                payload_length: 4,
-            },
-            payload: vec![0xff, 0xd8, 0xff, 0xd9],
-        };
-        let mut delivery = FrameDelivery::default();
-        assert_eq!(
-            delivery.enable(2, "s", "consumer").unwrap_err(),
-            "PROTOCOL_VERSION_UNSUPPORTED"
-        );
-        assert_eq!(
-            delivery.enable(1, "", "consumer").unwrap_err(),
-            "PREVIEW_SESSION_REQUIRED"
-        );
-        delivery.enable(1, "s", "consumer").unwrap();
-        delivery.push(frame(1));
-        delivery.push(frame(2));
-        let packet = delivery.take_current(&state, "consumer").unwrap();
-        let length = u32::from_le_bytes(packet[..4].try_into().unwrap()) as usize;
-        let metadata: BinaryFrameMetadata = serde_json::from_slice(&packet[4..4 + length]).unwrap();
-        assert_eq!(metadata.sequence, 2);
-        assert_eq!(packet[4 + length..], [0xff, 0xd8, 0xff, 0xd9]);
-        assert!(delivery
-            .take_current(&state, "consumer")
-            .unwrap()
-            .is_empty());
-        for sequence in 3..=20 {
-            delivery.push(frame(sequence));
-        }
-        assert_eq!(delivery.retained.len(), 8);
-        assert_eq!(delivery.retained.front().unwrap().metadata.sequence, 13);
-        for sequence in 21..=28 {
-            let mut large = frame(sequence);
-            large.payload = vec![0; crate::preview::frames::MAX_JPEG_PAYLOAD_BYTES];
-            large.metadata.payload_length = large.payload.len() as u32;
-            delivery.push(large);
-        }
-        assert!(
-            delivery
-                .retained
-                .iter()
-                .map(|item| item.payload.len())
-                .sum::<usize>()
-                <= 4 * 1024 * 1024
-        );
-        assert!(delivery.retained.len() <= 8);
-        delivery.push(frame(3));
-        state.session_id = Some("new".into());
-        assert_eq!(
-            delivery.take_current(&state, "consumer").unwrap_err(),
-            "STALE_SESSION"
-        );
-        delivery.clear();
-        assert_eq!(
-            delivery.take_current(&state, "consumer").unwrap_err(),
-            "BINARY_TRANSPORT_NOT_ENABLED"
-        );
-    }
-
-    #[test]
-    fn fingerprint_change_closes_active_execution_before_entering_untrusted() {
-        let mut scheduler = BuildCoordinator::new(0);
-        scheduler.set_workspace("workspace", "session", 1);
-        scheduler.request_refresh(1);
-        let old = scheduler.next_task(1).unwrap();
-        let mut closed = false;
-        let phase = execution_gate(false, true, "verified", || {
-            scheduler.stop();
-            closed = true;
-        });
-        assert!(closed);
-        assert_eq!(phase.phase, Phase::Untrusted);
-        assert!(!phase.trusted);
-        assert!(!scheduler.is_building());
-        assert_eq!(
-            scheduler.complete(&old, BuildOutcome::Success, 2),
-            CompletionDisposition::RejectedStopped
-        );
-    }
-
-    #[test]
-    fn source_only_change_keeps_the_trusted_execution_open() {
-        let mut closed = false;
-        assert_eq!(
-            execution_gate(true, true, "verified", || closed = true).phase,
-            Phase::Building
-        );
-        assert!(!closed);
-    }
-
-    #[test]
-    fn sdk_block_does_not_revoke_valid_project_trust() {
-        for (reason, expected) in [
-            ("SDK_MISSING: not configured", Phase::SdkMissing),
-            ("PROTOCOL_UNVERIFIED", Phase::ProtocolBlocked),
-        ] {
-            let mut closed = false;
-            let decision = execution_gate(true, false, reason, || closed = true);
-            assert!(closed, "Blocked SDK must close execution resources");
-            assert_eq!(decision.phase, expected);
-            assert!(
-                decision.trusted,
-                "Toolchain state cannot revoke project trust"
-            );
-        }
-        let decision = execution_gate(false, false, "SDK_MISSING", || {});
-        assert_eq!(decision.phase, Phase::Untrusted);
-        assert!(
-            !decision.trusted,
-            "Revoked or changed-config trust stays revoked"
-        );
-    }
 
     #[test]
     fn only_first_frame_or_changed_build_publishes_a_snapshot() {

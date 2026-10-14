@@ -296,7 +296,7 @@ pub(crate) async fn agent_pair_create(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     agent_kind: AgentKind,
-) -> Result<AgentPairing, String> {
+) -> Result<AgentPairing, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let path = rfd::AsyncFileDialog::new()
@@ -330,7 +330,7 @@ pub(crate) async fn agent_pair_revoke(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<bool, String> {
+) -> Result<bool, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::PairRevoke).await?)
 }
 #[tauri::command]
@@ -339,7 +339,7 @@ pub(crate) async fn agent_registration_bind(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     registration_id: String,
-) -> Result<AgentSessionBinding, String> {
+) -> Result<AgentSessionBinding, IpcError> {
     decode_data(
         data_request(
             window,
@@ -355,7 +355,7 @@ pub(crate) async fn agent_assisted_inspect(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<AssistedOffer, String> {
+) -> Result<AssistedOffer, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::AssistedInspect).await?)
 }
 #[tauri::command]
@@ -365,13 +365,77 @@ pub(crate) async fn agent_assisted_fill(
     scope: RequestScope,
     confirmation_id: String,
     selection_id: String,
-) -> Result<AgentDelivery, String> {
+) -> Result<AgentDelivery, IpcError> {
     decode_data(
         data_request(
             window,
             service,
             scope,
             DataAction::AssistedFill(confirmation_id, selection_id),
+        )
+        .await?,
+    )
+}
+
+// Agent session binding and delivery commands live with the rest of the Agent use-case
+// boundary, so one module owns every Agent command surface.
+#[tauri::command]
+pub(crate) async fn agent_session_list(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+) -> Result<AgentSessionList, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::AgentList).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_session_bind(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    draft: AgentBindingDraft,
+) -> Result<AgentSessionBinding, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::AgentBind(draft)).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_prepare(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    selection_id: String,
+    binding_id: Option<String>,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(
+        data_request(
+            window,
+            service,
+            scope,
+            DataAction::DeliveryPrepare(selection_id, binding_id),
+        )
+        .await?,
+    )
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_send(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: String,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(data_request(window, service, scope, DataAction::DeliverySend(request_id)).await?)
+}
+#[tauri::command]
+pub(crate) async fn agent_delivery_status(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    request_id: String,
+) -> Result<AgentDelivery, IpcError> {
+    decode_data(
+        data_request(
+            window,
+            service,
+            scope,
+            DataAction::DeliveryStatus(request_id),
         )
         .await?,
     )

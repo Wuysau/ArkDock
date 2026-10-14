@@ -77,7 +77,7 @@ impl Engine {
         self.frames
             .lock()
             .map_err(|_| "FRAME_UNAVAILABLE")?
-            .retained
+            .retained()
             .iter()
             .find(|f| f.metadata == *frame)
             .cloned()
@@ -309,7 +309,7 @@ impl Engine {
                 .frames
                 .lock()
                 .map_err(|_| "FRAME_UNAVAILABLE")?
-                .retained
+                .retained()
                 .back()
                 .cloned()
                 .ok_or("FRAME_UNAVAILABLE")?;
@@ -331,7 +331,7 @@ pub(super) async fn data_request(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     action: DataAction,
-) -> Result<DataResult, String> {
+) -> Result<DataResult, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let sender = service.sender.clone();
@@ -349,39 +349,42 @@ pub(super) async fn data_request(
     }
     // Dropping the Tauri command future also cancels an enqueued save.
     let _cancel_on_drop = CancelOnDrop(permit.clone());
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<DataResult, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Data(scope, action, send))
-            .map_err(|_| "REQUEST_QUEUE_BUSY".to_owned())?;
+            .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
         let wait = permit
             .as_ref()
             .map(|permit| permit.remaining())
             .unwrap_or(Duration::from_secs(5));
         match receive.recv_timeout(wait) {
-            Ok(result) => result,
+            Ok(result) => result.map_err(IpcError::from),
             Err(_) => {
                 if permit.is_some_and(|permit| !permit.cancel()) {
                     // The atomic commit won; only the already computed reply
                     // remains. Never report a timeout for a committed pairing.
                     receive
                         .recv()
-                        .map_err(|_| "DATA_REPLY_UNAVAILABLE".to_owned())?
+                        .map_err(|_| IpcError::from("DATA_REPLY_UNAVAILABLE"))?
+                        .map_err(IpcError::from)
                 } else {
-                    Err("DATA_REQUEST_TIMEOUT".into())
+                    Err(IpcError::from("DATA_REQUEST_TIMEOUT"))
                 }
             }
         }
     })
     .await
-    .map_err(|_| "REQUEST_WORKER_FAILED".to_owned())?
+    .map_err(|_| IpcError::from("REQUEST_WORKER_FAILED"))?
 }
-pub(super) fn decode_data<T: serde::de::DeserializeOwned>(result: DataResult) -> Result<T, String> {
+pub(super) fn decode_data<T: serde::de::DeserializeOwned>(
+    result: DataResult,
+) -> Result<T, IpcError> {
     match result {
         DataResult::Json(value) => {
-            serde_json::from_value(value).map_err(|_| "DATA_REPLY_INVALID".into())
+            serde_json::from_value(value).map_err(|_| IpcError::from("DATA_REPLY_INVALID"))
         }
-        DataResult::Bytes(_) => Err("DATA_REPLY_TYPE_MISMATCH".into()),
+        DataResult::Bytes(_) => Err(IpcError::from("DATA_REPLY_TYPE_MISMATCH")),
     }
 }
 #[tauri::command]
@@ -389,7 +392,7 @@ pub(crate) async fn inspector_get_capabilities(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
     scope: RequestScope,
-) -> Result<InspectorCapabilities, String> {
+) -> Result<InspectorCapabilities, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::InspectorCapabilities).await?)
 }
 #[tauri::command]
@@ -398,7 +401,7 @@ pub(crate) async fn inspector_get_tree(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     frame: BinaryFrameMetadata,
-) -> Result<InspectorTree, String> {
+) -> Result<InspectorTree, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::InspectorTree(frame)).await?)
 }
 #[tauri::command]
@@ -407,7 +410,7 @@ pub(crate) async fn selection_create(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     draft: SelectionDraft,
-) -> Result<SelectionContext, String> {
+) -> Result<SelectionContext, IpcError> {
     decode_data(data_request(window, service, scope, DataAction::SelectionCreate(draft)).await?)
 }
 #[tauri::command]
@@ -416,7 +419,7 @@ pub(crate) async fn selection_get(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     selection_id: String,
-) -> Result<SelectionContext, String> {
+) -> Result<SelectionContext, IpcError> {
     decode_data(
         data_request(
             window,
@@ -433,7 +436,7 @@ pub(crate) async fn selection_clear(
     service: tauri::State<'_, Service>,
     scope: RequestScope,
     selection_id: Option<String>,
-) -> Result<bool, String> {
+) -> Result<bool, IpcError> {
     decode_data(
         data_request(
             window,
@@ -451,7 +454,7 @@ pub(crate) async fn selection_update_instruction(
     scope: RequestScope,
     selection_id: String,
     user_instruction: String,
-) -> Result<SelectionContext, String> {
+) -> Result<SelectionContext, IpcError> {
     decode_data(
         data_request(
             window,
@@ -469,7 +472,7 @@ pub(crate) async fn selection_prompt(
     scope: RequestScope,
     selection_id: String,
     detailed: Option<bool>,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     decode_data(
         data_request(
             window,
@@ -487,7 +490,7 @@ pub(crate) async fn selection_read_image(
     scope: RequestScope,
     selection_id: String,
     crop: bool,
-) -> Result<tauri::ipc::Response, String> {
+) -> Result<tauri::ipc::Response, IpcError> {
     match data_request(
         window,
         service,
@@ -507,7 +510,7 @@ pub(crate) async fn selection_export_image(
     scope: RequestScope,
     selection_id: String,
     crop: bool,
-) -> Result<bool, String> {
+) -> Result<bool, IpcError> {
     check_window(&window)?;
     validate_scope(&service.snapshot()?, &scope)?;
     let name = if crop {
@@ -538,65 +541,4 @@ pub(crate) async fn selection_export_image(
     .await
     .map_err(|_| "EXPORT_WORKER_FAILED".to_owned())??;
     Ok(true)
-}
-#[tauri::command]
-pub(crate) async fn agent_session_list(
-    window: tauri::WebviewWindow,
-    service: tauri::State<'_, Service>,
-    scope: RequestScope,
-) -> Result<AgentSessionList, String> {
-    decode_data(data_request(window, service, scope, DataAction::AgentList).await?)
-}
-#[tauri::command]
-pub(crate) async fn agent_session_bind(
-    window: tauri::WebviewWindow,
-    service: tauri::State<'_, Service>,
-    scope: RequestScope,
-    draft: AgentBindingDraft,
-) -> Result<AgentSessionBinding, String> {
-    decode_data(data_request(window, service, scope, DataAction::AgentBind(draft)).await?)
-}
-#[tauri::command]
-pub(crate) async fn agent_delivery_prepare(
-    window: tauri::WebviewWindow,
-    service: tauri::State<'_, Service>,
-    scope: RequestScope,
-    selection_id: String,
-    binding_id: Option<String>,
-) -> Result<AgentDelivery, String> {
-    decode_data(
-        data_request(
-            window,
-            service,
-            scope,
-            DataAction::DeliveryPrepare(selection_id, binding_id),
-        )
-        .await?,
-    )
-}
-#[tauri::command]
-pub(crate) async fn agent_delivery_send(
-    window: tauri::WebviewWindow,
-    service: tauri::State<'_, Service>,
-    scope: RequestScope,
-    request_id: String,
-) -> Result<AgentDelivery, String> {
-    decode_data(data_request(window, service, scope, DataAction::DeliverySend(request_id)).await?)
-}
-#[tauri::command]
-pub(crate) async fn agent_delivery_status(
-    window: tauri::WebviewWindow,
-    service: tauri::State<'_, Service>,
-    scope: RequestScope,
-    request_id: String,
-) -> Result<AgentDelivery, String> {
-    decode_data(
-        data_request(
-            window,
-            service,
-            scope,
-            DataAction::DeliveryStatus(request_id),
-        )
-        .await?,
-    )
 }
