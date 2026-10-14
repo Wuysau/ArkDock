@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, DeviceRuntimeAction, DeviceRuntimeKind, DeviceRuntimeState } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError, normalizeError } from '../ipc/errors.ts';
+import type { AppError } from '../ipc/errors.ts';
 import { Icon } from '../Icon.tsx';
 
 /** Device runtime is separate from Previewer; this panel never reuses its Canvas or frames. */
@@ -8,7 +10,7 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
   const [state, setState] = useState<DeviceRuntimeState | null>(null);
   const [connectionConsent, setConnectionConsent] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
   const latest = useRef(snapshot); latest.current = snapshot;
   const liveRef = useRef(true);
   const serial = useRef(0);
@@ -26,7 +28,7 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
       const revision = serial.current;
       void bridge.transfer('device_runtime_state', {}, scope()).then((value) => {
         if (liveRef.current && revision === serial.current && belongs(value)) setState(value);
-      }).catch((reason) => { if (liveRef.current && revision === serial.current) setError(String(reason)); });
+      }).catch((reason) => { if (liveRef.current && revision === serial.current) setError(normalizeError(reason)); });
     }
     return () => { liveRef.current = false; revisions.current++; };
   }, [bridge, key]);
@@ -38,7 +40,7 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
       const value = await bridge.transfer('device_runtime_action', { request: { identity: state.identity, action, targetId, kind,
         connectionConsent, deploymentConsent: false } }, scope());
       if (liveRef.current && revision === serial.current && belongs(value)) setState(value);
-    } catch (reason) { if (liveRef.current && revision === serial.current) setError(String(reason)); }
+    } catch (reason) { if (liveRef.current && revision === serial.current) setError(normalizeError(reason)); }
     finally { if (liveRef.current && revision === serial.current) setPending(null); }
   }
   return <div className="device-runtime-panel">
@@ -60,6 +62,6 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
     </button></li>)}</ul> : <p className="muted">没有已发现的设备；不会根据设备名称自动判定真机或模拟器。</p>}
     <button className="primary-button" disabled title={state?.reason ?? '需要可安装产物、签名、Ability 与真实设备画面接入'}>安装并启动应用 · 暂不可用</button>
     <p className="muted">连接授权不包含安装授权。签名产物、Ability、设备前台核验与画面传输完成接入后，安装还需单独确认。</p>
-    {error && <output className="native-control-error" role="alert">{error}</output>}
+    {error && <output className="native-control-error" role="alert">{describeError(error)}</output>}
   </div>;
 }

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, NativeControlIdentity, NativeControlReceipt, NativeControlRequest, NativeControlState, RequestScope } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
+import { describeError, normalizeError } from '../ipc/errors.ts';
+import type { AppError } from '../ipc/errors.ts';
 import type { FrameStore } from '../frame-store.ts';
 import type { PreviewFrame } from './frame-types.ts';
 import { deriveUiState } from '../view-state.ts';
@@ -24,8 +26,12 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   bridge: UiBridge; snapshot: AppSnapshot | null; store: FrameStore; visible: boolean; windowVisible?: boolean; wake: () => void;
 }) {
   const [state, setState] = useState<NativeControlState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  // Native failures are normalized by the IPC layer; local validation keeps the
+  // same closed type so the display layer never inspects message text.
+  const fail = (message: string) => { setError(normalizeError(message)); };
+  const failWith = (reason: unknown) => { setError(normalizeError(reason)); };
   const context = useRef({ snapshot, visible, windowVisible, state }); context.current = { snapshot, visible, windowVisible, state };
   const occupied = useRef(false);
   const inputQueue = useRef<{ request: NativeControlRequest; scope: RequestScope; serial: number }[]>([]);
@@ -83,7 +89,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       const queued = await bridge.transfer('preview_control_submit', { request: controlRequest(identity, { action: 'pointerCancel' }) }, requestScope);
       return operationRef.current(queued, requestScope, false);
     }
-  }, (reason, identity) => { if (active.current && sameRuntime(identity)) setError(String(reason)); }));
+  }, (reason, identity) => { if (active.current && sameRuntime(identity)) failWith(reason); }));
   useEffect(() => { active.current = true; return () => { active.current = false; void input.cancel(); }; }, [input]);
   const runtimeKey = JSON.stringify([snapshot?.target?.id, snapshot?.project?.id, snapshot?.sessionId, snapshot?.build.buildId, snapshot?.build.generation]);
   useEffect(() => {
@@ -97,7 +103,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       try {
         const value = await bridge.transfer!('preview_control_state', {}, requestScope);
         if (live) accept(value);
-      } catch (reason) { if (live && active.current) setError(String(reason)); }
+      } catch (reason) { if (live && active.current) failWith(reason); }
       finally { if (live) timer = setTimeout(() => void read(), 800); }
     }
     void read();
@@ -116,7 +122,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
             : await bridge.transfer('preview_control_submit', { request: controlRequest(identity, { action: 'pointerCancel' }) }, requestScope);
           await awaitOperation(queued, requestScope, false);
         }
-        catch (reason) { if (active.current && identityEqual(identity, context.current.state?.identity)) setError(String(reason)); }
+        catch (reason) { if (active.current && identityEqual(identity, context.current.state?.identity)) failWith(reason); }
       })();
     };
     if (!windowVisible) cancelLocalInput(true);
@@ -131,23 +137,23 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     const actual = context.current;
     const identity = displayedIdentity(actual.snapshot, frame);
     if (!identity || !identityEqual(identity, actual.state?.identity)) {
-      setError('当前原生画面或配置已变化；本次输入未提交。'); return null;
+      fail('当前原生画面或配置已变化；本次输入未提交。'); return null;
     }
     if (!actual.windowVisible || !actual.visible || !document.hasFocus()) {
-      setError('请先聚焦 ArkDock 的实际预览画面；隐藏或检查模式不接收输入。'); return null;
+      fail('请先聚焦 ArkDock 的实际预览画面；隐藏或检查模式不接收输入。'); return null;
     }
     if (occupied.current || !actual.state?.inputReady) {
-      setError('原生配置操作尚未完成；本次输入未提交。'); return null;
+      fail('原生配置操作尚未完成；本次输入未提交。'); return null;
     }
     if (!actual.state.experimentalEnabled || !controlAvailable(actual.state, name)) {
-      setError('当前文字或触控能力未启用；本次输入未提交。'); return null;
+      fail('当前文字或触控能力未启用；本次输入未提交。'); return null;
     }
     return { identity, scope: scope() };
   }
   async function submit(fields: Partial<Omit<NativeControlRequest, 'identity'>> & Pick<NativeControlRequest, 'action'>): Promise<void> {
     if (!bridge.transfer || occupied.current) return;
     const identity = displayedIdentity(context.current.snapshot, store.getDisplayed());
-    if (!identity || !identityEqual(identity, context.current.state?.identity)) { setError('等待当前配置的有效原生画面后再操作。'); return; }
+    if (!identity || !identityEqual(identity, context.current.state?.identity)) { fail('等待当前配置的有效原生画面后再操作。'); return; }
     occupied.current = true; inputSerial.current++; inputQueue.current = []; setPending(fields.action); setError(null);
     const requestScope = scope();
     try {
@@ -160,14 +166,14 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       const receipt = await awaitOperation(queued, requestScope, fields.action === 'queryRouter' || fields.action === 'setColorMode');
       if (receipt.phase === 'cancelled') throw new Error(receipt.reason);
       accept(await bridge.transfer('preview_control_state', {}, requestScope));
-    } catch (reason) { if (active.current && sameRuntime(identity)) setError(String(reason)); }
+    } catch (reason) { if (active.current && sameRuntime(identity)) failWith(reason); }
     finally { occupied.current = false; if (active.current) setPending(null); }
   }
   async function enable(enabled: boolean) {
     if (!bridge.transfer || occupied.current) return;
     occupied.current = true; inputSerial.current++; inputQueue.current = []; setPending('enable'); setError(null);
     try { await input.cancel(); accept(await bridge.transfer('preview_control_enable', { enabled }, scope())); }
-    catch (reason) { if (active.current) setError(String(reason)); }
+    catch (reason) { if (active.current) failWith(reason); }
     finally { occupied.current = false; if (active.current) setPending(null); }
   }
   async function cancel() {
@@ -181,7 +187,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       await awaitOperation(queued, requestScope, false, true);
       accept(await bridge.transfer('preview_control_state', {}, requestScope));
     }
-    catch (reason) { if (active.current) setError(String(reason)); }
+    catch (reason) { if (active.current) failWith(reason); }
   }
   async function cancelInput() {
     inputSerial.current++; inputQueue.current = [];
@@ -193,15 +199,15 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       const queued = await bridge.transfer('preview_control_submit', { request: controlRequest(identity, { action: 'pointerCancel' }) }, requestScope);
       // An input-only cancellation must not wait for unrelated theme/page configuration.
       await awaitOperation(queued, requestScope, false);
-    } catch (reason) { if (active.current && sameRuntime(identity)) setError(String(reason)); }
+    } catch (reason) { if (active.current && sameRuntime(identity)) failWith(reason); }
   }
   function enqueueInput(fields: Partial<Omit<NativeControlRequest, 'identity'>> & Pick<NativeControlRequest, 'action'>, name: 'text' | 'key') {
     const frame = store.getDisplayed();
-    if (!frame) { setError('当前没有有效原生画面；本次输入未提交。'); return; }
+    if (!frame) { fail('当前没有有效原生画面；本次输入未提交。'); return; }
     const value = binding(frame, name);
     if (!value) return;
-    if (!bridge.transfer) { setError('缺少原生控制桥接；本次输入未提交。'); return; }
-    if (inputQueue.current.length >= 32) { setError('文字与按键输入队列已满；未提交本次输入。'); return; }
+    if (!bridge.transfer) { fail('缺少原生控制桥接；本次输入未提交。'); return; }
+    if (inputQueue.current.length >= 32) { fail('文字与按键输入队列已满；未提交本次输入。'); return; }
     inputQueue.current.push({ request: controlRequest(value.identity, fields), scope: value.scope, serial: inputSerial.current });
     drainInput();
   }
@@ -216,12 +222,12 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
           serial = next.serial;
           const released = await input.waitForRelease(next.request.identity, next.scope);
           if (next.serial !== inputSerial.current) continue;
-          if (!released) { inputQueue.current = []; setError('原生点击未确认释放；等待中的文字与按键已取消。'); break; }
+          if (!released) { inputQueue.current = []; fail('原生点击未确认释放；等待中的文字与按键已取消。'); break; }
           if (occupied.current || !context.current.windowVisible || !context.current.visible || !document.hasFocus()
             || !identityEqual(next.request.identity, displayedIdentity(context.current.snapshot, store.getDisplayed()))
             || !identityEqual(next.request.identity, context.current.state?.identity) || !context.current.state?.inputReady
             || next.scope.targetId !== scope().targetId || next.scope.sessionId !== scope().sessionId) {
-            inputQueue.current = []; setError('输入焦点或原生会话已变化；等待中的文字与按键未提交。'); break;
+            inputQueue.current = []; fail('输入焦点或原生会话已变化；等待中的文字与按键未提交。'); break;
           }
           wakeRef.current();
           const queued = await bridge.transfer!('preview_control_submit', { request: next.request }, next.scope);
@@ -231,7 +237,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
       } catch (reason) {
         if (serial === inputSerial.current) {
           inputQueue.current = [];
-          if (active.current) setError(`输入未完成：${String(reason)}`);
+          if (active.current) fail(`输入未完成：${describeError(reason)}`);
         }
       }
       finally {
@@ -244,16 +250,16 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   }
   function enqueueText(text: string) {
     if (!text) return;
-    if (text.includes(String.fromCodePoint(0)) || /[\r\n]/u.test(text)) { setError('文字提交包含换行或无效字符；换行请使用 Enter 按键。'); return; }
+    if (text.includes(String.fromCodePoint(0)) || /[\r\n]/u.test(text)) { fail('文字提交包含换行或无效字符；换行请使用 Enter 按键。'); return; }
     const scalars = Array.from(text);
     const chunks: string[] = [];
     for (let offset = 0; offset < scalars.length; offset += 128) chunks.push(scalars.slice(offset, offset + 128).join(''));
-    if (chunks.length + inputQueue.current.length > 32) { setError('文字输入超出有界队列；本次提交未派发。'); return; }
+    if (chunks.length + inputQueue.current.length > 32) { fail('文字输入超出有界队列；本次提交未派发。'); return; }
     for (const chunk of chunks) enqueueInput({ action: 'textCommit', text: chunk }, 'text');
   }
   return { state, error, pending, input, submit, enable, cancel, cancelInput,
     start: (frame: PreviewFrame, x: number, y: number) => {
-      if (draining.current || inputQueue.current.length) { setError('等待文字或按键提交完成后再点击；本次点击未提交。'); return false; }
+      if (draining.current || inputQueue.current.length) { fail('等待文字或按键提交完成后再点击；本次点击未提交。'); return false; }
       const value = binding(frame, 'touch');
       if (!value) return false;
       setError(null);

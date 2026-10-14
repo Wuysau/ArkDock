@@ -1,7 +1,17 @@
-import type { AppSnapshot, TargetInfo } from './ipc/model.ts';
+import type { AppSnapshot, RequestScope, TargetInfo } from './ipc/model.ts';
 
 export function sameTarget(a: TargetInfo | null | undefined, b: TargetInfo | null | undefined): boolean {
   return !a || !b ? !a && !b : a.id === b.id && a.process.pid === b.process.pid && a.process.startedAt === b.process.startedAt;
+}
+
+/** The scope a new request must carry: the currently confirmed target and session. */
+export function currentScope(state: AppSnapshot | null): RequestScope {
+  return { targetId: state?.target?.id ?? null, sessionId: state?.sessionId ?? null };
+}
+
+/** A reply or a failure only belongs to the UI while its scope is still current. */
+export function scopeStillCurrent(state: AppSnapshot | null, scope: RequestScope): boolean {
+  return scope.targetId === (state?.target?.id ?? null) && scope.sessionId === (state?.sessionId ?? null);
 }
 
 export function responseStillCurrent(result: AppSnapshot, current: AppSnapshot | null): boolean {
