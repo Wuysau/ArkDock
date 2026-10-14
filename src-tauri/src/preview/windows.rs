@@ -2,18 +2,22 @@
 //! Public OpenHarmony sources informed experiments; actual commercial binary receipts
 //! are required by the native gate. No unverified version enters this adapter.
 use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
-use super::control::{self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand};
+use super::control::{
+    self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand,
+};
 use super::frames::{parse_jpeg40_for_surface, BinaryFrame, BinaryFrameMailbox};
 use super::NativePoint;
 use crate::inspector::{
     InspectionReceiver, InspectionRequest, InspectorCommand, RawInspectionResponse,
     INSPECTION_TIMEOUT_MS,
 };
-use crate::ipc::model::{NativeControlAction, NativeControlPhase, NativeControlRequest, ProjectRef};
+use crate::ipc::model::{
+    NativeControlAction, NativeControlPhase, NativeControlRequest, ProjectRef,
+};
 use crate::scheduler::BuildTask;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
@@ -32,16 +36,77 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Pipes::*;
 
-#[path = "windows_process.rs"]
-mod process;
 #[path = "windows_control.rs"]
 mod control_worker;
+#[path = "windows_process.rs"]
+mod process;
 
 const FRAME_LIMIT: usize = 1024 * 1024;
-const LOG_LIMIT: u64 = 16 * 1024 * 1024;
+/// Build-output policy: a preview build that emits more than this much log is
+/// treated as anomalous. The on-disk log itself is bounded independently by the
+/// owned capture, so this is a deliberate build policy and not a disk guard.
+const BUILD_LOG_LIMIT: u64 = 16 * 1024 * 1024;
+/// Diagnostics handed to a failure message, newest last.
+const FAILURE_TAIL: usize = 64 * 1024;
 const PREVIEWER: &str = "sdk/default/openharmony/previewer/common/bin/Previewer.exe";
 const HVIGOR: &str = "hvigor/bin/hvigorw.js";
 pub(super) type Completed = (BuildTask, Result<(), String>);
+
+fn exited_build_result(
+    build: &process::Process,
+    module: &str,
+    code: u32,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    build.drain_output(Duration::from_secs(2), stop)?;
+    if build.log_size() > BUILD_LOG_LIMIT {
+        return Err("BUILD_LOG_LIMIT".into());
+    }
+    build_exit_result(module, code, &build.log_tail(FAILURE_TAIL))
+}
+
+/// A live pinned watch worker can hand off a confirmed graph. An observably
+/// exited child must instead satisfy EOF, final size and final exit status.
+fn build_progress(
+    build: &process::Process,
+    module: &str,
+    stop: &AtomicBool,
+) -> Result<bool, String> {
+    if let Some(code) = build.exit_code()? {
+        exited_build_result(build, module, code, stop)?;
+        return Ok(true);
+    }
+    build.check_capture_health()?;
+    if build.log_size() > BUILD_LOG_LIMIT {
+        return Err("BUILD_LOG_LIMIT".into());
+    }
+    let log = build.log_tail(FAILURE_TAIL);
+    match build_receipt(module, &log) {
+        BuildReceipt::Succeeded => {
+            // The child may have exited while we sampled the receipt. Do not
+            // let that receipt bypass its final status or output barrier.
+            build.check_capture_health()?;
+            if build.log_size() > BUILD_LOG_LIMIT {
+                return Err("BUILD_LOG_LIMIT".into());
+            }
+            if let Some(code) = build.exit_code()? {
+                exited_build_result(build, module, code, stop)?;
+            }
+            Ok(true)
+        }
+        BuildReceipt::Failed => Err(format!(
+            "BUILD_FAILED: PreviewBuild; {}",
+            log.chars()
+                .rev()
+                .take(4096)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        )),
+        BuildReceipt::Pending => Ok(false),
+    }
+}
 
 fn build_environment(sdk: &Path, root: &Path, run_directory: &Path) -> Vec<(String, String)> {
     // Pinned Hvigor supports BUILD_CACHE_DIR, but its wrapper's env.config takes
@@ -235,7 +300,10 @@ impl Runtime {
             if let Ok(mut mailbox) = worker_controls.lock() {
                 mailbox.cancel_all();
                 if let Some((_, Some(request))) = mailbox.take_cancel() {
-                    request.send(request.receipt(NativeControlPhase::Cancelled, "Owned native runtime stopped"));
+                    request.send(request.receipt(
+                        NativeControlPhase::Cancelled,
+                        "Owned native runtime stopped",
+                    ));
                 }
             }
         });
@@ -256,8 +324,13 @@ impl Runtime {
     pub fn click(&self, point: NativePoint) -> Result<(), String> {
         // Hold the state through enqueue. A cancellation cannot mark input
         // paused and drain the old queue before this point is actually queued.
-        let state = self.control_state.lock().map_err(|_| "NATIVE_CONTROL_STATE")?;
-        if !state.input_ready { return Err("NATIVE_INPUT_PAUSED".into()); }
+        let state = self
+            .control_state
+            .lock()
+            .map_err(|_| "NATIVE_CONTROL_STATE")?;
+        if !state.input_ready {
+            return Err("NATIVE_INPUT_PAUSED".into());
+        }
         if state.width != 360 || state.height != 640 {
             return Err("LEGACY_INPUT_SURFACE_IDENTITY_REQUIRED: dynamic surfaces require typed native control".into());
         }
@@ -268,39 +341,81 @@ impl Runtime {
             .try_send(point)
             .map_err(|_| "INPUT_QUEUE_BUSY".into())
     }
-    pub fn control(&self, request: NativeControlRequest, operation_id: String) -> Result<ControlReceiver, String> {
+    pub fn control(
+        &self,
+        request: NativeControlRequest,
+        operation_id: String,
+    ) -> Result<ControlReceiver, String> {
         control::validate_request(&request)?;
-        if operation_id.is_empty() || operation_id.len() > 128
-            || operation_id.chars().any(char::is_control) { return Err("NATIVE_OPERATION_ID_INVALID".into()); }
+        if operation_id.is_empty()
+            || operation_id.len() > 128
+            || operation_id.chars().any(char::is_control)
+        {
+            return Err("NATIVE_OPERATION_ID_INVALID".into());
+        }
         let state = self.control_runtime_state();
-        if self.stop.load(Ordering::Acquire) || !control::identity_matches(&request.identity, &self.task, &state) {
+        if self.stop.load(Ordering::Acquire)
+            || !control::identity_matches(&request.identity, &self.task, &state)
+        {
             return Err("NATIVE_CONTROL_STALE_IDENTITY".into());
         }
-        if !state.input_ready && !matches!(request.action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll) {
+        if !state.input_ready
+            && !matches!(
+                request.action,
+                NativeControlAction::PointerCancel | NativeControlAction::CancelAll
+            )
+        {
             return Err(format!("NATIVE_CONTROL_PAUSED: {}", state.reason));
         }
         let (reply, response) = mpsc::sync_channel(8);
-        let queued = ControlRequest { request, operation_id, reply, requested_at: super::now_ms(), legacy_click: false };
-        let cancelling = matches!(queued.request.action, NativeControlAction::PointerCancel | NativeControlAction::CancelAll);
+        let queued = ControlRequest {
+            request,
+            operation_id,
+            reply,
+            requested_at: super::now_ms(),
+            legacy_click: false,
+        };
+        let cancelling = matches!(
+            queued.request.action,
+            NativeControlAction::PointerCancel | NativeControlAction::CancelAll
+        );
         let mut mailbox = self.controls.lock().map_err(|_| "NATIVE_CONTROL_MAILBOX")?;
         {
-            let mut current = self.control_state.lock().map_err(|_| "NATIVE_CONTROL_STATE")?;
+            let mut current = self
+                .control_state
+                .lock()
+                .map_err(|_| "NATIVE_CONTROL_STATE")?;
             if !control::identity_matches(&queued.request.identity, &self.task, &current)
-                || !cancelling && !current.input_ready { return Err("NATIVE_CONTROL_CHANGED_BEFORE_ENQUEUE".into()); }
-            if cancelling { current.input_ready = false; current.reason = "Safely cancelling native input".into(); }
+                || !cancelling && !current.input_ready
+            {
+                return Err("NATIVE_CONTROL_CHANGED_BEFORE_ENQUEUE".into());
+            }
+            if cancelling {
+                current.input_ready = false;
+                current.reason = "Safely cancelling native input".into();
+            }
         }
-        queued.send(queued.receipt(NativeControlPhase::Queued, "Queued for the owned native command channel"));
+        queued.send(queued.receipt(
+            NativeControlPhase::Queued,
+            "Queued for the owned native command channel",
+        ));
         mailbox.enqueue(queued)?;
         Ok(response)
     }
     pub fn cancel_controls(&self) {
         if let Ok(mut mailbox) = self.controls.lock() {
-            if let Ok(mut state) = self.control_state.lock() { state.input_ready = false; state.reason = "Safely cancelling native input".into(); }
+            if let Ok(mut state) = self.control_state.lock() {
+                state.input_ready = false;
+                state.reason = "Safely cancelling native input".into();
+            }
             mailbox.cancel_all();
         }
     }
     pub fn control_runtime_state(&self) -> RuntimeControlState {
-        self.control_state.lock().map(|state| state.clone()).unwrap_or_else(|_| RuntimeControlState::stopped())
+        self.control_state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| RuntimeControlState::stopped())
     }
     pub fn request_inspection(
         &self,
@@ -456,8 +571,15 @@ impl Pipe {
         let bytes = command.bytes()?;
         unsafe {
             let mut written = 0;
-            if WriteFile(self.handle, bytes.as_ptr().cast(), bytes.len() as u32,
-                &mut written, null_mut()) == 0 || written as usize != bytes.len() {
+            if WriteFile(
+                self.handle,
+                bytes.as_ptr().cast(),
+                bytes.len() as u32,
+                &mut written,
+                null_mut(),
+            ) == 0
+                || written as usize != bytes.len()
+            {
                 return Err("NATIVE_CONTROL_PIPE_BACKPRESSURE".into());
             }
         }
@@ -590,34 +712,13 @@ fn run(
         &build_log,
     )?;
     let deadline = Instant::now() + Duration::from_secs(120);
+    let mut build_log_degraded_reported = false;
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        if build.log_size() > LOG_LIMIT {
-            return Err("BUILD_LOG_LIMIT".into());
-        }
-        let log = process::bounded_log(&build_log);
-        match build_receipt(&project.module, &log) {
-            BuildReceipt::Succeeded => break,
-            BuildReceipt::Failed => {
-                return Err(format!(
-                    "BUILD_FAILED: PreviewBuild; {}",
-                    log.chars()
-                        .rev()
-                        .take(4096)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                ));
-            }
-            BuildReceipt::Pending => {}
-        }
-        if let Some(code) = build.exit_code()? {
-            // Cached PreviewArkTS may exit naturally. The graph can finish between
-            // our previous log read and this exit observation; re-read after the barrier.
-            build_exit_result(&project.module, code, &process::bounded_log(&build_log))?;
+        report_log_degradation(&build, "build", messages, &mut build_log_degraded_reported);
+        if build_progress(&build, &project.module, stop)? {
             break;
         }
         if Instant::now() > deadline {
@@ -625,6 +726,16 @@ fn run(
         }
         thread::sleep(Duration::from_millis(50));
     }
+    // A receipt can arrive between the loop's first size check and its tail
+    // read. Enforce the hard bound again before accepting that graph result.
+    if build.log_size() > BUILD_LOG_LIMIT {
+        return Err("BUILD_LOG_LIMIT".into());
+    }
+    build.check_capture_health()?;
+    if let Some(code) = build.exit_code()? {
+        exited_build_result(&build, &project.module, code, stop)?;
+    }
+    report_log_degradation(&build, "build", messages, &mut build_log_degraded_reported);
     // The verified PreviewArkTS task retains an idle watch worker. Its completed graph
     // receipt is the build result; closing only this Job is a separate cleanup action.
     let build_pid = build.pid;
@@ -702,20 +813,27 @@ fn run(
         &[],
         &runtime_log,
     )?;
+    let mut runtime_log_degraded_reported = false;
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut websocket = None;
     let mut control_worker = control_worker::ControlWorker::new(control_state, controls, task);
     while !stop.load(Ordering::Acquire) {
+        report_log_degradation(
+            &previewer,
+            "previewer",
+            messages,
+            &mut runtime_log_degraded_reported,
+        );
         if let Some(code) = previewer.exit_code()? {
             return Err(format!(
                 "PREVIEWER_EXIT: {code}; {}",
-                process::bounded_log(&runtime_log)
-                    .chars()
-                    .take(4096)
-                    .collect::<String>()
+                failure_tail(&previewer)
             ));
         }
-        for message in command.receive(previewer.pid)? { control_worker.route_message(&message); }
+        previewer.check_capture_health()?;
+        for message in command.receive(previewer.pid)? {
+            control_worker.route_message(&message);
+        }
         trace.receive(previewer.pid)?;
         if command.connected && tcp_owner(port, previewer.pid) {
             let stream = TcpStream::connect_timeout(
@@ -768,156 +886,198 @@ fn run(
     let mut inspection_poisoned = false;
     let mut query_id = 0u64;
     let mut held_navigation_frame: Option<(BinaryFrame, u64)> = None;
-    let mut runtime_log_offset = 0u64;
-    let mut runtime_log_tail = String::new();
+    let mut runtime_log_reported = false;
     let outcome = (|| -> Result<(), String> {
-    while !stop.load(Ordering::Acquire) {
-        if let Some(code) = previewer.exit_code()? {
-            return Err(format!("PREVIEWER_EXIT: {code}"));
-        }
-        if previewer.log_size() > LOG_LIMIT {
-            return Err("PREVIEWER_LOG_LIMIT".into());
-        }
-        inspect_runtime_log(&runtime_log, &mut runtime_log_offset, &mut runtime_log_tail)?;
-        for message in command.receive(previewer.pid)? {
-            if message
-                .get("command")
-                .and_then(|v| v.as_str())
-                .is_some_and(|name| name == "inspector" || name == "inspectorDefault")
-            {
-                if inspection.as_ref().is_some_and(|(request, _, _, _)| {
-                    message.get("command").and_then(|v| v.as_str())
-                        == Some(request.command.wire_name())
-                }) {
-                    let (request, _, requested_at, id) =
-                        inspection.take().expect("matched pending inspection");
-                    let response = message
-                        .get("result")
-                        .cloned()
-                        .ok_or("INSPECTOR_RESULT_MISSING".to_string())
-                        .map(|result| RawInspectionResponse {
-                            command: request.command,
-                            protocol_version: message
-                                .get("version")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or("")
-                                .into(),
-                            result,
-                            frame_sequence: sequence,
-                            requested_at,
-                            received_at: super::now_ms(),
-                            query_id: id,
-                            task: task.clone(),
-                        });
-                    let _ = request.reply.try_send(response);
-                }
-                continue;
+        while !stop.load(Ordering::Acquire) {
+            report_log_degradation(
+                &previewer,
+                "previewer",
+                messages,
+                &mut runtime_log_degraded_reported,
+            );
+            if let Some(code) = previewer.exit_code()? {
+                return Err(format!("PREVIEWER_EXIT: {code}"));
             }
-            // Additional commands fail their own receipts. Only an ambiguous
-            // acknowledgement/release forces the owned runtime to stop.
-            control_worker.receive(&message)?;
-        }
-        trace.receive(previewer.pid)?;
-        if inspection.as_ref().is_some_and(|(_, sent, _, _)| {
-            sent.elapsed() >= Duration::from_millis(INSPECTION_TIMEOUT_MS)
-        }) {
-            if let Some((request, _, _, _)) = inspection.take() {
-                let _ = request.reply.try_send(Err(
-                    "INSPECTOR_TIMEOUT: response correlation unavailable until runtime restart"
-                        .into(),
-                ));
+            previewer.check_capture_health()?;
+            // Runtime health comes from the child's status and this protocol. Its log
+            // volume is bounded by the owned capture and never fails the run; only the
+            // ArkTS page exception the runtime actually reported is fatal.
+            if let Some(error) = previewer.runtime_error() {
+                return Err(error);
             }
-            // The wire has no request IDs. Never let a late response satisfy another query.
-            inspection_poisoned = true;
-        }
-        if !first { control_worker.tick(&command, inspection.is_some(), inputs)?; }
-        if let Some(revision) = held_navigation_frame.as_ref().map(|(_, revision)| *revision) {
-            if control_worker.navigation_revision() != Some(revision) {
-                held_navigation_frame = None;
-            } else if control_worker.navigation_frame_ready(revision) {
-                if let Some((frame, _)) = held_navigation_frame.take() {
-                    if control_worker.frame(frame.metadata.width, frame.metadata.height,
-                        frame.metadata.sequence, &frame.payload)? {
-                        frames.lock().map_err(|_| "FRAME_MAILBOX")?.push(frame)
-                            .map_err(|error| format!("FRAME_REJECTED: {error:?}"))?;
-                    }
-                }
+            if !runtime_log_reported && previewer.log_dropped() > 0 {
+                runtime_log_reported = true;
+                let _ = messages.try_send(format!(
+                "LOG_CAPTURE_BOUNDED: previewer output exceeded the capture window; {} older bytes dropped, newest output retained",
+                previewer.log_dropped()
+            ));
             }
-        }
-        if !first && inspection.is_none() && !control_worker.busy() {
-            if let Ok(request) = inspections.try_recv() {
-                if inspection_poisoned {
-                    let _ = request
-                        .reply
-                        .try_send(Err("INSPECTOR_CHANNEL_UNVERIFIED_AFTER_TIMEOUT".into()));
-                } else {
-                    match command.inspector(request.command) {
-                        Ok(()) => {
-                            query_id = query_id.saturating_add(1);
-                            inspection = Some((request, Instant::now(), super::now_ms(), query_id));
-                        }
-                        Err(error) => {
-                            let _ = request.reply.try_send(Err(error.clone()));
-                            return Err(format!("NATIVE_COMMAND_PIPE_PARTIAL_WRITE: {error}"));
-                        }
-                    }
-                }
-            }
-        }
-        match socket.read() {
-            Ok(Message::Binary(data)) => {
-                sequence += 1;
-                let (width,height) = control_worker.surface();
-                // During native rotation/resizing, old-dimension frames can be
-                // queued on the socket. Discard them without relabeling pixels.
-                if data.len() >= 40 && data.len() <= FRAME_LIMIT
-                    && data[..4] == [0x12,0x34,0x56,0x78]
-                    && data[12..20] == data[4..12]
-                    && data[20..40].iter().all(|byte| *byte == 0) {
-                    let actual_width = u32::from_be_bytes(data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?);
-                    let actual_height = u32::from_be_bytes(data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?);
-                    if (actual_width != width || actual_height != height)
-                        && control_worker.old_surface_packet(actual_width, actual_height) { continue; }
-                }
-                let frame = parse_jpeg40_for_surface(&data, task, sequence, super::now_ms(), width, height)?;
-                if !control_worker.frame(width, height, sequence, &frame.payload)? {
-                    if let Some(revision) = control_worker.navigation_revision() {
-                        // One bounded candidate from the already observed target
-                        // route may precede its command ACK on the other stream.
-                        // Preserve its original identity/sequence/time unchanged.
-                        held_navigation_frame = Some((frame, revision));
+            for message in command.receive(previewer.pid)? {
+                if message
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| name == "inspector" || name == "inspectorDefault")
+                {
+                    if inspection.as_ref().is_some_and(|(request, _, _, _)| {
+                        message.get("command").and_then(|v| v.as_str())
+                            == Some(request.command.wire_name())
+                    }) {
+                        let (request, _, requested_at, id) =
+                            inspection.take().expect("matched pending inspection");
+                        let response = message
+                            .get("result")
+                            .cloned()
+                            .ok_or("INSPECTOR_RESULT_MISSING".to_string())
+                            .map(|result| RawInspectionResponse {
+                                command: request.command,
+                                protocol_version: message
+                                    .get("version")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("")
+                                    .into(),
+                                result,
+                                frame_sequence: sequence,
+                                requested_at,
+                                received_at: super::now_ms(),
+                                query_id: id,
+                                task: task.clone(),
+                            });
+                        let _ = request.reply.try_send(response);
                     }
                     continue;
                 }
-                held_navigation_frame = None;
-                frames
-                    .lock()
-                    .map_err(|_| "FRAME_MAILBOX")?
-                    .push(frame)
-                    .map_err(|e| format!("FRAME_REJECTED: {e:?}"))?;
-                if first {
-                    first = false;
-                    let _ = messages.try_send(format!(
+                // Additional commands fail their own receipts. Only an ambiguous
+                // acknowledgement/release forces the owned runtime to stop.
+                control_worker.receive(&message)?;
+            }
+            trace.receive(previewer.pid)?;
+            if inspection.as_ref().is_some_and(|(_, sent, _, _)| {
+                sent.elapsed() >= Duration::from_millis(INSPECTION_TIMEOUT_MS)
+            }) {
+                if let Some((request, _, _, _)) = inspection.take() {
+                    let _ = request.reply.try_send(Err(
+                        "INSPECTOR_TIMEOUT: response correlation unavailable until runtime restart"
+                            .into(),
+                    ));
+                }
+                // The wire has no request IDs. Never let a late response satisfy another query.
+                inspection_poisoned = true;
+            }
+            if !first {
+                control_worker.tick(&command, inspection.is_some(), inputs)?;
+            }
+            if let Some(revision) = held_navigation_frame
+                .as_ref()
+                .map(|(_, revision)| *revision)
+            {
+                if control_worker.navigation_revision() != Some(revision) {
+                    held_navigation_frame = None;
+                } else if control_worker.navigation_frame_ready(revision) {
+                    if let Some((frame, _)) = held_navigation_frame.take() {
+                        if control_worker.frame(
+                            frame.metadata.width,
+                            frame.metadata.height,
+                            frame.metadata.sequence,
+                            &frame.payload,
+                        )? {
+                            frames
+                                .lock()
+                                .map_err(|_| "FRAME_MAILBOX")?
+                                .push(frame)
+                                .map_err(|error| format!("FRAME_REJECTED: {error:?}"))?;
+                        }
+                    }
+                }
+            }
+            if !first && inspection.is_none() && !control_worker.busy() {
+                if let Ok(request) = inspections.try_recv() {
+                    if inspection_poisoned {
+                        let _ = request
+                            .reply
+                            .try_send(Err("INSPECTOR_CHANNEL_UNVERIFIED_AFTER_TIMEOUT".into()));
+                    } else {
+                        match command.inspector(request.command) {
+                            Ok(()) => {
+                                query_id = query_id.saturating_add(1);
+                                inspection =
+                                    Some((request, Instant::now(), super::now_ms(), query_id));
+                            }
+                            Err(error) => {
+                                let _ = request.reply.try_send(Err(error.clone()));
+                                return Err(format!("NATIVE_COMMAND_PIPE_PARTIAL_WRITE: {error}"));
+                            }
+                        }
+                    }
+                }
+            }
+            match socket.read() {
+                Ok(Message::Binary(data)) => {
+                    sequence += 1;
+                    let (width, height) = control_worker.surface();
+                    // During native rotation/resizing, old-dimension frames can be
+                    // queued on the socket. Discard them without relabeling pixels.
+                    if data.len() >= 40
+                        && data.len() <= FRAME_LIMIT
+                        && data[..4] == [0x12, 0x34, 0x56, 0x78]
+                        && data[12..20] == data[4..12]
+                        && data[20..40].iter().all(|byte| *byte == 0)
+                    {
+                        let actual_width =
+                            u32::from_be_bytes(data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?);
+                        let actual_height =
+                            u32::from_be_bytes(data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?);
+                        if (actual_width != width || actual_height != height)
+                            && control_worker.old_surface_packet(actual_width, actual_height)
+                        {
+                            continue;
+                        }
+                    }
+                    let frame = parse_jpeg40_for_surface(
+                        &data,
+                        task,
+                        sequence,
+                        super::now_ms(),
+                        width,
+                        height,
+                    )?;
+                    if !control_worker.frame(width, height, sequence, &frame.payload)? {
+                        if let Some(revision) = control_worker.navigation_revision() {
+                            // One bounded candidate from the already observed target
+                            // route may precede its command ACK on the other stream.
+                            // Preserve its original identity/sequence/time unchanged.
+                            held_navigation_frame = Some((frame, revision));
+                        }
+                        continue;
+                    }
+                    held_navigation_frame = None;
+                    frames
+                        .lock()
+                        .map_err(|_| "FRAME_MAILBOX")?
+                        .push(frame)
+                        .map_err(|e| format!("FRAME_REJECTED: {e:?}"))?;
+                    if first {
+                        first = false;
+                        let _ = messages.try_send(format!(
                         "PREVIEW_METRICS: previewerPid={}; launchToFirstFrameMs={}; jpegBytes={}",
                         previewer.pid,
                         previewer_started.elapsed().as_millis(),
                         data.len().saturating_sub(40)
                     ));
-                    success();
+                        success();
+                    }
                 }
+                Ok(Message::Close(_)) => return Err("NATIVE_SURFACE_CLOSED".into()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(format!("NATIVE_TRANSPORT: {error}")),
             }
-            Ok(Message::Close(_)) => return Err("NATIVE_SURFACE_CLOSED".into()),
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(format!("NATIVE_TRANSPORT: {error}")),
+            if first && Instant::now() > deadline {
+                return Err("NATIVE_FRAME_TIMEOUT: 15s".into());
+            }
+            thread::sleep(Duration::from_millis(16));
         }
-        if first && Instant::now() > deadline {
-            return Err("NATIVE_FRAME_TIMEOUT: 15s".into());
-        }
-        thread::sleep(Duration::from_millis(16));
-    }
-    Ok(())
+        Ok(())
     })();
     // The process Job drops immediately after this best-effort release. Even a
     // failed pipe write cannot leave a live owned Previewer in pressed state.
@@ -925,59 +1085,43 @@ fn run(
     outcome
 }
 
-// Native pixels can contain a partially rendered page after an ArkTS exception.
-// Read the owned runtime log incrementally; SDK bootstrap warnings are not page errors.
-fn inspect_runtime_log(path: &Path, offset: &mut u64, tail: &mut String) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|e| format!("RUNTIME_LOG_READ: {e}"))?;
-    file.seek(SeekFrom::Start(*offset))
-        .map_err(|e| format!("RUNTIME_LOG_SEEK: {e}"))?;
-    let mut bytes = Vec::new();
-    file.take(64 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("RUNTIME_LOG_READ: {e}"))?;
-    *offset += bytes.len() as u64;
-    tail.push_str(&String::from_utf8_lossy(&bytes));
-    if let Some(index) = tail.find("[Engine Log]Error message:") {
-        return Err(format!(
-            "ARKTS_RUNTIME_ERROR: {}",
-            tail[index..]
-                .lines()
-                .next()
-                .unwrap_or("ArkTS page exception")
+/// Diagnostics for a failed owned process: its newest output, plus an explicit
+/// note when the bounded capture dropped older output or lost its log file, so a
+/// truncated log is never mistaken for the whole story.
+fn report_log_degradation(
+    process: &process::Process,
+    name: &str,
+    messages: &mpsc::SyncSender<String>,
+    reported: &mut bool,
+) {
+    if !*reported {
+        if let Some(error) = process.log_error() {
+            *reported = true;
+            let _ = messages.try_send(format!(
+                "LOG_CAPTURE_DEGRADED: {name} disk capture unavailable; newest output stays in memory ({error})"
+            ));
+        }
+    }
+}
+
+fn failure_tail(process: &process::Process) -> String {
+    let mut tail: String = process.log_tail(FAILURE_TAIL).chars().take(4096).collect();
+    if process.log_dropped() > 0 {
+        tail.push_str(&format!(
+            "\n[ArkDock] bounded capture dropped {} older log bytes",
+            process.log_dropped()
         ));
     }
-    // Preserve a split log marker without keeping application logs in memory.
-    if tail.len() > 1024 {
-        let mut start = tail.len() - 1024;
-        while !tail.is_char_boundary(start) {
-            start += 1;
-        }
-        *tail = tail[start..].to_owned();
+    if let Some(error) = process.log_error() {
+        tail.push_str(&format!("\n[ArkDock] log file capture degraded: {error}"));
     }
-    Ok(())
+    tail
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::preview::frames::parse_jpeg40;
-    #[test]
-    fn arkts_page_error_split_across_log_reads_is_fatal_but_sdk_warning_is_not() {
-        use std::io::Write;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("previewer.log");
-        let mut file = File::create(&path).unwrap();
-        writeln!(file, "[ArkCompiler] Throw error: undefined is not callable").unwrap();
-        let mut offset = 0;
-        let mut tail = String::new();
-        assert!(inspect_runtime_log(&path, &mut offset, &mut tail).is_ok());
-        write!(file, "[Engine Log]Error mes").unwrap();
-        assert!(inspect_runtime_log(&path, &mut offset, &mut tail).is_ok());
-        writeln!(file, "sage: Cannot read property length of undefined").unwrap();
-        assert!(inspect_runtime_log(&path, &mut offset, &mut tail)
-            .unwrap_err()
-            .starts_with("ARKTS_RUNTIME_ERROR:"));
-    }
     #[test]
     fn each_build_has_private_structured_cache_environment_without_project_cache_repair() {
         let sdk = Path::new("C:/SDK space & literal");
@@ -1066,12 +1210,12 @@ mod tests {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
-            let receipt = build_receipt("entry", &process::bounded_log(&log));
+            let receipt = build_receipt("entry", &build.log_tail(FAILURE_TAIL));
             assert_ne!(
                 receipt,
                 BuildReceipt::Failed,
                 "Real SDK failed: {}",
-                process::bounded_log(&log)
+                failure_tail(&build)
             );
             if receipt == BuildReceipt::Succeeded {
                 break;
@@ -1079,10 +1223,13 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "Real SDK build timed out: {}",
-                process::bounded_log(&log)
+                failure_tail(&build)
             );
             if let Some(code) = build.exit_code().unwrap() {
-                build_exit_result("entry", code, &process::bounded_log(&log)).unwrap();
+                build
+                    .drain_output(Duration::from_secs(2), &AtomicBool::new(false))
+                    .unwrap();
+                build_exit_result("entry", code, &build.log_tail(FAILURE_TAIL)).unwrap();
                 break;
             }
             thread::sleep(Duration::from_millis(50));
