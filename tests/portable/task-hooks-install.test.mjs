@@ -46,7 +46,12 @@ test('project Stop installation preserves other hooks, is idempotent and bootstr
     assert.equal(JSON.parse(readFileSync(join(f.root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 2);
     const task = join(f.directory, 'task'); f.git(['worktree', 'add', '-b', 'codex/fixture', task]);
     assert.ok(existsSync(join(task, '.codex/hooks.json')));
-    assert.match(readFileSync(join(task, 'AGENTS.md'), 'utf8'), /任务实际完成/);
+    const taskPolicy = readFileSync(join(task, 'AGENTS.md'), 'utf8');
+    assert.match(taskPolicy, /任务实际完成/);
+    assert.match(taskPolicy, /Worker Agent → Integration Agent → 用户验收/);
+    assert.match(taskPolicy, /不直接修改 dev\/main，不执行 ready\/finish/);
+    assert.match(taskPolicy, /仅由 Integration Agent.*代码已审阅且完整集成验证通过/);
+    assert.match(taskPolicy, /不得替代用户验收后的清理阶段/);
     assert.equal(JSON.parse(readFileSync(join(task, '.codex/hooks.json'), 'utf8')).hooks.Stop.at(-1).hooks[0].command, config.hooks.Stop.at(-1).hooks[0].command);
   } finally { cleanup(f.directory); }
 });

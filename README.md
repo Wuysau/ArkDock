@@ -43,6 +43,7 @@ Real native preview additionally requires a HarmonyOS Command Line Tools install
 - [Architecture](docs/architecture.md)
 - [Compatibility and validation status](docs/compatibility.md)
 - [Windows development and build](docs/building-windows.md)
+- [Multi-Agent development and integration](docs/development/agent-workflow.md)
 - [Native preview frontend contract](docs/native-preview/frontend-contract.md)
 - [Windows acceptance guide](docs/testing/windows-acceptance.md)
 - [Native counter sample](examples/native-counter)

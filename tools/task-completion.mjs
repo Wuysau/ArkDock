@@ -87,7 +87,7 @@ function destination(repo, devBranch) {
 }
 function session(value) {
   const result = value ?? process.env.CODEX_THREAD_ID;
-  if (typeof result !== 'string' || !result.trim() || result.length > 256 || /[\0\r\n]/.test(result)) fail('A valid session ID or CODEX_THREAD_ID is required.');
+  if (typeof result !== 'string' || !result.trim() || result.length > 256 || ['\0', '\r', '\n'].some(char => result.includes(char))) fail('A valid session ID or CODEX_THREAD_ID is required.');
   return result;
 }
 function metadata(common) {
@@ -193,7 +193,7 @@ export function isCodePath(path) {
     || ['.gitignore', '.gitattributes', '.editorconfig', 'Cargo.lock'].includes(path);
 }
 function safePath(root, path) {
-  if (typeof path !== 'string' || !path || /[\0\r\n\\]/.test(path) || isAbsolute(path) || path.split('/').some(part => !part || part === '.' || part === '..')) fail('A reviewed path must be a plain relative Git path.');
+  if (typeof path !== 'string' || !path || ['\0', '\r', '\n', '\\'].some(char => path.includes(char)) || isAbsolute(path) || path.split('/').some(part => !part || part === '.' || part === '..')) fail('A reviewed path must be a plain relative Git path.');
   const absolute = resolve(root, ...path.split('/'));
   if (!inside(root, absolute) || same(root, absolute)) fail('The reviewed path escapes the task directory.');
   let current = root;

@@ -93,7 +93,7 @@ export function installTaskHooks({ cwd = process.cwd(), currentOnly = false } = 
     const end = '<!-- /arkdock-task-completion -->';
     let text = existsSync(instructions) ? readFileSync(instructions, 'utf8') : '# ArkDock local task workflow\n';
     const lifecycle = `& ${psLiteral(metadata.node)} ${psLiteral(metadata.runtime)}`;
-    const block = `${start}\n任务收尾已授权：实现任务须在干净的独立工作树中开始，先在任务工作树内执行生命周期工具 begin 登记当前 CODEX_THREAD_ID；仅在任务实际完成、代码已审阅后执行 ready --complete --message "提交说明" 标记。PowerShell 生命周期工具为 \`${lifecycle}\`。Stop hook 会提交当前任务分支、仅 fast-forward 合入 dev，并归档后注销任务 worktree。状态问答、暂停和未完成不能标记 ready。dev 有他人修改、发生冲突或进程占用时保留现场，不强删、不推送。测试遵守用户本轮约定，NOT_RUN 不能当 PASS。新 hook 定义需要用户在 /hooks 信任一次。\n${end}`;
+    const block = `${start}\n协作流程：Worker Agent → Integration Agent → 用户验收，详见 docs/development/agent-workflow.md。实现任务从最新 dev 创建干净独立工作树，先执行生命周期工具 begin 登记当前 CODEX_THREAD_ID；Worker 只开发、验证和提交本任务，报告分支、完整 SHA、范围及测试结果，不直接修改 dev/main，不执行 ready/finish。PowerShell 生命周期工具为 \`${lifecycle}\`。ready --complete --message "提交说明" 与 finish/Stop 自动快进仅由 Integration Agent 在任务实际完成、用户明确授权、代码已审阅且完整集成验证通过后使用；工具会提交、合入 dev 并归档，不得替代用户验收后的清理阶段。main 仅用于稳定发布；长期仅保留原始 ArkDock 目录检出 dev。状态问答、暂停、未完成或等待验收不能标记 ready。dev 有他人修改、冲突、未保存成果或进程占用时保留现场，不强删、不推送。测试遵守用户本轮约定，NOT_RUN 不能当 PASS。新 hook 定义需要用户在 /hooks 信任一次。\n${end}`;
     const offset = text.indexOf(start), tail = text.indexOf(end);
     if (offset >= 0 && tail >= offset) text = `${text.slice(0, offset)}${block}${text.slice(tail + end.length)}`;
     else text = `${text.trimEnd()}\n\n${block}\n`;

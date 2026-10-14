@@ -30,7 +30,7 @@ If the SDK is missing or its profile is unknown, the preview must stay blocked w
 
 Check that inspection mode does not trigger the preview application's normal click handler, that component selection is associated with the displayed frame, and that old selection state cannot cross a project or session change.
 
-Sending to an active Agent conversation is currently unsupported. Do not count copied text, local files, a new conversation, or read-only MCP output as a successful send. A future send implementation must provide a verified current-session target and a matching submission receipt.
+Agent delivery requires an explicitly paired transport, verified current-session scope, and a matching submission receipt. Check workspace/session changes, pairing cancellation or replacement, stale grants, ambiguous timeouts, and receipt correlation; none may silently redirect or retry a send. Copying text, filling an input, local files, a new conversation, and read-only MCP output are separate outcomes and do not prove submission to the active conversation. An unavailable host interface must remain unavailable; see [Agent delivery and setup](../agent-delivery/README.md) for transport-specific limits.
 
 ## Reporting
 

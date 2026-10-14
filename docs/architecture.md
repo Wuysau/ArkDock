@@ -34,3 +34,19 @@ Inspector selection uses backend-observed frame and component metadata. Source l
 Preview output must come from a real HarmonyOS Previewer runtime. The frontend frame store supports bounded binary frame transport and rejects stale frame identities. Browser-only UI development reports that the native bridge is unavailable and does not manufacture ArkUI pixels.
 
 Toolchain identity is separate from project trust. Missing or unverified SDK/protocol support blocks native execution with a reason. ArkDock does not redistribute the HarmonyOS SDK or third-party tool binaries. See [Compatibility](compatibility.md) for current product claims and [the frontend contract](native-preview/frontend-contract.md) for the binary frame and IPC interface.
+
+## Docking surfaces and motion
+
+显示模式由同一 WindowController 管理，与工程/构建正交：expanded、collapsing、orb、expanding、hidden。
+Orb 是轻量 Win32 独立顶层窗口，不缩小 main WebView，不创建第二套预览/监听；native 菜单与
+tray 仅把有限的显示动作排入 actor，不拥有 Tauri IPC 权限。隐藏有真实 tray 注册与显示表面确认门槛。
+主动收起与目标最小化的 hidden_by_us 分开；挂起 JointGroup，按当前几何所有权安全释放目标占用。
+展开重新核验目标生命周期，并尊重收起期间用户的新布局；运行期 HWND/PID 不持久化。
+
+协议模型版本 2 新增显示状态、motion 偏好、原生 DockConfirmation。水波用 bindingId 去重；
+不同目标/解除/减少动画取消装饰。粒子只由实际原生候选激活，单个 premultiplied BGRA layered
+辅助窗口经独立线程绘制；最新位置邮箱与有界粒子数控制背压。无候选停止帧调度，WinEventHook 只排队。
+get_motion_metrics 通过独立低频受控请求读取累计计数，不随每帧更新 AppSnapshot。
+原生绘制的几何拒绝与真正 API 绘制失败分别处理：拒绝暂不绘制，下一有效采样恢复；
+真正失败才启用静态 Outline 降级。临时粒子置顶有生产者租约，取消/减少动画/隐藏撤销；
+Orb 的置顶仅在入口可见时存在，main 保持普通 Z 序。延迟取消补偿优先于旧 JointGroup 的跟随与解绑恢复。
