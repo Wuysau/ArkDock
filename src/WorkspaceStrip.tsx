@@ -21,7 +21,7 @@ export function WorkspaceStrip({ snapshot, busy, cancelling, openProject, openCa
   const failed = Boolean(snapshot?.build.error || snapshot?.phase === 'crashed');
   const unavailable = Boolean(project && (!snapshot?.trusted || !snapshot.backend.available || project.environment !== 'windowsLocal'));
   const baseStatus = snapshot?.build.error ? '当前构建失败' : snapshot?.phase === 'crashed' ? '后端已退出'
-    : snapshot?.phase === 'sdkMissing' ? 'SDK 不可用' : snapshot?.phase === 'protocolBlocked' ? '原生协议未验证'
+    : snapshot?.phase === 'sdkMissing' ? 'SDK 不可用' : snapshot?.phase === 'protocolBlocked' ? '已安装的 SDK 暂不受支持，请指定兼容的工具链'
       : project?.environment !== undefined && project.environment !== 'windowsLocal' ? '工程环境不支持'
         : project && !snapshot?.backend.available ? '工具链不可用' : snapshot?.phase === 'building' ? '正在构建' : ui.workspaceLabel;
   const status = project && !snapshot?.trusted && ui.workspaceLabel !== baseStatus ? `${baseStatus} · 等待信任` : baseStatus;
