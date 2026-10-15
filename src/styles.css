@@ -103,6 +103,9 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .workspace-details-content .path { font-size: 11px; max-height: 54px; overflow: auto; margin-block: 5px; }
 .workspace-details-content .state-strip { margin: 6px 0; animation: none; }
 .workspace-problem { margin: 6px 0; font-size: 11px; color: var(--warning); overflow-wrap: anywhere; }
+.context-projects { max-height: 220px; overflow-y: auto; }
+.context-project { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid var(--line); }
+.context-project > button { justify-self: start; }
 .workspace-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .workspace-detail-actions button { min-height: 28px; padding: 4px 7px; font-size: 11px; }
 .state-strip { margin: 0 12px 10px; min-height: 28px; display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 11px; padding: 4px 8px; border-left: 2px solid var(--line); animation: state-in var(--motion-state) var(--ease); }

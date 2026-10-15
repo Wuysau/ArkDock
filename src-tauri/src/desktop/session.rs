@@ -107,6 +107,9 @@ impl Engine {
         self.suspend_execution();
         self.snapshot.project = None;
         self.associated_manually = false;
+        self.context_binding = None;
+        self.context_confirmation_required = false;
+        self.directory_candidates.clear();
     }
 
     /// Re-evaluates trust and toolchain availability before any build can start.

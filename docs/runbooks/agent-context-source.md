@@ -1,72 +1,121 @@
-# Agent 会话源（MCP）接入指南
+# Agent 上下文源（MCP）接入指南
 
-ArkDock 的“会话源”是一个本地 stdio MCP 服务器：你的 Agent 工具（Claude Code、Codex CLI 或任何
-支持 stdio MCP 的客户端）启动对话时自动把**当前对话的工作区**登记给 ArkDock。贴附后，若该登记能
-唯一、且与目标窗口进程血缘绑定，ArkDock 会自动关联工程并进入既有的信任/构建门禁；否则以“建议候
-选”形式出现在工程列表，由你一键确认关联。
+ArkDock 提供统一的本机上下文登记接口，`tools/agent/arkdock-context.mjs` 是它的 stdio MCP 适配器。
+普通 MCP 客户端可通过工具显式登记原始工程和本轮实际执行目录，在 ArkDock 中确认后关联。
+**普通 MCP 登记始终是建议候选**：配对、进程血缘、roots、启动目录均不能证明窗口当前显示哪个对话，
+也不授予工程执行信任。本实现没有已验证的“可见对话激活”适配器，不承诺自动跟随聊天切换。
 
-本能力是**可选增强**：不配置时，贴附、目录选择与既有 Codex UIA 发现完全不受影响。
-本指南只描述用户操作；实现与安全边界见文末。
+这是可选能力；不配置时，现有贴附、手动选择目录和 Codex UIA 发现保持原有行为。
 
-## 第一步：在 ArkDock 生成本机配对凭证
+## 1. 生成配对文件
 
-1. 打开 ArkDock，展开工程卡（工程条右上的展开按钮）。
-2. 点击 **配对会话源**，选择凭证保存位置（默认文件名 `arkdock-context-pairing.json`）。
-   - 该文件含本机机密：只留在本机、只交给你的 Agent 工具配置引用；不要提交进任何仓库、不要外发。
-   - 重复生成即轮换：旧凭证在其下一次通信时失效，全部已登记会话随之清除。
-3. 生成后，工程卡会显示 `Agent 会话源已配对 · N 个活动登记`。
+1. 在 ArkDock 展开工程条，点击 **配对会话源**，选择本机凭证文件保存位置。
+2. 文件含配对机密，仅供本机 MCP 配置引用；不要提交仓库、外发或把内容写入命令行参数。
+3. 配对后，工程条显示配对状态及活动登记。重新生成将轮换凭证并清除旧登记；旧 MCP 进程需要重启，重新读取新文件。
+4. **撤销会话源**会撤销整个配对和所有登记。仅断开当前 MCP 登记时，调用下文的 revoke 工具。
 
-撤销：点击 **撤销会话源**。已连接的 Agent 在下一次帧到达时被拒绝，需要重新配对。
+配对状态会持久化，ArkDock 正常重启后恢复，原 MCP 配置仍可使用。重连会产生新的登记身份，
+因此旧的工程确认不会自动恢复，需要再次检查并选择。
 
-## 第二步：把会话源加入 Agent 工具的 MCP 配置
+## 2. 生成并加入宿主配置
 
-用仓库内脚本生成与你的本机路径匹配的配置示例（只生成文件，不安装、不改全局配置）：
+需要 Node ≥24.18。下列命令仅生成示例，不安装 MCP、不修改全局配置，也不启动宿主：
 
 ```powershell
-node tools/agent/arkdock-context.mjs --write-config 'D:\绝对路径\arkdock-mcp-config' --pairing-file 'C:\绝对路径\arkdock-context-pairing.json'
+node tools/agent/arkdock-context.mjs --write-config 'D:\example\arkdock-mcp-config' --pairing-file 'C:\example\arkdock-context-pairing.json'
 ```
 
-输出目录必须不存在（防覆盖）。生成内容：
+输出目录必须尚不存在。生成器会写出本机 Node 与脚本的真实绝对路径，避免宿主从其他启动目录找不到脚本：
 
-- `README.md` —— 针对本机的逐步说明；
-- `claude-mcp-json.example.json` —— Claude Code 项目 `.mcp.json` 片段；
-- `codex-config.example.toml` —— Codex CLI `~/.codex/config.toml` 的 `[mcp_servers.arkdock-context]` 片段；
-- 通用命令行（任何支持 stdio MCP 的客户端）。
+- `claude-mcp-json.example.json`：`mcpServers` 形式的配置片段。
+- `codex-config.example.toml`：`[mcp_servers.arkdock-context]` 配置片段。
+- `README.md`：command/args 使用方式和 PowerShell 手动启动命令。
 
-按示例把服务器加进你要用的 Agent 工具后，**新开一个对话**即可生效（MCP 服务器随会话启动）。
+把相应片段合并到宿主支持的 MCP 配置位置，按该宿主说明重新加载或重启 MCP 连接。
+不要假设 MCP 进程一定按聊天创建；有些宿主在整个应用或工作区内复用一条连接。
+脚本移动或任务 worktree 归档前，应先更新配置中的脚本绝对路径。
 
-## 第三步：贴附验收
+## 3. 在 Agent 中连接当前工程
 
-1. 在配置了会话源的 Agent 工具里打开（或新建）一个工程对话。
-2. 把 ArkDock 拖到该 Agent 工具窗口（或承载它的终端窗口）右侧贴附。
-3. 预期行为：
-   - 会话进程是贴附目标窗口进程树内、**该目标唯一**、宿主以 roots 声明单个工作区 →
-     ArkDock 自动关联该工程；已信任的工程自动开始构建，未信任的显示路径与“信任并构建”入口。
-   - 同一目标出现多个会话登记 / 多个工作区声明 / 宿主级连接（MCP 客户端进程即窗口进程，
-     例如部分桌面应用）→ 不自动关联；工程列表出现“建议候选”，点击确认即完成关联。
-   - 会话退出或心跳停止 → 登记在数秒内失效，关联依据同步消失；下一次贴附回到上述判定。
+让 Agent 调用 `arkdock_connect_current_project`，明确传入两个路径。例如：
 
-## 会话源上报什么
+```json
+{
+  "originalProject": "D:\\repos\\demo",
+  "executionDirectory": "D:\\repos\\demo\\worktrees\\feature-a",
+  "environment": "windowsLocal"
+}
+```
 
-- 宿主支持 MCP `roots/list` 时：上报宿主声明的工作区根目录（这是“宿主自己声明”的上下文）。
-- 宿主不支持 roots 时：仅上报 MCP 服务器进程的启动目录作为**弱提示**——ArkDock 永远不会据此自动关联。
-- 除此之外不读取、不上报任何对话内容；脚本不提供任何执行类工具。
+`originalProject` 是用户原始选择的工程；`executionDirectory` 是这一轮实际编辑、执行或构建的目录。
+两者可以不同；ArkDock 只从实际执行目录发现和选择待构建工程，不把修改中的 worktree 偷换成原始仓库。
+也允许原始工程是 Windows 路径、实际目录是 WSL 路径；`environment` 描述实际执行目录。
+WSL/远程身份会保留，目前不支持其原生预览，不能通过改写路径伪装成本地工程。
 
-## 已知边界（如实声明）
+可选 `hostSession` 只填写宿主真实提供的会话标识；未知时省略，不编造。它仅供显示和区分声明，
+不能提升证据等级，也不是调用其他工具的前置条件。
 
-- “自动跟随对话切换”仅在宿主提供可靠按会话隔离时成立；普通 MCP 没有对话激活事件，
-  ArkDock 界面会明确显示当前实际绑定的会话与工程，不假装在跟随。
-- Codex Desktop 等把 MCP 连接建在应用级的宿主：本源只能给出建议候选；按对话识别需另行走
-  受限插件路径（`plugins/arkdock-session-bridge`，当前独立验收）。
-- WSL/远程根目录保留其环境身份，当前不支持其原生预览，也不会被转成本地工程。
+| 工具 | 行为 |
+| --- | --- |
+| `arkdock_connect_current_project` | 登记或替换本连接的完整工程声明；不依赖 roots 能力 |
+| `arkdock_context_update` | 切换工程或 worktree 时完整替换声明；省略 `hostSession` 会清除旧值 |
+| `arkdock_context_renew` | 手动续期；通常由适配器每 5 秒自动完成 |
+| `arkdock_context_revoke` | 撤销本连接登记、停止自动重连；再次 connect 才恢复 |
+| `arkdock_context_status` | 只读查询传输、认证回执、声明来源及已接受上下文 |
 
-## 实现与安全边界（摘要）
+工具成功需先校验服务端共享密钥证明，再收到 ArkDock 的匹配回执。`connected` 只表示管道已连通；
+`serverVerified` 表示对端已证明持有配对密钥，`authenticated` 和 `registered` 仅在随后后端接受登记后成立。
+`pending` 表示仍在等证明或回执，`acceptedContext` 是最近已接受的快照。
+后端拒绝、断连或超时不能当作登记成功。`requiresConfirmation: true` 和
+`visibleConversationVerified: false` 表明还需要 ArkDock 中的明确选择。
 
-- 传输：本机命名管道 `\\.\pipe\arkdock-context`，JSON 行，单帧 ≤16 KiB，至多 8 个管道实例（1 个等待接入 + 7 个活动连接），≤32 登记。
-- 身份：管道客户端 PID 由 OS 提供（`GetNamedPipeClientProcessId`）+ 进程启动时间生命周期校验 +
-  配对机密（256-bit，常数时间比较，随凭证文件分发）；三者齐备才可能成为强证据。
-- 生命周期：5 秒心跳、15 秒登记 TTL、断连/撤销/超时即清除；重放与重复登记被拒绝。
-- 发现只读：登记只提供候选证据；自动关联由既有 `automatic_candidate` 唯一性门禁决定，
-  构建仍要求工程级执行信任。会话源不授予发送消息、读取 Inspector 图像或执行命令的能力。
-- 脚本与协议版本：`tools/agent/arkdock-context.mjs`（Node ≥ 24.18，无第三方依赖）；
-  MCP stdio 为换行分隔 JSON-RPC 2.0，握手回显客户端 protocolVersion（兼容 2024-11-05 及之后行为）。
+## 4. 在 ArkDock 中确认并验收
+
+1. 把 ArkDock 贴附到对应宿主窗口，展开工程条。
+2. 查看上下文登记卡中的会话、**原始工程**和**实际目录**，确认是当前任务后点击 **连接此工程**。
+3. 实际目录存在多个可构建模块时，从普通候选面板继续选择模块。
+4. 构建仍经过既有工程信任门禁；未信任工程需要明确选择“信任并构建”。登记不授予执行权限。
+5. 让 Agent 调用 update 切换实际目录，确认旧上下文绑定被清除，重新检查并选择新工程。
+6. 调用 revoke、结束 MCP 进程或断开管道，确认绑定被清除。即使工程处于未信任或停止状态，也不能继续保留失效的上下文绑定。
+
+未显式上报实际目录时，卡片会单独显示“宿主建议目录”或“启动目录提示”，不将其称为当前对话的实际目录。
+核对后可点击“确认使用此建议”；从普通候选列表选择同一上下文工程也会绑定对应登记，断线时同样解除。
+多个登记指向同一工程时，应从登记卡确认具体会话；多个 roots 可从普通候选中选择具体工程。
+通过“手动选择”或独立验证目录后选择模块属于独立手动关联，不依赖 MCP 登记继续存活。
+仅查看或验证其他目录不会解除正在使用的上下文绑定，失败的目录检查也不会改变现有预览。
+
+相同声明的重复更新和兼容 roots 刷新不会无故使明确选择失效。实质声明变化、断连重连或撤销会改变登记身份，
+旧选择不能直接套用到新登记。多个会话/宿主复用连接不会因此获得可见会话证明；应用级共享 MCP 连接
+只有一份当前声明，后一次工具调用会替换它，应由用户在 ArkDock 中重新确认。
+
+## roots 的兼容行为
+
+宿主声明 roots 能力时，服务器在收到 `notifications/initialized` 后才请求 `roots/list`。
+roots 仅是宿主提供的文件系统边界提示，不是“当前对话”证据；无 roots 的客户端仍可使用全部显式工具。
+启动目录也是弱提示，不用于猜测原始工程或实际执行目录。
+
+收到 `notifications/roots/list_changed` 后会先清空旧 roots，再读取新列表；失败、超时、非法 URI 或超限
+不会保留旧值。断线重连和定期续期也会刷新 roots；晚到的旧响应不能复活已失效快照。
+MCP roots 接受 `file://` URI；POSIX/WSL 路径保持身份，不能转换成本地盘符。
+其他远程 URI 可经显式工具字段提交，不能冒充协议 roots。
+
+## 实现边界与验证范围
+
+- 本机管道默认 `\\.\pipe\arkdock-context`，JSON 行；凭证只从文件读取并经本机管道发送。
+- OS 提供客户端 PID 与进程启动时间；连接拥有自己的登记，不能撤销另一连接的登记。
+- 发送凭证或工程路径之前先发送随机 32 字节挑战；对端必须返回匹配挑战的 HMAC-SHA256 证明。
+  客户端使用配对密钥及独立域标识计算期望值并作常数时间比较。证明无效、缺失、超限或 3 秒内未返回就断开，
+  因此仅抢占固定管道名而不知道配对密钥的进程不能收取凭证或工程路径。该证明不提升工程声明的证据等级，
+  也不隔离已能读取同用户凭证文件的恶意进程。
+- 帧上限 16 KiB，roots 最多 8 个，路径最多 4096 UTF-8 字节；stdio 单行上限 64 KiB。
+- 每帧携带递增序号并收到匹配 ACK；重放被拒绝。心跳间隔 5 秒，登记 TTL 为 15 秒。
+- EOF、断连、撤销、凭证轮换与超时都会清除登记；适配器可重连，但新登记需要重新确认。
+- MCP 支持明确的版本集合：2024-11-05、2025-03-26、2025-06-18、2025-11-25；未知版本协商到最新支持版本，不盲目回显。
+- 不读对话内容，不提供构建、执行命令、发送消息或 Inspector 图像工具。
+
+便携测试用独立子进程、模拟宿主与临时管道验证握手、服务端证明及伪造端点不泄漏凭证/路径、工具、回执、配置可执行性、目录区分、失效和字节边界。
+这些测试不能代替 Claude Code、Codex CLI、桌面宿主及真实贴附/构建验收；没有实际执行的宿主或 GUI 验收必须标为 `NOT_RUN`。
+
+协议依据：[MCP 生命周期与版本协商](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)、
+[roots 语义与变更通知](https://modelcontextprotocol.io/specification/2025-11-25/client/roots)、
+[stdio 传输](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)。

@@ -25,6 +25,7 @@ use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
 mod agent_delivery;
 mod association;
+mod context_binding;
 mod context_pairing;
 mod diagnostics;
 mod frame_delivery;
@@ -46,6 +47,7 @@ enum Action {
     BeginDrag,
     Rediscover,
     Select(String),
+    ContextSelect(String),
     Directory(PathBuf),
     InspectDirectory(PathBuf),
     Detach,
@@ -67,6 +69,14 @@ enum Action {
         generation: u64,
         point: NativePoint,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssociationSource {
+    Automatic,
+    Candidate,
+    Directory,
+    Context,
 }
 enum Message {
     Metrics(RequestScope, mpsc::Sender<Result<MotionMetrics, String>>),
@@ -135,6 +145,9 @@ struct Engine {
     window_pending: Arc<Mutex<Option<WindowUpdate>>>,
     watch_pending: Arc<Mutex<PendingWatch>>,
     context: Arc<ContextHub>,
+    context_binding: Option<crate::context::ContextEntry>,
+    context_confirmation_required: bool,
+    directory_candidates: Vec<String>,
     serial: u64,
     detaching: bool,
     frames: Arc<Mutex<FrameDelivery>>,
@@ -299,13 +312,7 @@ impl Engine {
         self.sync_control_lifecycle();
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
-        let context_events = self.context.last_event();
-        self.snapshot.context_source = Some(ContextSourceStatus {
-            paired: self.context.paired(),
-            active_sessions: self.context.live(now()).len() as u32,
-            last_event_at: context_events.as_ref().map(|(_, at)| *at).unwrap_or(0),
-            reason: context_events.map(|(reason, _)| reason),
-        });
+        self.snapshot.context_source = Some(self.context_status());
         // Candidate categories are backend truth: they are recomputed for the snapshot
         // that is emitted, never derived again by the frontend.
         self.grade_candidates();
@@ -424,38 +431,38 @@ impl Engine {
             let scope = controller.discovery_scope(&target.id)?;
             let tabs = match mode {
                 DiscoveryMode::Explicit => {
-                    WindowsTabResolver::collect(scope.handle, &target, observed)
+                    Some(WindowsTabResolver::collect(scope.handle, &target, observed))
                 }
                 DiscoveryMode::Lightweight => {
-                    let Some(tabs) =
-                        WindowsTabResolver::collect_lightweight(scope.handle, &target, observed)
-                    else {
-                        return Ok(());
-                    };
-                    tabs
+                    WindowsTabResolver::collect_lightweight(scope.handle, &target, observed)
                 }
             };
             // HWND equality is insufficient: verify the controller's current lifecycle again.
             controller.discovery_scope(&target.id)?;
             let context = ContextSourceResolver::new(self.context.clone());
-            let candidates = resolve_with_sources(
-                &target,
-                observed,
-                &[
-                    &tabs,
-                    &context,
-                    &RegistrationRegistry::default(),
-                    &TitleResolver,
-                ],
-            );
+            let registry = RegistrationRegistry::default();
+            let retained_tabs = association::UnsampledTabEvidence(&self.snapshot.candidates);
+            let mut sources: Vec<&dyn crate::discovery::WorkspaceResolver> =
+                vec![&context, &registry, &TitleResolver];
+            if let Some(tabs) = tabs.as_ref() {
+                sources.push(tabs);
+            } else {
+                sources.push(&retained_tabs);
+            }
+            let candidates = resolve_with_sources(&target, observed, &sources);
             match candidates {
-                Ok(candidates) => (candidates, tabs.observation(), None),
+                Ok(candidates) => (
+                    candidates,
+                    tabs.as_ref().and_then(WindowsTabResolver::observation),
+                    None,
+                ),
                 Err(error) => (
                     Vec::new(),
                     Some(WorkspaceObservation {
                         status: WorkspaceStatus::Unknown,
                         project_name: tabs
-                            .observation()
+                            .as_ref()
+                            .and_then(WindowsTabResolver::observation)
                             .and_then(|observation| observation.project_name),
                         active_path: None,
                         reason: format!(
@@ -473,8 +480,11 @@ impl Engine {
             Err(error) => (Vec::new(), None, Some(error)),
         };
         self.current_target()?;
-        let current_observation =
-            workspace_observation(&candidates, &target, observed, observation.clone());
+        let current_observation = if self.context_binding.is_some() {
+            workspace_observation(&[], &target, observed, None)
+        } else {
+            workspace_observation(&candidates, &target, observed, observation.clone())
+        };
         if matches!(mode, DiscoveryMode::Lightweight) {
             // A poll carries the user's manual choice and historical suggestions forward
             // without re-inspecting every old root; neither becomes automatically eligible.
@@ -571,6 +581,16 @@ impl Engine {
     /// side effects it names, in order, so a release always closes the old session before
     /// a replacement can be associated.
     fn reconcile_workspace(&mut self, target: &TargetInfo, observed: u64) -> Result<(), String> {
+        // An explicitly selected context is pinned to its registration. Background
+        // sources cannot replace it; its own invalidation is handled before polling.
+        if self.context_binding.is_some() || self.context_confirmation_required {
+            if self.snapshot.project.is_some() {
+                self.refresh_binding_evidence();
+            } else {
+                self.snapshot.phase = Phase::SelectProject;
+            }
+            return Ok(());
+        }
         let decision = association::decide(
             &self.snapshot.candidates,
             target,
@@ -613,7 +633,7 @@ impl Engine {
             .ok_or("CANDIDATE_DISAPPEARED")?
             .project
             .clone();
-        self.associate(project, false)
+        self.associate(project, AssociationSource::Automatic)
     }
     /// Rebinds only the evidence of an association that is still supported by current
     /// host evidence.
@@ -659,14 +679,17 @@ impl Engine {
         }
         #[cfg(windows)]
         {
-            // The resolver returns early for other hosts and never performs generic tab scanning
-            // here. Codex uses a bounded, noninteractive metadata-only scan every five seconds.
+            // Context refresh is independent of UIA support. Generic tab scans are
+            // still explicit-only; Codex has a bounded metadata-only periodic scan.
             let previous = self.snapshot.workspace_observation.clone();
+            let previous_candidates = self.snapshot.candidates.clone();
             if let Err(error) = self.discover(DiscoveryMode::Lightweight) {
                 self.discovery_failed(&error);
                 self.diagnostic("DISCOVERY_FAILED", error, CheckStatus::Blocked);
             }
-            if self.snapshot.workspace_observation != previous {
+            if self.snapshot.workspace_observation != previous
+                || self.snapshot.candidates != previous_candidates
+            {
                 self.publish();
             }
         }
@@ -678,14 +701,24 @@ impl Engine {
     fn associate(
         &mut self,
         mut project: ProjectRef,
-        explicitly_selected: bool,
+        source: AssociationSource,
     ) -> Result<(), String> {
         let target = self.current_target()?;
+        self.require_live_context_binding()?;
         if project.environment != Environment::WindowsLocal {
             return Err("UNSUPPORTED_ENVIRONMENT: WSL/remote preview is not implemented".into());
         }
+        let explicitly_selected = source != AssociationSource::Automatic;
+        let selected_context = context_binding::binding_for_selection(
+            source,
+            self.context_binding.as_ref(),
+            &self.snapshot.candidates,
+            &project,
+            &self.context.live(now()),
+        )?;
         let observed = now();
         if explicitly_selected
+            && selected_context.is_none()
             && association::conflicts_with_active_workspace(
                 &project,
                 self.snapshot.workspace_observation.as_ref(),
@@ -740,6 +773,7 @@ impl Engine {
             &project.id,
         );
         self.close_session();
+        self.context_binding = selected_context;
         self.associated_manually = manual;
         self.serial += 1;
         let session = format!("{}-{}-{}", std::process::id(), now(), self.serial);
@@ -790,6 +824,7 @@ impl Engine {
         &mut self,
         path: PathBuf,
         select_unique: bool,
+        source: AssociationSource,
     ) -> Result<(), String> {
         let target = self.current_target()?;
         let observed = now();
@@ -814,6 +849,10 @@ impl Engine {
         self.current_target()?;
         let unique =
             (inspected.len() == 1 && inspected[0].valid).then(|| inspected[0].project.clone());
+        let directory_candidates = inspected
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect();
         {
             let additional = inspected
                 .iter()
@@ -849,9 +888,12 @@ impl Engine {
                 }
             }
         }
+        if source == AssociationSource::Directory {
+            self.directory_candidates = directory_candidates;
+        }
         if select_unique {
             if let Some(project) = unique {
-                self.associate(project, true)?;
+                self.associate(project, source)?;
             } else if self.snapshot.project.is_none() {
                 self.snapshot.phase = Phase::SelectProject;
             }
@@ -861,6 +903,7 @@ impl Engine {
         Ok(())
     }
     fn handle(&mut self, scope: RequestScope, action: Action) -> Result<AppSnapshot, String> {
+        self.require_live_context_binding()?;
         validate_scope(&self.snapshot, &scope)?;
         match action {
             Action::Display(mode, request_id) => {
@@ -903,6 +946,11 @@ impl Engine {
             }
             Action::Select(id) => {
                 self.current_target()?;
+                let source = if self.directory_candidates.contains(&id) {
+                    AssociationSource::Directory
+                } else {
+                    AssociationSource::Candidate
+                };
                 let project = self
                     .snapshot
                     .candidates
@@ -911,13 +959,14 @@ impl Engine {
                     .ok_or("INVALID_CANDIDATE")?
                     .project
                     .clone();
-                self.associate(project, true)?;
+                self.associate(project, source)?;
             }
+            Action::ContextSelect(id) => self.select_context_project(&id)?,
             Action::Directory(path) => {
-                self.inspect_manual_directory(path, true)?;
+                self.inspect_manual_directory(path, true, AssociationSource::Directory)?;
             }
             Action::InspectDirectory(path) => {
-                self.inspect_manual_directory(path, false)?;
+                self.inspect_manual_directory(path, false, AssociationSource::Directory)?;
             }
             Action::Detach => {
                 if let Some(controller) = &self.controller {
@@ -949,7 +998,7 @@ impl Engine {
                     self.suspend_execution();
                     self.gate_preview();
                 } else {
-                    self.associate(project, false)?;
+                    self.associate(project, AssociationSource::Automatic)?;
                 }
             }
             Action::Sdk(path) => {
@@ -962,7 +1011,7 @@ impl Engine {
                     NativePreviewer::new(self.store.as_ref().and_then(WorkspaceStore::sdk_path));
                 self.snapshot.backend = self.backend.probe();
                 if let Some(project) = self.snapshot.project.clone() {
-                    self.associate(project, false)?;
+                    self.associate(project, AssociationSource::Automatic)?;
                 }
             }
             Action::Refresh => {
@@ -970,7 +1019,7 @@ impl Engine {
                 self.current_target()?;
                 if self.snapshot.phase == Phase::Stopped {
                     let project = self.snapshot.project.clone().ok_or("PROJECT_REQUIRED")?;
-                    self.associate(project, false)?;
+                    self.associate(project, AssociationSource::Automatic)?;
                 }
                 self.gate_preview();
                 if !self.snapshot.trusted {
@@ -1066,6 +1115,7 @@ impl Engine {
         Ok(self.snapshot.clone())
     }
     fn drain_events(&mut self) {
+        self.sync_context_binding();
         let window = self.window_pending.lock().ok().and_then(|mut p| p.take());
         if let Some(window) = window {
             self.apply_window(window);
@@ -1090,6 +1140,7 @@ impl Engine {
         }
     }
     fn tick(&mut self) {
+        self.sync_context_binding();
         self.probe_workspace();
         self.refresh_candidate_semantics();
         if !self.associated_manually && self.snapshot.project.is_some() {
@@ -1731,6 +1782,7 @@ pub fn run() {
             agent_delivery::agent_registration_bind,
             agent_delivery::agent_assisted_inspect,
             agent_delivery::agent_assisted_fill,
+            context_binding::context_select_project,
             context_pairing::context_pair_create,
             context_pairing::context_pair_revoke,
         ])
@@ -1765,9 +1817,15 @@ pub fn run() {
             let handle = app.handle().clone();
             let window_pending = Arc::new(Mutex::new(None));
             let context_hub = Arc::new(crate::context::ContextHub::new());
+            let context_pairing = Arc::new(crate::context_pairing_store::ContextPairingStore::new(app.path().app_data_dir()?));
+            // A failed restore leaves the optional context channel unpaired. Never
+            // load a user-selected export or log its secret during desktop startup.
+            if context_pairing.restore(&context_hub).is_err() {
+                eprintln!("ArkDock: context pairing could not be restored; pair again from the project panel.");
+            }
             #[cfg(windows)]
             crate::context_pipe::spawn(context_hub.clone());
-            app.manage(context_pairing::ContextHubHandle(context_hub.clone()));
+            app.manage(context_pairing::ContextHubHandle::new(context_hub.clone(), context_pairing));
             let main = app
                 .get_webview_window("main")
                 .ok_or("MAIN_WINDOW_MISSING")?;
@@ -1792,6 +1850,9 @@ pub fn run() {
                     window_pending: window_pending.clone(),
                     watch_pending: Arc::new(Mutex::new(PendingWatch::default())),
                     context: context_hub.clone(),
+                    context_binding: None,
+                    context_confirmation_required: false,
+                    directory_candidates: Vec::new(),
                     serial: 0,
                     detaching: false,
                     frames,
@@ -1880,7 +1941,10 @@ pub fn run() {
                         Ok(Message::Data(scope, action, reply)) => {
                             engine.dispatch_data(scope, action, reply)
                         }
-                        Ok(Message::Publish) => engine.publish(),
+                        Ok(Message::Publish) => {
+                            engine.sync_context_binding();
+                            engine.publish();
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     engine.drain_events();

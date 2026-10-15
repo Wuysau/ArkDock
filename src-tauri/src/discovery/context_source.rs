@@ -6,26 +6,22 @@
 //! - the registration client is alive with the recorded start time (no PID reuse);
 //! - the client process is an ancestor-bound descendant of the docked target window's
 //!   process (bounded walk), so the registration belongs to *this* target;
-//! - the workspace path is a host `roots` declaration. A spawn-time working directory
-//!   is only a weak hint and can never prove the active workspace on its own.
+//! - every path remains a source declaration, including host `roots` declarations.
 //!
-//! Strength is decided here, never taken from the client: `verifiable` reflects the
-//! OS-proven connection identity plus the host root declaration; `active_scope`
-//! additionally requires the registration to be conversation-scoped. An MCP client
-//! that *is* the target window's process (an app-level connection serving many
-//! conversations) never proves which conversation is visible, so it stays a
-//! suggestion. Multiple concurrent sessions or roots fail closed: the existing
-//! uniqueness gates in `automatic_candidate` then require an explicit choice.
+//! Neither an app-level MCP connection nor a descendant process proves which
+//! conversation is visible. All registrations remain weak suggestions until the
+//! user explicitly selects a backend-issued registration in the association flow.
 
 use std::sync::Arc;
 
 use crate::context::ContextHub;
-use crate::ipc::model::{Environment, Evidence, EvidenceSource, TargetInfo};
+use crate::ipc::model::{Evidence, EvidenceSource, TargetInfo};
 
 use super::resolver::WorkspaceResolver;
-use super::{path_environment, MAX_EVIDENCE_TTL_MS};
+use super::MAX_EVIDENCE_TTL_MS;
 
 /// Evidence lives exactly as long as the heartbeat that supports it.
+#[cfg(test)]
 pub const CONTEXT_EVIDENCE_TTL_MS: u64 = crate::context::HEARTBEAT_TTL_MS;
 
 /// Bounded ancestry walk; deeper chains are rejected instead of guessed.
@@ -45,6 +41,9 @@ impl WorkspaceResolver for ContextSourceResolver {
     fn evidence(&self, target: &TargetInfo, now: u64) -> Result<Vec<Evidence>, String> {
         #[cfg(windows)]
         {
+            if !client_alive(&target.process) {
+                return Ok(Vec::new());
+            }
             let entries = self.hub.live(now);
             if entries.is_empty() {
                 return Ok(Vec::new());
@@ -123,50 +122,27 @@ pub fn evidence_for_target(
         if !*lineage {
             continue;
         }
-        // Conversation scope requires an own agent process inside this target's tree.
-        // A registration whose client *is* the window process is an app-level
-        // connection; it carries real context but cannot prove the visible conversation.
-        let session_scoped = *lineage && entry.client.pid != target.process.pid;
-        if entry.has_root_declaration() {
-            for root in entry.declared_roots() {
-                if root.is_empty() || root.len() > 4096 || root.contains('\0') {
-                    continue;
-                }
-                let environment = path_environment(std::path::Path::new(root));
-                // A declared root is a host workspace claim: OS-proven connection plus
-                // the host's own declaration. Only the conversation-scope gate and the
-                // environment decide whether it can drive automatic association.
-                // One session declaring several workspaces is ambiguous: fail closed to
-                // a suggestion instead of letting either root claim the session.
-                let active_scope = session_scoped
-                    && entry.declared_roots().len() == 1
-                    && matches!(environment, Environment::WindowsLocal);
-                evidence.push(Evidence {
-                    source: EvidenceSource::Registration,
-                    target_id: Some(target.id.clone()),
-                    process: Some(target.process.clone()),
-                    session_id: Some(entry.session.clone()),
-                    observed_at: now,
-                    expires_at: now.saturating_add(CONTEXT_EVIDENCE_TTL_MS),
-                    environment,
-                    raw_path: root.clone(),
-                    verifiable: true,
-                    active_scope,
-                });
+        let paths: Vec<&str> = if let Some(directory) = entry.execution_directory.as_deref() {
+            vec![directory]
+        } else if entry.has_root_declaration() {
+            entry.declared_roots().iter().map(String::as_str).collect()
+        } else {
+            entry.cwd.as_deref().into_iter().collect()
+        };
+        for root in paths {
+            if root.is_empty() || root.len() > 4096 || root.contains('\0') {
+                continue;
             }
-        } else if let Some(cwd) = entry.cwd.as_ref() {
-            // A spawn-time working directory is a hint from the connection, never a
-            // host claim about the current conversation's workspace.
-            let environment = path_environment(std::path::Path::new(cwd));
+            let environment = entry.environment_for_path(root);
             evidence.push(Evidence {
                 source: EvidenceSource::Registration,
                 target_id: Some(target.id.clone()),
                 process: Some(target.process.clone()),
-                session_id: Some(entry.session.clone()),
-                observed_at: now,
-                expires_at: now.saturating_add(CONTEXT_EVIDENCE_TTL_MS),
+                session_id: Some(format!("context:{}", entry.registration_id)),
+                observed_at: entry.observed_at,
+                expires_at: entry.expires_at,
                 environment,
-                raw_path: cwd.clone(),
+                raw_path: root.to_owned(),
                 verifiable: false,
                 active_scope: false,
             });
@@ -186,7 +162,7 @@ mod tests {
     use super::*;
     use crate::context::ContextEntry;
     use crate::discovery::fresh;
-    use crate::ipc::model::{Candidate, ProcessRef, ProjectRef};
+    use crate::ipc::model::{Candidate, Environment, ProcessRef, ProjectRef};
 
     /// Builds a minimal valid candidate around one evidence record so the decision
     /// core (`automatic_candidate`) can be asserted end-to-end without real paths.
@@ -232,9 +208,16 @@ mod tests {
                 pid: client_pid,
                 started_at: "1000".into(),
             },
+            connection_id: 1,
+            sequence: 1,
+            registration_id: "1-1".into(),
             roots,
             cwd: None,
             agent: None,
+            host_session: None,
+            original_project: None,
+            execution_directory: None,
+            environment: None,
             observed_at: 1_000,
             expires_at: 1_000 + CONTEXT_EVIDENCE_TTL_MS,
         }
@@ -268,27 +251,27 @@ mod tests {
     }
 
     #[test]
-    fn a_unique_session_scoped_root_declaration_becomes_strong_evidence() {
+    fn descendant_root_registration_never_proves_the_visible_conversation() {
         let proven = vec![(entry("session-abc-123", 7, vec!["C:\\app".into()]), true)];
         let evidence = evidence_for_target(&proven, &target(3), 1_500);
         assert_eq!(evidence.len(), 1);
-        assert!(evidence[0].verifiable);
-        assert!(evidence[0].active_scope);
+        assert!(!evidence[0].verifiable);
+        assert!(!evidence[0].active_scope);
         assert_eq!(evidence[0].source, EvidenceSource::Registration);
         assert_eq!(evidence[0].target_id.as_deref(), Some("target-1"));
         assert_eq!(evidence[0].process.as_ref().map(|p| p.pid), Some(3));
-        assert_eq!(evidence[0].session_id.as_deref(), Some("session-abc-123"));
+        assert_eq!(evidence[0].session_id.as_deref(), Some("context:1-1"));
         assert_eq!(evidence[0].raw_path, "C:\\app");
         assert_eq!(
             evidence[0].expires_at - evidence[0].observed_at,
             CONTEXT_EVIDENCE_TTL_MS
         );
         assert!(fresh(&evidence[0], 1_500));
-        // And the existing decision core accepts it as the automatic candidate.
+        // A background process's roots can never drive automatic association.
         let candidate = candidate_from(&evidence[0], "C:\\app");
         assert_eq!(
             super::super::automatic_candidate(std::slice::from_ref(&candidate), &target(3), 1_500),
-            Some(candidate.id.clone())
+            None
         );
     }
 
@@ -298,7 +281,10 @@ mod tests {
         let proven = vec![(entry("session-abc-123", 3, vec!["C:\\app".into()]), true)];
         let evidence = evidence_for_target(&proven, &target(3), 1_500);
         assert_eq!(evidence.len(), 1);
-        assert!(evidence[0].verifiable, "host context stays verifiable");
+        assert!(
+            !evidence[0].verifiable,
+            "host context cannot prove a visible tab"
+        );
         assert!(
             !evidence[0].active_scope,
             "app-level context is not conversation scope"
@@ -330,7 +316,7 @@ mod tests {
         )];
         let evidence = evidence_for_target(&proven, &target(3), 1_500);
         assert_eq!(evidence.len(), 2);
-        assert!(evidence.iter().all(|item| item.verifiable));
+        assert!(evidence.iter().all(|item| !item.verifiable));
         assert!(evidence.iter().all(|item| !item.active_scope));
 
         // A WSL root keeps its environment and can never drive Windows association.
@@ -356,15 +342,20 @@ mod tests {
     }
 
     #[test]
-    fn parent_maps_are_bounded_snapshots() {
-        // The Windows-only snapshot helper stays optional: resolution treats a missing
-        // snapshot as "no lineage", never as "assume lineage".
-        #[cfg(all(windows, feature = "desktop"))]
-        {
-            let map = super::super::context_source_windows::parent_map();
-            if let Some(map) = map.as_ref() {
-                assert!(map.iter().take(64).all(|(pid, parent)| pid != parent));
-            }
-        }
+    fn evidence_uses_execution_directory_and_never_extends_the_registration_lease() {
+        let mut source = entry("session-abc-123", 7, vec!["C:\\original".into()]);
+        source.original_project = Some("C:\\original".into());
+        source.execution_directory = Some("C:\\worktree".into());
+        let evidence =
+            evidence_for_target(&[(source.clone(), true)], &target(3), source.expires_at - 1);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].raw_path, "C:\\worktree");
+        assert_eq!(evidence[0].expires_at, source.expires_at);
+        assert!(!fresh(&evidence[0], source.expires_at));
+        source.execution_directory = Some("/home/worktree".into());
+        source.environment = Some(Environment::Wsl);
+        let evidence = evidence_for_target(&[(source, true)], &target(3), 1500);
+        assert_eq!(evidence[0].raw_path, "/home/worktree");
+        assert_eq!(evidence[0].environment, Environment::Wsl);
     }
 }

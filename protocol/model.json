@@ -601,7 +601,20 @@
       "paired": "bool",
       "activeSessions": "u32",
       "lastEventAt": "u64",
-      "reason": "string?"
+      "reason": "string?",
+      "registrations": "ContextRegistration[]",
+      "boundRegistrationId": "string?"
+    },
+    "ContextRegistration": {
+      "id": "string",
+      "session": "string",
+      "hostSession": "string?",
+      "agent": "string?",
+      "originalProject": "string?",
+      "executionDirectory": "string?",
+      "suggestedDirectory": "string?",
+      "hintSource": "string?",
+      "environment": "Environment"
     },
     "NativeFrame": {
       "sessionId": "string",
@@ -832,6 +845,7 @@
     }
   },
   "commandResponses": {
+    "context_select_project": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "context_pair_create": { "rust": "ContextPairing", "typescript": "ContextPairing", "error": "IpcError" },
     "context_pair_revoke": { "rust": "bool", "typescript": "boolean", "error": "IpcError" },
     "snapshot": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
@@ -981,6 +995,7 @@
     }
   },
   "commands": {
+    "context_select_project": { "scope": "RequestScope", "registrationId": "string" },
     "context_pair_create": {},
     "context_pair_revoke": {},
     "preview_control_state": { "scope": "RequestScope" },

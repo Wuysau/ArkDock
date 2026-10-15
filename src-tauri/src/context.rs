@@ -1,433 +1,401 @@
-//! Brand-agnostic agent context registration: an authenticated local channel where a
-//! configured agent tool reports the workspace of its current session.
-//!
-//! Trust chain, decided entirely in this backend:
-//! 1. a pairing token created by the user in ArkDock (256-bit, never passed on argv);
-//! 2. the OS-proven pipe client identity (`GetNamedPipeClientProcessId` plus the process
-//!    start-time lifetime token) — a message can never claim a different sender;
-//! 3. bounded messages, short heartbeat TTLs, revocation on disconnect and pairing
-//!    revocation, replay and duplicate-session rejection.
-//!
-//! A registration alone is context, not authority. It grants no message sending, no
-//! Inspector image access and no execution; `discovery::context_source` binds entries to
-//! a docked target by process ancestry and `automatic_candidate` still decides whether
-//! anything auto-associates. Discovery stays read-only: this module never launches a
-//! build, reads chat content, or trusts any caller-supplied "trusted" flag.
-
-use std::collections::HashMap;
-
+//! Authenticated context is a source declaration, never proof of a visible conversation.
+//! Registrations are connection-owned leases with replay checks and stable backend IDs.
+use crate::ipc::model::{Environment, ProcessRef};
 use serde::Deserialize;
-
-use crate::ipc::model::ProcessRef;
-
-/// The local pipe every configured agent tool connects to. The name is fixed; the
-/// per-instance pairing token is what authorizes a connection, not the path.
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 pub const CONTEXT_PIPE_NAME: &str = "\\\\.\\pipe\\arkdock-context";
-
-/// One wire message may not exceed this size; the reader drops the connection beyond it.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_CONNECTIONS: usize = 8;
 pub const MAX_SESSIONS: usize = 32;
-/// Hosts declare at most this many workspace roots per session.
 pub const MAX_ROOTS: usize = 8;
 const MAX_PATH_LEN: usize = 4096;
-const MAX_AGENT_LEN: usize = 64;
-/// Heartbeats must arrive inside this window; evidence issued from a registration never
-/// outlives it and stays far below [`crate::discovery::MAX_EVIDENCE_TTL_MS`].
+const MAX_REPLAY_RECORDS: usize = 512;
 pub const HEARTBEAT_TTL_MS: u64 = 15_000;
-/// A connection that sends nothing for this long is cancelled by the listener watchdog.
 pub const CONNECTION_IDLE_TIMEOUT_MS: u64 = 20_000;
 
-// ---------------------------------------------------------------------------
-// Wire messages
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ContextMessage {
     Hello {
         token: String,
         session: String,
+        sequence: u64,
+        #[serde(default)]
         roots: Vec<String>,
+        #[serde(default)]
         cwd: Option<String>,
+        #[serde(default)]
         agent: Option<String>,
+        #[serde(default)]
+        host_session: Option<String>,
+        #[serde(default)]
+        original_project: Option<String>,
+        #[serde(default)]
+        execution_directory: Option<String>,
+        #[serde(default)]
+        environment: Option<Environment>,
     },
     Heartbeat {
         token: String,
         session: String,
+        sequence: u64,
     },
     Update {
         token: String,
         session: String,
+        sequence: u64,
         roots: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        host_session: Option<String>,
+        #[serde(default)]
+        original_project: Option<String>,
+        #[serde(default)]
+        execution_directory: Option<String>,
+        #[serde(default)]
+        environment: Option<Environment>,
     },
     Revoke {
         token: String,
         session: String,
+        sequence: u64,
     },
 }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HelloFrame {
-    // The kind tag is consumed by parse_message before this struct is built; it is
-    // required on the wire so unknown-field rejection stays exact.
-    #[allow(dead_code)]
-    kind: String,
-    token: String,
-    session: String,
-    #[serde(default)]
-    roots: Vec<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    agent: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionFrame {
-    #[allow(dead_code)]
-    kind: String,
-    token: String,
-    session: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateFrame {
-    #[allow(dead_code)]
-    kind: String,
-    token: String,
-    session: String,
-    roots: Vec<String>,
-}
-
-/// Parses one bounded JSON line. Unknown kinds and unknown fields are rejected so an
-/// upgraded client cannot silently smuggle extra semantics into an older backend.
-pub fn parse_message(line: &str) -> Result<ContextMessage, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|error| format!("CONTEXT_FRAME_INVALID: {error}"))?;
-    let kind = value
-        .get("kind")
-        .and_then(|kind| kind.as_str())
-        .ok_or("CONTEXT_FRAME_KIND_MISSING")?;
-    match kind {
-        "hello" => {
-            let frame: HelloFrame = serde_json::from_value(value)
-                .map_err(|error| format!("CONTEXT_FRAME_INVALID: {error}"))?;
-            Ok(ContextMessage::Hello {
-                token: frame.token,
-                session: frame.session,
-                roots: frame.roots,
-                cwd: frame.cwd,
-                agent: frame.agent,
-            })
+impl ContextMessage {
+    pub fn session(&self) -> &str {
+        match self {
+            Self::Hello { session, .. }
+            | Self::Update { session, .. }
+            | Self::Heartbeat { session, .. }
+            | Self::Revoke { session, .. } => session,
         }
-        "heartbeat" => {
-            let frame: SessionFrame = serde_json::from_value(value)
-                .map_err(|error| format!("CONTEXT_FRAME_INVALID: {error}"))?;
-            Ok(ContextMessage::Heartbeat {
-                token: frame.token,
-                session: frame.session,
-            })
+    }
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Self::Hello { sequence, .. }
+            | Self::Update { sequence, .. }
+            | Self::Heartbeat { sequence, .. }
+            | Self::Revoke { sequence, .. } => *sequence,
         }
-        "update" => {
-            let frame: UpdateFrame = serde_json::from_value(value)
-                .map_err(|error| format!("CONTEXT_FRAME_INVALID: {error}"))?;
-            Ok(ContextMessage::Update {
-                token: frame.token,
-                session: frame.session,
-                roots: frame.roots,
-            })
+    }
+    fn token(&self) -> &str {
+        match self {
+            Self::Hello { token, .. }
+            | Self::Update { token, .. }
+            | Self::Heartbeat { token, .. }
+            | Self::Revoke { token, .. } => token,
         }
-        "revoke" => {
-            let frame: SessionFrame = serde_json::from_value(value)
-                .map_err(|error| format!("CONTEXT_FRAME_INVALID: {error}"))?;
-            Ok(ContextMessage::Revoke {
-                token: frame.token,
-                session: frame.session,
-            })
-        }
-        other => Err(format!("CONTEXT_FRAME_KIND_UNKNOWN: {other}")),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Registry state
-// ---------------------------------------------------------------------------
-
-/// One live agent session registration. `client` is the OS-proven pipe client identity;
-/// it is never taken from the message body.
+/// Errors deliberately omit input, including any pairing credential.
+pub fn parse_message(line: &str) -> Result<ContextMessage, String> {
+    if line.len() > MAX_MESSAGE_BYTES {
+        return Err("CONTEXT_FRAME_TOO_LARGE".into());
+    }
+    serde_json::from_str(line).map_err(|_| "CONTEXT_FRAME_INVALID".into())
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextEntry {
     pub session: String,
     pub client: ProcessRef,
-    /// Host-declared workspace roots (`roots/list` when the host supports it).
+    pub connection_id: u64,
+    pub sequence: u64,
+    /// Changes on reconnect and material update; heartbeat does not invalidate a binding.
+    pub registration_id: String,
     pub roots: Vec<String>,
-    /// Spawn-time working directory as a weak hint when the host has no roots support.
     pub cwd: Option<String>,
-    /// Bounded display hint, never an identity claim.
     pub agent: Option<String>,
+    pub host_session: Option<String>,
+    pub original_project: Option<String>,
+    pub execution_directory: Option<String>,
+    pub environment: Option<Environment>,
     pub observed_at: u64,
     pub expires_at: u64,
 }
-
 impl ContextEntry {
-    /// The root this entry proposes for discovery. Roots are host declarations; the
-    /// spawn-time working directory is only a fallback hint and never a host claim.
     pub fn declared_roots(&self) -> &[String] {
         &self.roots
     }
-
-    /// Whether this entry carries a host root declaration at all.
     pub fn has_root_declaration(&self) -> bool {
         !self.roots.is_empty()
     }
+    pub fn effective_execution_directory(&self) -> Option<&str> {
+        self.execution_directory
+            .as_deref()
+            .or(match self.roots.as_slice() {
+                [root] => Some(root.as_str()),
+                [] => self.cwd.as_deref(),
+                _ => None,
+            })
+    }
+    pub fn execution_environment(&self) -> Environment {
+        self.environment.clone().unwrap_or_else(|| {
+            self.effective_execution_directory()
+                .map(inferred_environment)
+                .unwrap_or(Environment::Remote)
+        })
+    }
+    pub fn environment_for_path(&self, path: &str) -> Environment {
+        self.environment
+            .clone()
+            .unwrap_or_else(|| inferred_environment(path))
+    }
+    fn same_context(&self, other: &Self) -> bool {
+        self.host_session == other.host_session
+            && self.original_project == other.original_project
+            && self.execution_directory == other.execution_directory
+            && self.environment == other.environment
+            // Once explicitly declared, execution context is independent of roots/cwd
+            // compatibility hints, which may change as other host conversations run.
+            && (self.execution_directory.is_some()
+                || (self.roots == other.roots && self.cwd == other.cwd))
+    }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TokenState {
-    bytes: [u8; 32],
-    hex: String,
+#[derive(Clone)]
+struct ReplayRecord {
+    client: ProcessRef,
+    sequence: u64,
 }
-
 #[derive(Default)]
 struct HubInner {
-    token: Option<TokenState>,
+    token: Option<String>,
     entries: HashMap<String, ContextEntry>,
+    // Retain after expiry/disconnect/revoke. Reconnect reuses session with higher sequence.
+    // Fail closed when full; pairing rotation resets these bounded replay watermarks.
+    replay: HashMap<String, ReplayRecord>,
+    generation: u64,
     last_event: Option<(String, u64)>,
 }
-
-/// Shared registration state. The pipe listener is the only writer besides the
-/// association actor's pairing commands; discovery reads a pruned snapshot per pass.
+#[derive(Default)]
 pub struct ContextHub {
     inner: std::sync::Mutex<HubInner>,
 }
-
-impl Default for ContextHub {
-    fn default() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(HubInner::default()),
-        }
-    }
-}
-
 impl ContextHub {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Installs a freshly generated pairing token. A previous token stays valid until
-    /// this call replaces it, so staging a credential cannot break a live connection.
     pub fn activate_token(&self, token: [u8; 32]) {
-        let hex = token.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut inner = self.lock();
-        inner.token = Some(TokenState { bytes: token, hex });
-        inner.note("Context source pairing activated".to_owned());
+        inner.token = Some(token.iter().map(|byte| format!("{byte:02x}")).collect());
+        inner.entries.clear();
+        inner.replay.clear();
+        inner.note("Context source pairing activated".into());
     }
-
-    /// Revokes the pairing and every live registration. Existing pipe connections fail
-    /// on their next message; no entry survives a revoked pairing.
     pub fn revoke_token(&self) -> bool {
         let mut inner = self.lock();
         let had = inner.token.take().is_some();
         inner.entries.clear();
-        inner.note("Context source pairing revoked".to_owned());
+        inner.replay.clear();
+        inner.note("Context source pairing revoked".into());
         had
     }
-
     pub fn paired(&self) -> bool {
         self.lock().token.is_some()
     }
-
-    /// Applies one authenticated-by-connection message. `client` must come from the
-    /// OS query on the pipe handle, never from the frame.
+    /// Proves possession of the pairing secret before a client discloses its token
+    /// or project paths. A probe grants no registration and never renews a lease.
+    pub fn server_proof(&self, challenge: &str) -> Result<String, String> {
+        if challenge.len() != 64
+            || !challenge
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("CONTEXT_CHALLENGE_INVALID".into());
+        }
+        let inner = self.lock();
+        let token = inner.token.as_ref().ok_or("CONTEXT_PAIRING_MISSING")?;
+        let mut key = [0u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&token[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "CONTEXT_PAIRING_INVALID")?;
+        }
+        let mut message = b"arkdock-context-server-v1\0".to_vec();
+        message.extend_from_slice(challenge.as_bytes());
+        let proof = hmac_sha256(&key, &message);
+        Ok(proof.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    /// Client and connection identity come exclusively from the transport.
     pub fn apply(
         &self,
         message: ContextMessage,
         client: ProcessRef,
+        connection_id: u64,
         now: u64,
     ) -> Result<(), String> {
         let mut inner = self.lock();
-        let token = inner
-            .token
-            .as_ref()
-            .ok_or("CONTEXT_PAIRING_MISSING")?
-            .clone();
-        let (session, kind, roots, cwd, agent) = match message {
+        let token = inner.token.as_ref().ok_or("CONTEXT_PAIRING_MISSING")?;
+        if !constant_time_eq(message.token(), token) {
+            return Err("CONTEXT_TOKEN_INVALID".into());
+        }
+        if connection_id == 0 || client.pid == 0 || client.started_at.is_empty() {
+            return Err("CONTEXT_CLIENT_INVALID".into());
+        }
+        let session = message.session().to_owned();
+        valid_session(&session)?;
+        let sequence = message.sequence();
+        if sequence == 0 {
+            return Err("CONTEXT_SEQUENCE_INVALID".into());
+        }
+        // Expiry is enforced even when no discovery reader has visited live().
+        inner
+            .entries
+            .retain(|_, entry| entry.expires_at > now && entry.observed_at <= now);
+        if let Some(previous) = inner.replay.get(&session) {
+            if previous.client != client {
+                return Err("CONTEXT_SESSION_OWNER_MISMATCH".into());
+            }
+            if sequence <= previous.sequence {
+                return Err("CONTEXT_SEQUENCE_REPLAY".into());
+            }
+        } else if inner.replay.len() >= MAX_REPLAY_RECORDS {
+            return Err("CONTEXT_REPLAY_LIMIT".into());
+        }
+        let hello = matches!(&message, ContextMessage::Hello { .. });
+        if hello {
+            if inner.entries.contains_key(&session) {
+                return Err("CONTEXT_SESSION_ALREADY_REGISTERED".into());
+            }
+            if inner.entries.len() >= MAX_SESSIONS {
+                return Err("CONTEXT_SESSION_LIMIT".into());
+            }
+        } else {
+            let existing = inner
+                .entries
+                .get(&session)
+                .ok_or("CONTEXT_SESSION_UNKNOWN")?;
+            if existing.connection_id != connection_id || existing.client != client {
+                return Err("CONTEXT_SESSION_OWNER_MISMATCH".into());
+            }
+        }
+        let expires_at = now
+            .checked_add(HEARTBEAT_TTL_MS)
+            .ok_or("CONTEXT_TIME_OVERFLOW")?;
+        match message {
             ContextMessage::Hello {
-                token: claimed,
-                session,
                 roots,
                 cwd,
                 agent,
-            } => {
-                if !constant_time_eq(&claimed, &token.hex) {
-                    return Err("CONTEXT_TOKEN_INVALID".into());
-                }
-                (session, "hello", roots, cwd, agent)
+                host_session,
+                original_project,
+                execution_directory,
+                environment,
+                ..
             }
-            ContextMessage::Heartbeat {
-                token: claimed,
-                session,
-            } => {
-                if !constant_time_eq(&claimed, &token.hex) {
-                    return Err("CONTEXT_TOKEN_INVALID".into());
-                }
-                (session, "heartbeat", Vec::new(), None, None)
-            }
-            ContextMessage::Update {
-                token: claimed,
-                session,
+            | ContextMessage::Update {
                 roots,
+                cwd,
+                agent,
+                host_session,
+                original_project,
+                execution_directory,
+                environment,
+                ..
             } => {
-                if !constant_time_eq(&claimed, &token.hex) {
-                    return Err("CONTEXT_TOKEN_INVALID".into());
-                }
-                (session, "update", roots, None, None)
-            }
-            ContextMessage::Revoke {
-                token: claimed,
-                session,
-            } => {
-                if !constant_time_eq(&claimed, &token.hex) {
-                    return Err("CONTEXT_TOKEN_INVALID".into());
-                }
-                if let Some(existing) = inner.entries.get(&session) {
-                    if existing.client != client {
-                        return Err("CONTEXT_SESSION_OWNER_MISMATCH".into());
-                    }
-                    inner.entries.remove(&session);
-                    inner.note(format!("Context session revoked: {session}"));
-                }
-                return Ok(());
-            }
-        };
-        valid_session(&session)?;
-        let roots = validate_paths(roots, "roots")?;
-        let cwd = match cwd {
-            Some(cwd) => Some(
-                validate_paths(vec![cwd], "cwd")?
-                    .pop()
-                    .ok_or("CONTEXT_PATH_EMPTY")?,
-            ),
-            None => None,
-        };
-        if let Some(agent) = agent.as_deref() {
-            if agent.is_empty()
-                || agent.len() > MAX_AGENT_LEN
-                || agent.chars().any(char::is_control)
-            {
-                return Err("CONTEXT_AGENT_INVALID".into());
-            }
-        }
-        match kind {
-            "hello" => {
-                if let Some(existing) = inner.entries.get(&session) {
-                    if existing.client != client {
-                        // A second process claiming a live session is a replay, not a reconnect.
-                        return Err("CONTEXT_SESSION_OWNER_MISMATCH".into());
-                    }
-                } else if inner.entries.len() >= MAX_SESSIONS {
-                    return Err("CONTEXT_SESSION_LIMIT".into());
-                }
-                let expires_at = now
-                    .checked_add(HEARTBEAT_TTL_MS)
-                    .ok_or("CONTEXT_TIME_OVERFLOW")?;
-                inner.insert(
-                    session.clone(),
-                    ContextEntry {
-                        session: session.clone(),
-                        client,
-                        roots,
-                        cwd,
-                        agent,
-                        observed_at: now,
-                        expires_at,
-                    },
-                );
-                inner.note(format!("Context session registered: {session}"));
-                Ok(())
-            }
-            _ => {
-                let Some(existing) = inner.entries.get_mut(&session) else {
-                    return Err("CONTEXT_SESSION_UNKNOWN".into());
+                let mut entry = ContextEntry {
+                    session: session.clone(),
+                    client: client.clone(),
+                    connection_id,
+                    sequence,
+                    registration_id: String::new(),
+                    roots,
+                    cwd,
+                    agent,
+                    host_session,
+                    original_project,
+                    execution_directory,
+                    environment,
+                    observed_at: now,
+                    expires_at,
                 };
-                if existing.client != client {
-                    return Err("CONTEXT_SESSION_OWNER_MISMATCH".into());
+                validate_entry(&mut entry)?;
+                if let Some(previous) = inner
+                    .entries
+                    .get(&session)
+                    .filter(|previous| previous.same_context(&entry))
+                {
+                    entry.registration_id = previous.registration_id.clone();
+                } else {
+                    inner.generation = inner
+                        .generation
+                        .checked_add(1)
+                        .ok_or("CONTEXT_GENERATION_OVERFLOW")?;
+                    entry.registration_id = format!("{connection_id}-{}", inner.generation);
                 }
-                let expires_at = now
-                    .checked_add(HEARTBEAT_TTL_MS)
-                    .ok_or("CONTEXT_TIME_OVERFLOW")?;
-                if kind == "update" {
-                    existing.roots = roots;
-                }
-                if let Some(cwd) = cwd {
-                    existing.cwd = Some(cwd);
-                }
+                inner.entries.insert(session.clone(), entry);
+                inner.note(format!(
+                    "Context session {}: {session}",
+                    if hello { "registered" } else { "updated" }
+                ));
+            }
+            ContextMessage::Heartbeat { .. } => {
+                let existing = inner
+                    .entries
+                    .get_mut(&session)
+                    .ok_or("CONTEXT_SESSION_UNKNOWN")?;
+                existing.sequence = sequence;
                 existing.observed_at = now;
                 existing.expires_at = expires_at;
-                inner.note(format!("Context session renewed: {session}"));
-                Ok(())
+            }
+            ContextMessage::Revoke { .. } => {
+                inner.entries.remove(&session);
+                inner.note(format!("Context session revoked: {session}"));
             }
         }
+        inner
+            .replay
+            .insert(session, ReplayRecord { client, sequence });
+        Ok(())
     }
-
-    /// Removes every registration owned by one connection (disconnect or timeout).
-    pub fn remove_client(&self, client: &ProcessRef) -> usize {
+    pub fn remove_connection(&self, connection_id: u64) -> usize {
         let mut inner = self.lock();
         let before = inner.entries.len();
-        inner.entries.retain(|_, entry| entry.client != *client);
+        inner
+            .entries
+            .retain(|_, entry| entry.connection_id != connection_id);
         let removed = before - inner.entries.len();
         if removed > 0 {
             inner.note(format!(
-                "Context client disconnected; {removed} session(s) revoked"
+                "Context connection disconnected; {removed} session(s) revoked"
             ));
         }
         removed
     }
-
-    /// Live, pruned registrations in deterministic order.
     pub fn live(&self, now: u64) -> Vec<ContextEntry> {
         let mut inner = self.lock();
-        inner.entries.retain(|_, entry| entry.expires_at > now);
+        inner
+            .entries
+            .retain(|_, entry| entry.observed_at <= now && entry.expires_at > now);
         let mut entries: Vec<_> = inner.entries.values().cloned().collect();
         entries.sort_by(|a, b| a.session.cmp(&b.session));
         entries
     }
-
     pub fn last_event(&self) -> Option<(String, u64)> {
         self.lock().last_event.clone()
     }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, HubInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
-
 impl HubInner {
     fn note(&mut self, reason: String) {
-        self.last_event = Some((reason, crate::context::now_millis()));
-    }
-
-    fn insert(&mut self, session: String, entry: ContextEntry) {
-        self.entries.insert(session, entry);
+        self.last_event = Some((reason, now_millis()));
     }
 }
-
-/// Wall-clock milliseconds. Kept here so the hub and its tests share one time source.
 pub fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
-
-/// Generates a fresh pairing secret without activating it: `(hex, bytes)`. Randomness
-/// is a Windows runtime capability; the hub and its tests accept explicit secrets so
-/// every rule stays cross-platform testable.
 pub fn new_pairing() -> Result<(String, [u8; 32]), String> {
     #[cfg(windows)]
     {
@@ -441,345 +409,417 @@ pub fn new_pairing() -> Result<(String, [u8; 32]), String> {
         Err("CONTEXT_RANDOM_UNAVAILABLE".into())
     }
 }
-
-/// Length-independent comparison; the loop always walks the longer input so the answer
-/// does not leak where the first difference was.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     let mut diff = a.len() ^ b.len();
     for index in 0..a.len().max(b.len()) {
-        let left = a.get(index).copied().unwrap_or(0);
-        let right = b.get(index).copied().unwrap_or(0);
-        diff |= (left ^ right) as usize;
+        diff |= (a.get(index).copied().unwrap_or(0) ^ b.get(index).copied().unwrap_or(0)) as usize;
     }
     diff == 0
 }
-
+/// HMAC-SHA256 for our fixed 32-byte secret (shorter than SHA-256's 64-byte block).
+fn hmac_sha256(key: &[u8; 32], message: &[u8]) -> [u8; 32] {
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for index in 0..key.len() {
+        inner_pad[index] ^= key[index];
+        outer_pad[index] ^= key[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
 fn valid_session(session: &str) -> Result<(), String> {
     if (16..=128).contains(&session.len())
         && session
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         Ok(())
     } else {
         Err("CONTEXT_SESSION_INVALID".into())
     }
 }
-
-fn validate_paths(paths: Vec<String>, field: &str) -> Result<Vec<String>, String> {
-    if paths.len() > MAX_ROOTS {
-        return Err(format!("CONTEXT_{field}_LIMIT"));
+fn valid_label(value: &Option<String>, limit: usize, field: &str) -> Result<(), String> {
+    if value
+        .as_ref()
+        .is_some_and(|v| v.is_empty() || v.len() > limit || v.chars().any(char::is_control))
+    {
+        Err(format!("CONTEXT_{field}_INVALID"))
+    } else {
+        Ok(())
     }
-    let mut validated = Vec::with_capacity(paths.len());
-    for path in paths {
-        if path.is_empty() || path.len() > MAX_PATH_LEN || path.contains('\0') {
-            return Err(format!("CONTEXT_{field}_INVALID"));
-        }
-        if path.chars().any(char::is_control) {
-            return Err(format!("CONTEXT_{field}_INVALID"));
-        }
-        if validated.contains(&path) {
-            continue;
-        }
-        validated.push(path);
+}
+fn inferred_environment(path: &str) -> Environment {
+    if path.starts_with("vscode-remote://wsl+") {
+        Environment::Wsl
+    } else if path.starts_with('/') && !path.starts_with("//") {
+        Environment::Remote
+    } else {
+        crate::discovery::path_environment(std::path::Path::new(path))
     }
-    Ok(validated)
+}
+fn validate_path(path: &str, environment: Option<&Environment>) -> Result<(), String> {
+    if path.is_empty() || path.len() > MAX_PATH_LEN || path.chars().any(char::is_control) {
+        return Err("CONTEXT_PATH_INVALID".into());
+    }
+    let detected = inferred_environment(path);
+    let environment = environment.unwrap_or(&detected);
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    let posix = path.starts_with('/') && !path.starts_with("//");
+    let unc = path.starts_with("\\\\") || path.starts_with("//");
+    let absolute = match environment {
+        Environment::WindowsLocal => (drive || unc) && detected == Environment::WindowsLocal,
+        Environment::Wsl => {
+            posix
+                || (detected == Environment::Wsl
+                    && (unc
+                        || path.starts_with("wsl://")
+                        || path.starts_with("vscode-remote://wsl+")))
+        }
+        Environment::Remote => {
+            posix
+                || path.starts_with("ssh://")
+                || (path.starts_with("vscode-remote://") && detected == Environment::Remote)
+        }
+    };
+    if absolute {
+        Ok(())
+    } else {
+        Err("CONTEXT_PATH_ENVIRONMENT_INVALID".into())
+    }
+}
+fn validate_entry(entry: &mut ContextEntry) -> Result<(), String> {
+    if entry.roots.len() > MAX_ROOTS {
+        return Err("CONTEXT_ROOTS_LIMIT".into());
+    }
+    let mut roots = Vec::new();
+    for root in &entry.roots {
+        let environment = if entry.execution_directory.is_some() {
+            None
+        } else {
+            entry.environment.as_ref()
+        };
+        validate_path(root, environment)?;
+        if !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    entry.roots = roots;
+    if let Some(path) = &entry.original_project {
+        // Display provenance can be local even when execution happens remotely.
+        validate_path(path, None)?;
+    }
+    if let Some(path) = &entry.execution_directory {
+        validate_path(path, entry.environment.as_ref())?;
+    }
+    if let Some(cwd) = &entry.cwd {
+        // A local MCP executable may report an explicitly remote session.
+        let environment = if entry.execution_directory.is_none() && entry.roots.is_empty() {
+            entry.environment.as_ref()
+        } else {
+            None
+        };
+        validate_path(cwd, environment)?;
+    }
+    valid_label(&entry.agent, 64, "AGENT")?;
+    valid_label(&entry.host_session, 128, "HOST_SESSION")?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn client(pid: u32) -> ProcessRef {
         ProcessRef {
             pid,
             started_at: "1000".into(),
         }
     }
-
-    fn token() -> String {
-        "a".repeat(64)
-    }
-
-    fn hub_with_token() -> ContextHub {
+    fn hub() -> ContextHub {
         let hub = ContextHub::new();
         hub.activate_token([0xaa; 32]);
-        assert!(hub.paired());
         hub
     }
-
-    fn hello(session: &str, roots: Vec<String>) -> ContextMessage {
-        ContextMessage::Hello {
-            token: token(),
-            session: session.into(),
-            roots,
-            cwd: None,
-            agent: None,
-        }
+    fn frame(kind: &str, session: &str, sequence: u64) -> ContextMessage {
+        parse_message(&serde_json::json!({"kind":kind,"token":"aa".repeat(32),"session":session,"sequence":sequence,"roots":["C:\\app"]}).to_string()).unwrap()
     }
-
-    #[test]
-    fn parse_accepts_the_four_kinds_and_rejects_unknown_fields_and_kinds() {
-        let parsed = parse_message(
-            r#"{"kind":"hello","token":"t","session":"s","roots":["C:\\a"],"agent":"claude"}"#,
-        )
-        .unwrap();
-        assert!(matches!(parsed, ContextMessage::Hello { .. }));
-        assert!(matches!(
-            parse_message(r#"{"kind":"heartbeat","token":"t","session":"s"}"#),
-            Ok(ContextMessage::Heartbeat { .. })
-        ));
-        assert!(parse_message(r#"{"kind":"status","token":"t","session":"s"}"#).is_err());
-        assert!(parse_message(
-            r#"{"kind":"hello","token":"t","session":"s","roots":[],"trusted":true}"#
-        )
-        .is_err());
-        assert!(parse_message("not json").is_err());
+    fn hello(sequence: u64) -> ContextMessage {
+        frame("hello", "session-12345678", sequence)
     }
-
-    #[test]
-    fn hello_registers_and_heartbeat_renews_only_with_a_valid_token() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            now,
-        )
-        .unwrap();
-        let live = hub.live(now + 1);
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].roots, vec!["C:\\app"]);
-        assert_eq!(live[0].expires_at, now + HEARTBEAT_TTL_MS);
-
-        let renew = ContextMessage::Heartbeat {
-            token: token(),
-            session: "session-abc-1234".into(),
-        };
-        hub.apply(renew.clone(), client(7), now + 5_000).unwrap();
-        assert_eq!(
-            hub.live(now + 1)[0].expires_at,
-            now + 5_000 + HEARTBEAT_TTL_MS
-        );
-
-        // Wrong token: rejected, and nothing changes.
-        let forged = ContextMessage::Heartbeat {
-            token: "b".repeat(64),
-            session: "session-abc-1234".into(),
-        };
-        assert_eq!(
-            hub.apply(forged, client(7), now + 6_000),
-            Err("CONTEXT_TOKEN_INVALID".into())
-        );
-        assert_eq!(
-            hub.live(now + 1)[0].expires_at,
-            now + 5_000 + HEARTBEAT_TTL_MS
-        );
-
-        // A different process cannot renew or take over the session (replay guard).
-        assert_eq!(
-            hub.apply(renew, client(8), now + 6_000),
-            Err("CONTEXT_SESSION_OWNER_MISMATCH".into())
-        );
+    fn renewal(kind: &str, sequence: u64) -> ContextMessage {
+        parse_message(&serde_json::json!({"kind":kind,"token":"aa".repeat(32),"session":"session-12345678","sequence":sequence}).to_string()).unwrap()
     }
-
     #[test]
-    fn expired_sessions_are_pruned_and_disconnect_removes_the_whole_client() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            now,
-        )
-        .unwrap();
-        hub.apply(
-            hello("session-def-4567", vec!["C:\\other".into()]),
-            client(8),
-            now,
-        )
-        .unwrap();
-        assert_eq!(hub.live(now + HEARTBEAT_TTL_MS + 1).len(), 0);
-
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            now,
-        )
-        .unwrap();
-        hub.apply(
-            hello("session-def-4567", vec!["C:\\other".into()]),
-            client(8),
-            now,
-        )
-        .unwrap();
-        assert_eq!(hub.remove_client(&client(7)), 1);
-        let live = hub.live(now + 1);
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].session, "session-def-4567");
+    fn server_proof_matches_independent_hmac_vector_and_is_challenge_bound() {
+        let hub = ContextHub::new();
+        let key = std::array::from_fn(|index| index as u8);
+        hub.activate_token(key);
+        let challenge = "0123456789abcdef".repeat(4);
+        // Independently calculated with Node's crypto.createHmac('sha256', key).
+        let expected = "8499477b5f92d46ff9fd51c48a5a304410a8c243efdbf7ce2ec41ac34e1b9eca";
+        assert_eq!(hub.server_proof(&challenge).unwrap(), expected);
+        assert_ne!(hub.server_proof(&"0".repeat(64)).unwrap(), expected);
+        assert!(hub.live(1000).is_empty());
+        hub.activate_token([0xbb; 32]);
+        assert_ne!(hub.server_proof(&challenge).unwrap(), expected);
     }
-
     #[test]
-    fn update_replaces_roots_and_revoke_is_idempotent_but_owner_checked() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            now,
-        )
-        .unwrap();
-        let update = ContextMessage::Update {
-            token: token(),
-            session: "session-abc-1234".into(),
-            roots: vec!["C:\\moved".into()],
-        };
-        hub.apply(update.clone(), client(7), now + 1_000).unwrap();
-        assert_eq!(hub.live(now + 1_000)[0].roots, vec!["C:\\moved"]);
-
-        let revoke = ContextMessage::Revoke {
-            token: token(),
-            session: "session-abc-1234".into(),
-        };
-        hub.apply(revoke.clone(), client(7), now + 2_000).unwrap();
-        assert!(hub.live(now + 2_000).is_empty());
-        // Revoking an unknown session is accepted (idempotent), but a foreign client
-        // cannot revoke someone else's session.
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            now + 3_000,
-        )
-        .unwrap();
-        assert_eq!(
-            hub.apply(revoke, client(9), now + 3_000),
-            Err("CONTEXT_SESSION_OWNER_MISMATCH".into())
-        );
-        assert_eq!(hub.live(now + 3_000).len(), 1);
-    }
-
-    #[test]
-    fn missing_pairing_rejects_everything_and_revocation_clears_all_sessions() {
+    fn server_proof_rejects_missing_pairing_and_noncanonical_challenges() {
         let hub = ContextHub::new();
         assert_eq!(
-            hub.apply(hello("session-abc-1234", vec![]), client(7), 1_000),
+            hub.server_proof(&"0".repeat(64)),
             Err("CONTEXT_PAIRING_MISSING".into())
         );
-        let hub = hub_with_token();
-        hub.apply(
-            hello("session-abc-1234", vec!["C:\\app".into()]),
-            client(7),
-            1_000,
-        )
-        .unwrap();
-        assert!(hub.revoke_token());
-        assert!(hub.live(1_001).is_empty());
-        assert!(!hub.paired());
-        assert_eq!(
-            hub.apply(
-                hello("session-abc-1234", vec!["C:\\app".into()]),
-                client(7),
-                2_000
-            ),
-            Err("CONTEXT_PAIRING_MISSING".into())
-        );
-    }
-
-    #[test]
-    fn session_shape_path_bounds_and_unproven_cwd_are_enforced() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        for session in ["short", "with space", "with/slash", ""] {
+        hub.activate_token([0xaa; 32]);
+        for challenge in [
+            "secret".into(),
+            "0".repeat(63),
+            "0".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
             assert_eq!(
-                hub.apply(hello(session, vec![]), client(7), now),
-                Err("CONTEXT_SESSION_INVALID".into())
+                hub.server_proof(&challenge),
+                Err("CONTEXT_CHALLENGE_INVALID".into())
             );
         }
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        let entry = hub.live(1000).remove(0);
+        hub.server_proof(&"0".repeat(64)).unwrap();
+        assert_eq!(hub.live(1000)[0], entry, "proof never changes a live lease");
+        hub.revoke_token();
         assert_eq!(
-            hub.apply(
-                hello("session-abc-1234", vec![String::new()]),
-                client(7),
-                now
-            ),
-            Err("CONTEXT_roots_INVALID".into())
-        );
-        assert_eq!(
-            hub.apply(
-                hello("session-abc-1234", vec!["bad\u{0}path".into()]),
-                client(7),
-                now
-            ),
-            Err("CONTEXT_roots_INVALID".into())
-        );
-        let many = (0..9).map(|index| format!("C:\\app{index}")).collect();
-        assert_eq!(
-            hub.apply(hello("session-abc-1234", many), client(7), now),
-            Err("CONTEXT_roots_LIMIT".into())
-        );
-        // A declared path keeps its own environment; validation never rewrites it.
-        hub.apply(
-            hello(
-                "session-abc-1234",
-                vec![r"\\wsl.localhost\Ubuntu\app".into()],
-            ),
-            client(7),
-            now,
-        )
-        .unwrap();
-        assert_eq!(
-            hub.live(now + 1)[0].roots,
-            vec![r"\\wsl.localhost\Ubuntu\app".to_string()]
+            hub.server_proof(&"0".repeat(64)),
+            Err("CONTEXT_PAIRING_MISSING".into())
         );
     }
-
     #[test]
-    fn the_session_limit_is_bounded() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        for index in 0..MAX_SESSIONS {
-            let session = format!("session-{index:016}");
+    fn wire_rejects_missing_sequence_unknown_fields_and_oversize_without_echoing_secrets() {
+        assert!(
+            parse_message(r#"{"kind":"hello","token":"secret","session":"session-12345678"}"#)
+                .is_err()
+        );
+        assert!(parse_message(r#"{"kind":"hello","token":"secret","session":"session-12345678","sequence":1,"trusted":true}"#).is_err());
+        assert!(parse_message(&" ".repeat(MAX_MESSAGE_BYTES + 1)).is_err());
+        assert!(!parse_message(r#"{"token":"secret","kind":"secret"}"#)
+            .unwrap_err()
+            .contains("secret"));
+        assert!(parse_message(r#"{"kind":"hello","token":"t","session":"session-12345678","sequence":1,"hostSession":null,"environment":"wsl"}"#).is_ok());
+    }
+    #[test]
+    fn same_process_connections_cannot_modify_or_disconnect_each_others_registration() {
+        let hub = hub();
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        assert_eq!(
+            hub.apply(renewal("heartbeat", 2), client(7), 2, 2000),
+            Err("CONTEXT_SESSION_OWNER_MISMATCH".into())
+        );
+        assert_eq!(hub.remove_connection(2), 0);
+        assert_eq!(hub.live(2000).len(), 1);
+        assert_eq!(hub.remove_connection(1), 1);
+    }
+    #[test]
+    fn monotonic_sequences_reject_replays_live_and_after_disconnect_or_revoke() {
+        let hub = hub();
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        hub.apply(renewal("heartbeat", 2), client(7), 1, 2000)
+            .unwrap();
+        let id = hub.live(2000)[0].registration_id.clone();
+        assert_eq!(
+            hub.apply(renewal("heartbeat", 2), client(7), 1, 3000),
+            Err("CONTEXT_SEQUENCE_REPLAY".into())
+        );
+        assert_eq!(
+            hub.apply(hello(3), client(7), 2, 3000),
+            Err("CONTEXT_SESSION_ALREADY_REGISTERED".into())
+        );
+        hub.remove_connection(1);
+        assert_eq!(
+            hub.apply(hello(1), client(7), 2, 3000),
+            Err("CONTEXT_SEQUENCE_REPLAY".into())
+        );
+        hub.apply(hello(3), client(7), 2, 3000).unwrap();
+        assert_ne!(hub.live(3000)[0].registration_id, id);
+        assert_eq!(
+            hub.apply(renewal("revoke", 4), client(7), 1, 3001),
+            Err("CONTEXT_SESSION_OWNER_MISMATCH".into())
+        );
+        hub.apply(renewal("revoke", 4), client(7), 2, 3002).unwrap();
+        assert!(hub.live(3002).is_empty());
+        assert_eq!(
+            hub.apply(hello(3), client(7), 3, 3003),
+            Err("CONTEXT_SEQUENCE_REPLAY".into())
+        );
+    }
+    #[test]
+    fn expired_lease_cannot_be_renewed_without_a_discovery_read() {
+        let hub = hub();
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        assert_eq!(
             hub.apply(
-                hello(&session, vec!["C:\\app".into()]),
-                client(index as u32 + 1),
-                now,
+                renewal("heartbeat", 2),
+                client(7),
+                1,
+                1000 + HEARTBEAT_TTL_MS
+            ),
+            Err("CONTEXT_SESSION_UNKNOWN".into())
+        );
+        assert!(hub.live(1000 + HEARTBEAT_TTL_MS).is_empty());
+        assert_eq!(
+            hub.apply(hello(1), client(7), 2, 20_000),
+            Err("CONTEXT_SEQUENCE_REPLAY".into())
+        );
+    }
+    #[test]
+    fn material_updates_change_identity_but_renewal_and_identical_update_do_not() {
+        let hub = hub();
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        let original = hub.live(1000)[0].registration_id.clone();
+        hub.apply(renewal("heartbeat", 2), client(7), 1, 2000)
+            .unwrap();
+        hub.apply(frame("update", "session-12345678", 3), client(7), 1, 3000)
+            .unwrap();
+        assert_eq!(hub.live(3000)[0].registration_id, original);
+        let update=parse_message(&serde_json::json!({"kind":"update","token":"aa".repeat(32),"session":"session-12345678","sequence":4,"roots":["C:\\original"],"hostSession":"host-background","originalProject":"C:\\original","executionDirectory":"C:\\worktree","environment":"windowsLocal"}).to_string()).unwrap();
+        hub.apply(update, client(7), 1, 4000).unwrap();
+        let entry = hub.live(4000).remove(0);
+        assert_ne!(entry.registration_id, original);
+        assert_eq!(entry.effective_execution_directory(), Some("C:\\worktree"));
+        assert_eq!(entry.original_project.as_deref(), Some("C:\\original"));
+        assert_eq!(entry.host_session.as_deref(), Some("host-background"));
+        hub.apply(frame("update", "session-12345678", 5), client(7), 1, 5000)
+            .unwrap();
+        assert!(hub.live(5000)[0].execution_directory.is_none());
+    }
+    #[test]
+    fn token_rotation_and_revocation_remove_all_live_context() {
+        let hub = hub();
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        hub.activate_token([0xbb; 32]);
+        assert!(hub.live(1000).is_empty());
+        assert_eq!(
+            hub.apply(hello(2), client(7), 2, 2000),
+            Err("CONTEXT_TOKEN_INVALID".into())
+        );
+        assert!(hub.revoke_token());
+        assert!(!hub.paired());
+        assert_eq!(
+            hub.apply(hello(2), client(7), 2, 2000),
+            Err("CONTEXT_PAIRING_MISSING".into())
+        );
+    }
+    #[test]
+    fn explicit_execution_identity_survives_unrelated_host_hints() {
+        let hub = hub();
+        let mut value = serde_json::json!({"kind":"hello","token":"aa".repeat(32),"session":"session-12345678","sequence":1,"roots":["C:\\host"],"cwd":"C:\\tools","agent":"host","hostSession":"visible-session","originalProject":"C:\\original","executionDirectory":"/home/worktree","environment":"wsl"});
+        hub.apply(
+            parse_message(&value.to_string()).unwrap(),
+            client(7),
+            1,
+            1000,
+        )
+        .unwrap();
+        let original = hub.live(1000).remove(0);
+        value["kind"] = "update".into();
+        value["sequence"] = 2.into();
+        value["roots"] = serde_json::json!(["ssh://unrelated/background"]);
+        value["cwd"] = "C:\\new-tools".into();
+        value["agent"] = "new-label".into();
+        hub.apply(
+            parse_message(&value.to_string()).unwrap(),
+            client(7),
+            1,
+            2000,
+        )
+        .unwrap();
+        let updated = hub.live(2000).remove(0);
+        assert_eq!(updated.registration_id, original.registration_id);
+        assert_eq!(updated.original_project.as_deref(), Some("C:\\original"));
+        assert_eq!(updated.execution_environment(), Environment::Wsl);
+        value["sequence"] = 3.into();
+        value["executionDirectory"] = "/home/other-worktree".into();
+        hub.apply(
+            parse_message(&value.to_string()).unwrap(),
+            client(7),
+            1,
+            3000,
+        )
+        .unwrap();
+        assert_ne!(hub.live(3000)[0].registration_id, original.registration_id);
+    }
+    #[test]
+    fn ambiguous_roots_never_fall_back_to_cwd() {
+        let hub = hub();
+        let message = parse_message(&serde_json::json!({"kind":"hello","token":"aa".repeat(32),"session":"session-12345678","sequence":1,"roots":["C:\\one","C:\\two"],"cwd":"C:\\arbitrary"}).to_string()).unwrap();
+        hub.apply(message, client(7), 1, 1000).unwrap();
+        assert_eq!(hub.live(1000)[0].effective_execution_directory(), None);
+    }
+    #[test]
+    fn environment_identity_never_maps_nonlocal_paths_to_windows() {
+        assert!(validate_path("/home/app", Some(&Environment::WindowsLocal)).is_err());
+        assert!(validate_path("relative/app", None).is_err());
+        assert!(validate_path("C:\\app", Some(&Environment::Remote)).is_err());
+        assert!(validate_path(
+            "\\\\wsl.localhost\\Ubuntu\\app",
+            Some(&Environment::WindowsLocal)
+        )
+        .is_err());
+        assert!(validate_path("ssh://host/app", Some(&Environment::WindowsLocal)).is_err());
+        assert!(validate_path("/home/app", Some(&Environment::Wsl)).is_ok());
+        assert!(validate_path("/home/app", Some(&Environment::Remote)).is_ok());
+        assert_eq!(inferred_environment("/home/app"), Environment::Remote);
+        let hub = hub();
+        let message=parse_message(&serde_json::json!({"kind":"hello","token":"aa".repeat(32),"session":"session-12345678","sequence":1,"roots":["/home/app"],"executionDirectory":"/home/worktree","originalProject":"/home/app","cwd":"C:\\tools","environment":"wsl"}).to_string()).unwrap();
+        hub.apply(message, client(7), 1, 1000).unwrap();
+        let entry = hub.live(1000).remove(0);
+        assert_eq!(entry.execution_environment(), Environment::Wsl);
+        assert_eq!(
+            entry.effective_execution_directory(),
+            Some("/home/worktree")
+        );
+    }
+    #[test]
+    fn bounds_pid_lifetimes_and_time_overflow_fail_closed() {
+        let hub = hub();
+        assert_eq!(
+            hub.apply(hello(0), client(7), 1, 1000),
+            Err("CONTEXT_SEQUENCE_INVALID".into())
+        );
+        assert_eq!(
+            hub.apply(hello(1), client(7), 1, u64::MAX),
+            Err("CONTEXT_TIME_OVERFLOW".into())
+        );
+        hub.apply(hello(1), client(7), 1, 1000).unwrap();
+        hub.remove_connection(1);
+        let mut reused = client(7);
+        reused.started_at = "2000".into();
+        assert_eq!(
+            hub.apply(hello(2), reused, 2, 2000),
+            Err("CONTEXT_SESSION_OWNER_MISMATCH".into())
+        );
+        assert!(validate_path(&format!("C:\\{}", "a".repeat(MAX_PATH_LEN)), None).is_err());
+        assert!(valid_label(&Some("a".repeat(129)), 128, "HOST_SESSION").is_err());
+        for index in 0..MAX_SESSIONS {
+            hub.apply(
+                frame("hello", &format!("session-number-{index:04}"), 1),
+                client(7),
+                2,
+                2000,
             )
             .unwrap();
         }
         assert_eq!(
-            hub.apply(
-                hello("session-overflow-000", vec!["C:\\app".into()]),
-                client(999),
-                now
-            ),
+            hub.apply(hello(2), client(7), 2, 2000),
             Err("CONTEXT_SESSION_LIMIT".into())
         );
-        assert_eq!(hub.live(now + 1).len(), MAX_SESSIONS);
-    }
-
-    #[test]
-    fn declared_roots_and_the_cwd_fallback_are_distinguishable() {
-        let hub = hub_with_token();
-        let now = 1_000;
-        let message = ContextMessage::Hello {
-            token: token(),
-            session: "session-abc-1234".into(),
-            roots: Vec::new(),
-            cwd: Some("C:\\fallback".into()),
-            agent: Some("claude".into()),
-        };
-        hub.apply(message, client(7), now).unwrap();
-        let entry = &hub.live(now + 1)[0];
-        assert!(!entry.has_root_declaration());
-        assert_eq!(entry.declared_roots(), &[] as &[String]);
-        assert_eq!(entry.cwd.as_deref(), Some("C:\\fallback"));
-    }
-
-    #[test]
-    fn token_comparison_is_length_independent_and_exact() {
-        assert!(constant_time_eq(&token(), &token()));
-        assert!(!constant_time_eq(&token(), &"a".repeat(63)));
-        assert!(!constant_time_eq(&token(), &"b".repeat(64)));
-        assert!(!constant_time_eq("", "x"));
     }
 }
