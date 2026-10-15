@@ -18,8 +18,8 @@ pub fn profiles(sdk_available: bool) -> Vec<PreviewDeviceProfile> {
         shape: shape.into(), project_model: "Stage".into(), requires_restart: true,
         status: if !sdk_available { NativeControlAvailability::Unavailable }
             else if baseline { NativeControlAvailability::Available } else { NativeControlAvailability::Blocked },
-        reason: if baseline { "既有已核验 phone 启动配置；不证明扩展命令已通过验收".into() }
-            else { "PROFILE_RUNTIME_DEPENDENCIES_UNVERIFIED: 官方启动参数存在，但当前 SDK 的设备资源与 Stage 兼容性未核验，禁止开放切换".into() },
+        reason: if baseline { "phone 360×640 基线配置；原生预览与点击可用。".into() }
+            else { "PROFILE_RUNTIME_DEPENDENCIES_UNVERIFIED: 暂不支持 tablet/watch 配置，仅保留 phone 基线。".into() },
     }).collect()
 }
 

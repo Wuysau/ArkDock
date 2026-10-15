@@ -120,7 +120,7 @@ impl ControlMailbox {
             if let Some(old) = self.cancel.replace(request) {
                 old.send(old.receipt(
                     NativeControlPhase::Cancelled,
-                    "Cancellation replaced by a newer request",
+                    "取消请求已被更新的请求取代。",
                 ));
             }
             self.cancel_queued(self.cancel_all);
@@ -137,10 +137,9 @@ impl ControlMailbox {
             });
             if replace {
                 if let Some(old) = self.queue.pop_back() {
-                    old.send(old.receipt(
-                        NativeControlPhase::Cancelled,
-                        "Move merged into a newer position",
-                    ));
+                    old.send(
+                        old.receipt(NativeControlPhase::Cancelled, "移动已合并到更新的位置。"),
+                    );
                 }
             }
         }
@@ -174,10 +173,9 @@ impl ControlMailbox {
         let mut retained = VecDeque::new();
         for request in self.queue.drain(..) {
             if all || is_input_action(&request.request.action) {
-                request.send(request.receipt(
-                    NativeControlPhase::Cancelled,
-                    "Native operation cancelled before dispatch",
-                ));
+                request.send(
+                    request.receipt(NativeControlPhase::Cancelled, "原生操作在发送前已取消。"),
+                );
             } else {
                 retained.push_back(request);
             }
@@ -315,7 +313,9 @@ pub fn validate_request(request: &NativeControlRequest) -> Result<(), String> {
             || text.chars().count() > 128
             || text.chars().any(|c| c == '\0' || c == '\r' || c == '\n')
         {
-            return Err("NATIVE_TEXT_LIMIT: commit 1..128 Unicode scalars; use verified Enter key for newlines".into());
+            return Err(
+                "NATIVE_TEXT_LIMIT: 一次最多提交 128 个字符；换行请使用 Enter 按键。".into(),
+            );
         }
     }
     if let Some(page) = &request.page {

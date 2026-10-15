@@ -118,20 +118,21 @@ impl<'a> ControlWorker<'a> {
             if message.get("version").and_then(Value::as_str) != Some("1.0.1")
                 || message.get("result") != Some(&Value::Bool(true))
             {
-                return Err("NATIVE_SAFE_RELEASE_REJECTED: owned runtime must stop".into());
+                return Err(
+                    "NATIVE_SAFE_RELEASE_REJECTED: 原生运行时未确认安全释放，已停止本次预览。"
+                        .into(),
+                );
             }
             let release = self.release.take().expect("pending release");
             self.held = None;
             self.held_key = None;
             self.legacy_release_at = None;
             if !self.cancel_pending {
-                self.resume_input("Native touch released; live input can resume");
+                self.resume_input("原生触摸已释放，可继续输入。");
             }
             if let Some(request) = release.request {
-                let mut receipt = request.receipt(
-                    NativeControlPhase::Cancelled,
-                    "Native pressed input was safely released",
-                );
+                let mut receipt =
+                    request.receipt(NativeControlPhase::Cancelled, "原生按下的输入已安全释放。");
                 receipt.command_accepted = true;
                 request.send(receipt);
             }
@@ -150,8 +151,10 @@ impl<'a> ControlWorker<'a> {
             || message.get("result") != Some(&Value::Bool(true))
         {
             let request = &operation.request;
-            request.send(request.receipt(NativeControlPhase::Failed,
-                "Installed Previewer rejected the experimental command; render completion is unconfirmed"));
+            request.send(request.receipt(
+                NativeControlPhase::Failed,
+                "原生预览器拒绝了该命令；画面是否变化未确认。",
+            ));
             let uncertain_surface = matches!(
                 request.request.action,
                 NativeControlAction::SetOrientation
@@ -163,12 +166,14 @@ impl<'a> ControlWorker<'a> {
                 self.cancel_pending = true;
                 if let Ok(mut state) = self.state.lock() {
                     state.input_ready = false;
-                    state.reason = "Rejected input requires safe release".into();
+                    state.reason = "输入被拒绝，正在安全释放。".into();
                 }
             } else if uncertain_surface {
-                return Err("NATIVE_CONFIGURATION_REJECTED: native route/surface is uncertain; refresh to recover".into());
+                return Err(
+                    "NATIVE_CONFIGURATION_REJECTED: 原生画面状态不确定，请刷新预览恢复。".into(),
+                );
             } else {
-                self.resume_input("Command rejected; last valid native frame retained");
+                self.resume_input("命令被拒绝，保留上一帧有效画面。");
             }
             return Ok(true);
         }
@@ -197,14 +202,14 @@ impl<'a> ControlWorker<'a> {
             operation.accepted = true;
             let mut receipt = operation.request.receipt(
                 NativeControlPhase::CommandAccepted,
-                "Native command acknowledged; application behavior still requires observation",
+                "命令已被原生侧接受；应用行为请以预览画面为准。",
             );
             receipt.command_accepted = true;
             if control::observes_frame(&operation.request.request.action) {
                 operation.observing = true;
                 operation.started = Instant::now();
                 receipt.phase = NativeControlPhase::AwaitingFrame;
-                receipt.reason = "Command acknowledged; waiting for a new native frame and applicable runtime evidence".into();
+                receipt.reason = "命令已接受，正在等待新的原生画面。".into();
                 operation.request.send(receipt);
             } else {
                 operation.request.send(receipt);
@@ -231,16 +236,17 @@ impl<'a> ControlWorker<'a> {
         if let Some((all, reply)) = cancellation {
             for _ in legacy.try_iter().take(16) {}
             if let Some(previous) = self.cancel_reply.take() {
-                previous.send(
-                    previous.receipt(NativeControlPhase::Cancelled, "Cancellation superseded"),
-                );
+                previous.send(previous.receipt(
+                    NativeControlPhase::Cancelled,
+                    "取消请求已被更新的请求取代。",
+                ));
             }
             self.cancel_reply = reply;
             self.cancel_pending = true;
             self.cancel_all |= all;
             if let Ok(mut state) = self.state.lock() {
                 state.input_ready = false;
-                state.reason = "Safely cancelling native input".into();
+                state.reason = "正在安全取消原生输入。".into();
             }
             if let Some(operation) = self.operation.as_mut() {
                 if self.cancel_all || control::is_input_action(&operation.request.request.action) {
@@ -253,10 +259,12 @@ impl<'a> ControlWorker<'a> {
                 if let Some(request) = &release.request {
                     request.send(request.receipt(
                         NativeControlPhase::TimedOut,
-                        "Release acknowledgement timed out; owned runtime will stop",
+                        "释放回执超时，本次预览将停止。",
                     ));
                 }
-                return Err("NATIVE_SAFE_RELEASE_TIMEOUT: owned runtime must stop".into());
+                return Err(
+                    "NATIVE_SAFE_RELEASE_TIMEOUT: 原生输入释放超时，已停止本次预览。".into(),
+                );
             }
             return Ok(());
         }
@@ -274,10 +282,14 @@ impl<'a> ControlWorker<'a> {
             if operation.waiting.as_ref().is_some_and(|(_, sent)| {
                 sent.elapsed() >= Duration::from_millis(control::CONTROL_TIMEOUT_MS)
             }) {
-                operation.request.send(operation.request.receipt(NativeControlPhase::TimedOut,
-                    "Command acknowledgement timed out; correlation is unavailable until runtime restart"));
+                operation.request.send(operation.request.receipt(
+                    NativeControlPhase::TimedOut,
+                    "命令回执超时，需重启预览后才能继续。",
+                ));
                 // No request IDs: do not allow a late receipt to match another operation.
-                return Err("NATIVE_CONTROL_CHANNEL_TIMEOUT: owned runtime must stop".into());
+                return Err(
+                    "NATIVE_CONTROL_CHANNEL_TIMEOUT: 原生命令通道超时，已停止本次预览。".into(),
+                );
             }
             if operation.observing
                 && operation.started.elapsed()
@@ -286,8 +298,8 @@ impl<'a> ControlWorker<'a> {
                 let theme = operation.request.request.action == NativeControlAction::SetColorMode;
                 let mut receipt = operation.request.receipt(if theme { NativeControlPhase::CommandAccepted } else { NativeControlPhase::TimedOut },
                     if theme {
-                        "ColorMode request acknowledged; no new frame observed. Theme propagation is unconfirmed, and apps using fixed colors may show no visual change."
-                    } else { "Command accepted but required native frame/configuration evidence was not observed" });
+                        "已请求切换应用主题；未观察到新画面，是否生效请以预览画面为准；使用固定颜色的应用可能没有变化。"
+                    } else { "命令已被接受，但未观察到对应的原生画面。" });
                 receipt.command_accepted = true;
                 operation.request.send(receipt);
                 let uncertain_surface = matches!(
@@ -298,9 +310,12 @@ impl<'a> ControlWorker<'a> {
                 );
                 self.operation = None;
                 if uncertain_surface {
-                    return Err("NATIVE_SURFACE_OBSERVATION_TIMEOUT: native route/surface is uncertain; refresh to recover".into());
+                    return Err(
+                        "NATIVE_SURFACE_OBSERVATION_TIMEOUT: 原生画面状态不确定，请刷新预览恢复。"
+                            .into(),
+                    );
                 }
-                self.resume_input("ColorMode request acknowledged; application theme propagation and visual response remain unconfirmed");
+                self.resume_input("已请求切换应用主题；是否生效请以预览画面为准。");
             }
             if self
                 .operation
@@ -308,10 +323,10 @@ impl<'a> ControlWorker<'a> {
                 .is_some_and(|op| !op.observing && op.started.elapsed() >= Duration::from_secs(15))
             {
                 if let Some(op) = &self.operation {
-                    op.request.send(op.request.receipt(
-                        NativeControlPhase::TimedOut,
-                        "Native operation exceeded total 15 second bound",
-                    ));
+                    op.request.send(
+                        op.request
+                            .receipt(NativeControlPhase::TimedOut, "原生操作超过 15 秒上限。"),
+                    );
                 }
                 return Err("NATIVE_CONTROL_TOTAL_TIMEOUT".into());
             }
@@ -332,12 +347,10 @@ impl<'a> ControlWorker<'a> {
             if let Some(request) = self.cancel_reply.take() {
                 request.send(request.receipt(
                     NativeControlPhase::Cancelled,
-                    "Local input cancelled; native configuration observation remains active",
+                    "本地输入已取消；原生配置观察仍在进行。",
                 ));
             }
-            self.resume_input(
-                "Native configuration remains pending; local input is safely cancelled",
-            );
+            self.resume_input("原生配置仍在处理，本地输入已安全取消。");
         }
         if inspector_busy
             || self
@@ -349,10 +362,9 @@ impl<'a> ControlWorker<'a> {
         }
         if self.cancel_pending {
             if let Some(operation) = self.operation.take() {
-                let mut receipt = operation.request.receipt(
-                    NativeControlPhase::Cancelled,
-                    "Remaining native operation cancelled",
-                );
+                let mut receipt = operation
+                    .request
+                    .receipt(NativeControlPhase::Cancelled, "剩余原生操作已取消。");
                 receipt.command_accepted = operation.accepted;
                 operation.request.send(receipt);
                 if matches!(
@@ -361,7 +373,10 @@ impl<'a> ControlWorker<'a> {
                         | NativeControlAction::SetResolution
                         | NativeControlAction::NavigatePage
                 ) {
-                    return Err("NATIVE_CONFIGURATION_CANCELLED: native route/surface is uncertain; refresh to recover".into());
+                    return Err(
+                        "NATIVE_CONFIGURATION_CANCELLED: 原生画面状态不确定，请刷新预览恢复。"
+                            .into(),
+                    );
                 }
             }
             if let Some(key) = self.held_key.take() {
@@ -393,13 +408,12 @@ impl<'a> ControlWorker<'a> {
                     request: self.cancel_reply.take(),
                 });
             } else if let Some(request) = self.cancel_reply.take() {
-                request.send(request.receipt(
-                    NativeControlPhase::Cancelled,
-                    "No native touch remains pressed",
-                ));
-                self.resume_input("Native input cancelled");
+                request.send(
+                    request.receipt(NativeControlPhase::Cancelled, "没有仍在按下的原生触摸。"),
+                );
+                self.resume_input("原生输入已取消。");
             } else {
-                self.resume_input("Native input cancelled");
+                self.resume_input("原生输入已取消。");
             }
             return Ok(());
         }
@@ -480,7 +494,7 @@ impl<'a> ControlWorker<'a> {
         if !control::identity_matches(&request.request.identity, self.task, &state) {
             request.send(request.receipt(
                 NativeControlPhase::Cancelled,
-                "Request belongs to an obsolete runtime or surface",
+                "该请求属于已失效的预览会话。",
             ));
             return Ok(());
         }
@@ -493,10 +507,7 @@ impl<'a> ControlWorker<'a> {
             .as_ref()
             .is_none_or(|held| Some(&held.gesture_id) != request.request.gesture_id.as_ref())
         {
-            request.send(request.receipt(
-                NativeControlPhase::Failed,
-                "No matching native gesture is pressed",
-            ));
+            request.send(request.receipt(NativeControlPhase::Failed, "没有匹配的按住手势。"));
             return Ok(());
         }
         if self.held.is_some()
@@ -507,19 +518,23 @@ impl<'a> ControlWorker<'a> {
         {
             request.send(request.receipt(
                 NativeControlPhase::Failed,
-                "Finish or cancel the current gesture before another native operation",
+                "请先完成或取消当前手势，再进行其他原生操作。",
             ));
             return Ok(());
         }
         if *action == NativeControlAction::NavigatePage {
             let Some(current_route) = state.current_route.as_deref() else {
-                request.send(request.receipt(NativeControlPhase::Blocked,
-                    "Native current route is unknown; unsafe ReplacePage was not sent. Refresh and wait for a real router notification."));
+                request.send(request.receipt(
+                    NativeControlPhase::Blocked,
+                    "原生当前路由未知，未发送页面替换命令；请刷新预览并等待原生路由回读。",
+                ));
                 return Ok(());
             };
             if Some(current_route) == request.request.page.as_deref() {
-                let mut receipt = request.receipt(NativeControlPhase::Observed,
-                    "The native runtime is already on the requested page. No ReplacePage command or reload was sent; the last valid frame is retained.");
+                let mut receipt = request.receipt(
+                    NativeControlPhase::Observed,
+                    "原生运行时已在目标页面，未发送页面替换或刷新；保留上一帧有效画面。",
+                );
                 receipt.current_route = state.current_route;
                 receipt.configuration_confirmed = true;
                 request.send(receipt);
@@ -527,8 +542,14 @@ impl<'a> ControlWorker<'a> {
             }
         }
         if *action == NativeControlAction::QueryRouter {
-            let mut receipt = request.receipt(if state.current_route.is_some() { NativeControlPhase::Observed } else { NativeControlPhase::Blocked },
-                "CurrentRouter is read from native CurrentJsRouter notifications; the public get path has no reliable reply");
+            let mut receipt = request.receipt(
+                if state.current_route.is_some() {
+                    NativeControlPhase::Observed
+                } else {
+                    NativeControlPhase::Blocked
+                },
+                "当前路由仅来自原生 CurrentJsRouter 通知；公开 get 通道无可靠回读",
+            );
             receipt.current_route = state.current_route;
             receipt.configuration_confirmed = receipt.current_route.is_some();
             request.send(receipt);
@@ -544,7 +565,7 @@ impl<'a> ControlWorker<'a> {
         if control::observes_frame(action) {
             if let Ok(mut state) = self.state.lock() {
                 state.input_ready = false;
-                state.reason = "Native configuration transition in progress".into();
+                state.reason = "正在应用原生配置。".into();
             }
         }
         self.operation = Some(Operation {
@@ -691,8 +712,9 @@ impl<'a> ControlWorker<'a> {
                     return Ok(false);
                 }
                 if *action != NativeControlAction::NavigatePage || router_confirmed {
-                    let mut receipt = operation.request.receipt(NativeControlPhase::Observed,
-                        "A new native frame was observed; pixel change and configuration confirmation are reported separately");
+                    let mut receipt = operation
+                        .request
+                        .receipt(NativeControlPhase::Observed, "已观察到新的原生画面。");
                     receipt.command_accepted = operation.accepted;
                     receipt.frame_observed = true;
                     // Different JPEG bytes do not necessarily prove different
@@ -748,9 +770,7 @@ impl<'a> ControlWorker<'a> {
             self.operation = None;
         }
         if self.operation.is_none() && self.release.is_none() && !self.cancel_pending {
-            self.resume_input(
-                "Live native frame; additional commands are experimental and await user acceptance",
-            );
+            self.resume_input("原生画面已就绪；其他原生控制请在预览能力页启用。");
         }
         Ok(true)
     }
@@ -780,21 +800,17 @@ impl<'a> ControlWorker<'a> {
         if let Some(operation) = self.operation.take() {
             operation.request.send(operation.request.receipt(
                 NativeControlPhase::Cancelled,
-                "Owned native runtime stopped; remaining operation cancelled",
+                "原生预览已停止，剩余操作已取消。",
             ));
         }
         if let Some(request) = self.cancel_reply.take() {
-            request.send(request.receipt(
-                NativeControlPhase::Cancelled,
-                "Owned native runtime stopped",
-            ));
+            request.send(request.receipt(NativeControlPhase::Cancelled, "原生预览已停止。"));
         }
         if let Some(release) = self.release.take() {
             if let Some(request) = release.request {
-                request.send(request.receipt(
-                    NativeControlPhase::Cancelled,
-                    "Owned native runtime stopped during release",
-                ));
+                request.send(
+                    request.receipt(NativeControlPhase::Cancelled, "原生预览在释放输入时停止。"),
+                );
             }
         }
     }
