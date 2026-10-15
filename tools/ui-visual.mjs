@@ -311,8 +311,8 @@ try {
   await check('V3: missing independent orientation and theme control states remain unavailable with reasons', async () => {
     await load('running'); await click('[aria-label="预览能力"]'); await pause(60);
     const controls = await driver.evaluate('[...document.querySelectorAll(".capability-list>div")].map(e=>({text:e.textContent,status:e.querySelector(".badge")?.textContent,reason:e.querySelector("p")?.textContent}))');
-    assert.ok(controls.some(e => /方向|旋转/.test(e.text) && e.status === 'unavailable' && e.reason));
-    assert.ok(controls.some(e => /应用.*主题/.test(e.text) && e.status === 'unavailable' && e.reason));
+    assert.ok(controls.some(e => /方向|旋转/.test(e.text) && e.status === '未接入' && e.reason));
+    assert.ok(controls.some(e => /应用.*主题/.test(e.text) && e.status === '未接入' && e.reason));
   });
   await check('V4: panel receives focus, traps Tab, Esc closes, and restores trigger focus', async () => {
     await load('running'); await click('[aria-label="更多操作"]'); await click('button', '偏好设置'); await pause(40);

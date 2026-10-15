@@ -129,7 +129,7 @@ try {
     const actual=await view.evaluate('window.__TAURI__.core.invoke("snapshot").then(state=>({target:state.target,project:state.project}))');
     assert.equal(actual.target,null,'Dedicated UI acceptance has no target; capability booleans cannot bypass association');
     assert.equal(actual.project,null,'Unbound capability reasons must require an actual project');
-    assert.equal(unavailable.length,8); for(const capability of unavailable) { assert.equal(capability.status,'pending'); assert.ok(capability.reason.includes('关联实际工程')); } await closePanel();
+    assert.equal(unavailable.length,8); for(const capability of unavailable) { assert.equal(capability.status,'待连接'); assert.ok(capability.reason.includes('关联实际工程')); } await closePanel();
   });
   await check('Real minimize button minimizes only ArkDock; restore and native resize work',async()=>{
     const before=action('info',handle); await click('[aria-label="最小化窗口"]'); await pause(250);

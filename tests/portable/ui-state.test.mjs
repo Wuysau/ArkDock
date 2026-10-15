@@ -84,7 +84,7 @@ test('姿态、文字、滑动与设备控制等待独立能力状态，后端�
   }
   for (const name of ['emulator', 'physicalDevice']) {
     assert.equal(ui.capabilities[name].status, 'blocked', name);
-    assert.match(ui.capabilities[name].reason, /核验|尚待接入/, name);
+    assert.match(ui.capabilities[name].reason, /未接入/, name);
   }
   const runningWithoutClick = deriveUiState(snapshot({ backend: { ...snapshot().backend, canClick: false } }), nativeFrame);
   assert.equal(runningWithoutClick.capabilities.click.status, 'unsupported');

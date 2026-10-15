@@ -117,7 +117,7 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
     return actual ? capability(actual.status, actual.reason) : capability('unavailable', control ? reason : '等待原生控制能力状态');
   };
   const deviceCapability = (kind: 'emulator' | 'physicalDevice'): UiCapability => gate ?? capability('blocked', device?.reason
-    || (kind === 'emulator' ? '尚未核验合法安装的鸿蒙虚拟设备、签名部署与真实画面传输' : '需要主动选择设备并授权连接；签名部署与真实设备画面尚待接入'));
+    || (kind === 'emulator' ? '未接入：暂不支持经由 ArkDock 启动鸿蒙虚拟设备' : '未接入：暂不支持经由 ArkDock 连接真机并显示画面'));
   const bindingLabels: Record<BindingState, string> = {
     unbound: '未绑定', candidate: '松开以连接', binding: '正在连接',
     bound: state?.target ? `已连接到 ${state.target.app}` : '已连接', unavailable: '窗口联动不可用',
@@ -140,12 +140,12 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
       refresh: gate ?? capability('available', '重新构建当前受信任工程'),
       stop: !state ? capability('pending', '等待桌面后端') : state.sessionId && state.phase !== 'stopped'
         ? capability('available', '停止此工具拥有的原生预览资源') : capability('unavailable', '当前没有可停止的预览会话'),
-      swipe: nativeCapability('touch', '当前后端未提供连续触控'),
-      text: nativeCapability('text', '当前后端未提供文字提交；完整 IME 事务未接入'),
-      rotate: nativeCapability('orientation', '当前后端未提供原生设备方向配置'),
-      page: nativeCapability('page', '当前编译产物没有核验的可切换页面'),
-      device: nativeCapability('profile', '当前 SDK 没有核验的可切换设备 Profile'),
-      appTheme: nativeCapability('colorMode', '当前后端未提供应用主题配置'),
+      swipe: nativeCapability('touch', '未接入：暂不支持经由 ArkDock 拖拽或滑动'),
+      text: nativeCapability('text', '未接入：暂不支持经由 ArkDock 发送文字输入'),
+      rotate: nativeCapability('orientation', '未接入：暂不支持经由 ArkDock 切换设备方向'),
+      page: nativeCapability('page', '未接入：暂不支持经由 ArkDock 切换页面'),
+      device: nativeCapability('profile', '未接入：暂不支持经由 ArkDock 切换设备配置'),
+      appTheme: nativeCapability('colorMode', '未接入：暂不支持经由 ArkDock 切换应用主题'),
       emulator: deviceCapability('emulator'),
       physicalDevice: deviceCapability('physicalDevice'),
     },
