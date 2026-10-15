@@ -13,6 +13,7 @@
 //! - a code means the same thing on every command path.
 
 use super::model::{ErrorCategory, ErrorCode, IpcError, RecoveryAction};
+use crate::preview::dependencies as preview_dependencies;
 
 /// Bounded diagnostics are truncated at a character boundary.
 pub(crate) const MAX_DETAILS_CHARS: usize = 400;
@@ -30,7 +31,7 @@ pub(crate) struct ErrorSpec {
 }
 
 macro_rules! error_table {
-    ($(($wire:literal, $code:ident, $category:ident, $retryable:literal, $recovery:ident, $message:literal)),* $(,)?) => {
+    ($(($wire:literal, $code:ident, $category:ident, $retryable:literal, $recovery:ident, $message:expr)),* $(,)?) => {
         pub(crate) const ERROR_TABLE: &[ErrorSpec] = &[
             $(ErrorSpec {
                 wire: $wire,
@@ -1074,6 +1075,17 @@ error_table![
         false,
         None,
         "Native selection requires a supported desktop platform"
+    ),
+    // A declared dependency that is not installed in the project's oh_modules tree.
+    // The preview build cannot resolve any import that depends on it, so ArkDock
+    // fails closed before starting hvigor and names the real cause.
+    (
+        "PROJECT_DEPENDENCIES_NOT_INSTALLED",
+        ProjectDependenciesNotInstalled,
+        Environment,
+        false,
+        RestartPreview,
+        preview_dependencies::DEPENDENCIES_NOT_INSTALLED_MESSAGE
     ),
     // Host storage and settings.
     (
@@ -2577,6 +2589,21 @@ mod tests {
         assert_eq!(parsed.category, error.category);
         assert_eq!(parsed.recovery, error.recovery);
         assert_eq!(parsed.retryable, error.retryable);
+    }
+
+    #[test]
+    fn an_uninstalled_dependency_tree_is_an_environment_failure_with_one_action() {
+        let spec = spec_for("PROJECT_DEPENDENCIES_NOT_INSTALLED").expect("declared");
+        assert_eq!(spec.category, ErrorCategory::Environment);
+        assert!(!spec.retryable);
+        assert_eq!(spec.recovery, RecoveryAction::RestartPreview);
+        assert_eq!(
+            spec.message,
+            crate::preview::dependencies::DEPENDENCIES_NOT_INSTALLED_MESSAGE
+        );
+        // The copy stays product-safe and keeps the `code: message` wire shape.
+        assert!(spec.message.contains("ohpm install"), "{}", spec.message);
+        assert!(!spec.message.contains(':'), "{}", spec.message);
     }
 
     #[test]

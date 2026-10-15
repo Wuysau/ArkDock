@@ -2,6 +2,7 @@
 pub mod build;
 pub mod configuration;
 pub mod control;
+pub mod dependencies;
 pub mod device_runtime;
 pub mod environment;
 pub mod frames;
@@ -116,6 +117,21 @@ impl NativePreviewer {
 
     pub fn configured_sdk(&self) -> Option<PathBuf> {
         self.sdk.clone()
+    }
+
+    /// Synchronous dependency preflight for the refresh command: a project whose
+    /// declared dependencies are not installed fails before a build is scheduled,
+    /// so the user gets the structured cause instead of the ArkTS cascade it causes.
+    pub fn preflight(&self, project: &ProjectRef) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            windows::dependency_preflight(project)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = project;
+            Ok(())
+        }
     }
 
     pub fn request_inspection(

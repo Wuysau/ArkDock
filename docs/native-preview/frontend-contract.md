@@ -26,6 +26,14 @@
 `scope` 为 `{ targetId, sessionId }`。不要缓存旧 scope 后操作新的目标或会话；
 后端会拒绝迟到请求。前端不接收 HWND，不启动 SDK，不访问 Shell 或进程插件。
 
+刷新前，后端先验证工程声明的依赖是否已安装：`oh-package.json5` 中声明、但在工程或
+所选模块的 `oh_modules` 中不可解析的依赖，会让 `refresh_preview` 以
+`PROJECT_DEPENDENCIES_NOT_INSTALLED`（`environment`、`retryable` 为 `false`、
+`recovery` 为 `restartPreview`）失败，且不启动构建；用户在该工程执行
+`ohpm install`（或在 DevEco Studio 中同步一次工程）后重新刷新即可。未声明任何依赖的
+工程不需要 `oh_modules`。构建失败时，若日志只包含由此产生的模块解析失败，失败原因
+仍以该错误码开头，原始日志继续保留在诊断和 `ark details` 中。
+
 ## 结构化错误契约
 
 除三个二进制帧命令外，所有命令失败时返回生成类型 `IpcError`：

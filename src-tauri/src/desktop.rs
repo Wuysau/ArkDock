@@ -222,6 +222,20 @@ fn frame_changes_state(snapshot: &AppSnapshot, build: &BuildStatus) -> bool {
     snapshot.phase != Phase::Running || snapshot.build != *build
 }
 
+/// The diagnostic code for a failed preview build. A failure the build path already
+/// classified keeps its own code, so the snapshot diagnostics, the structured error
+/// vocabulary and the raw log agree on one primary cause; every unclassified failure
+/// stays `PREVIEW_FAILED`.
+fn failure_diagnostic_code(error: &str) -> &'static str {
+    if error.split(':').next().unwrap_or_default().trim()
+        == crate::preview::dependencies::DEPENDENCIES_NOT_INSTALLED
+    {
+        crate::preview::dependencies::DEPENDENCIES_NOT_INSTALLED
+    } else {
+        "PREVIEW_FAILED"
+    }
+}
+
 fn absolute_directory_input(value: &str) -> Result<PathBuf, String> {
     if value.len() > 4096 {
         return Err("INVALID_DIRECTORY_PATH: enter a bounded absolute directory path".into());
@@ -943,6 +957,12 @@ impl Engine {
                 if !self.snapshot.backend.available {
                     return Err(self.snapshot.backend.reason.clone());
                 }
+                // Fail closed before a build is scheduled. A declared dependency that is
+                // not installed in the project's oh_modules tree can only produce
+                // cascading ArkTS compiler errors, never a preview.
+                if let Some(project) = self.snapshot.project.clone() {
+                    self.backend.preflight(&project)?;
+                }
                 self.scheduler.request_refresh(now());
             }
             Action::Stop => self.stop_execution(),
@@ -1121,7 +1141,7 @@ impl Engine {
                         } else {
                             Phase::Crashed
                         };
-                        self.diagnostic("PREVIEW_FAILED", error, CheckStatus::Fail);
+                        self.diagnostic(failure_diagnostic_code(&error), error, CheckStatus::Fail);
                     }
                 }
             }
@@ -1138,7 +1158,7 @@ impl Engine {
                     Phase::Crashed
                 };
                 if let BuildOutcome::Failure(error) = outcome {
-                    self.diagnostic("PREVIEW_FAILED", error, CheckStatus::Fail);
+                    self.diagnostic(failure_diagnostic_code(&error), error, CheckStatus::Fail);
                 }
             }
             self.publish();

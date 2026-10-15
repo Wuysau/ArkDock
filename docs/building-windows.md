@@ -34,6 +34,8 @@ Install the HarmonyOS Command Line Tools from the official vendor distribution a
 
 Project discovery is read-only. Select the intended project and grant build trust separately before allowing build logic to run. Unknown SDK versions or Previewer protocols remain blocked; changing an SDK manifest label does not make an unverified toolchain supported.
 
+A project must have its own dependency tree installed before ArkDock can build a preview: run `ohpm install` in the project root, or synchronize the project once in DevEco Studio, so every dependency declared in the project's and the selected module's `oh-package.json5` exists under `oh_modules`. When a declared dependency is missing, refresh fails closed with `PROJECT_DEPENDENCIES_NOT_INSTALLED` instead of starting hvigor, because hvigor would otherwise report a wall of cascading ArkTS errors that look like the project's own code is broken. A project that declares no dependency needs no `oh_modules` at all. ArkDock never installs a project's dependencies on its own.
+
 See [Compatibility](compatibility.md) for the current runtime scope and [the native IPC contract](native-preview/frontend-contract.md) for frame lifecycle details.
 
 ## Running the native gate
