@@ -1,10 +1,13 @@
 //! Adapter for the exact, locally verified HarmonyOS 26.0.0.105 Windows toolchain.
 //! Public OpenHarmony sources informed experiments; actual commercial binary receipts
 //! are required by the native gate. No unverified version enters this adapter.
-use super::build::{build_exit_result, build_receipt, preview_build_args, BuildReceipt};
+use super::build::{
+    build_exit_result, build_receipt, failure_message, preview_build_args, BuildReceipt,
+};
 use super::control::{
     self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand,
 };
+use super::dependencies;
 use super::frames::{parse_jpeg40_for_surface, BinaryFrame, BinaryFrameMailbox};
 use super::NativePoint;
 use crate::inspector::{
@@ -94,16 +97,7 @@ fn build_progress(
             }
             Ok(true)
         }
-        BuildReceipt::Failed => Err(format!(
-            "BUILD_FAILED: PreviewBuild; {}",
-            log.chars()
-                .rev()
-                .take(4096)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-        )),
+        BuildReceipt::Failed => Err(failure_message(&log, "PreviewBuild")),
         BuildReceipt::Pending => Ok(false),
     }
 }
@@ -137,6 +131,51 @@ fn build_environment(sdk: &Path, root: &Path, run_directory: &Path) -> Vec<(Stri
                 .into_owned(),
         ),
     ]
+}
+
+/// The canonical project root and the selected module directory, derived from the
+/// project's own build profile. Shared by the build and the dependency preflight so
+/// the profile is never resolved twice.
+fn resolved_module(project: &ProjectRef) -> Result<(PathBuf, PathBuf), String> {
+    let root = Path::new(&project.app_root)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let root = local_path(&root)?;
+    let profile_bytes =
+        crate::workspace::read_bounded(&root.join("build-profile.json5"), 1024 * 1024)?;
+    let profile_text = std::str::from_utf8(&profile_bytes).map_err(|e| e.to_string())?;
+    let profile: serde_json::Value = json5::from_str(profile_text).map_err(|e| e.to_string())?;
+    let source = profile
+        .get("modules")
+        .and_then(|v| v.as_array())
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("name").and_then(|v| v.as_str()) == Some(&project.module))
+        })
+        .and_then(|module| module.get("srcPath"))
+        .and_then(|v| v.as_str())
+        .ok_or("MODULE_PATH_MISSING")?;
+    let module = root
+        .join(source)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let module = local_path(&module)?;
+    if !module.starts_with(&root) {
+        return Err("MODULE_OUTSIDE_PROJECT".into());
+    }
+    Ok((root, module))
+}
+
+/// Synchronous dependency preflight for the refresh command, so a project whose
+/// declared dependencies are not installed fails before any build is scheduled.
+/// A project this preflight cannot resolve is left to the build path, which
+/// reports exactly the failure it reports today.
+pub(super) fn dependency_preflight(project: &ProjectRef) -> Result<(), String> {
+    let Ok((root, module)) = resolved_module(project) else {
+        return Ok(());
+    };
+    dependencies::preflight(&root, &module)
 }
 
 fn build_arguments(sdk: &Path, module: &str, run_directory: &Path) -> Result<Vec<String>, String> {
@@ -661,33 +700,10 @@ fn run(
     {
         return Err("UNSUPPORTED_BUILD_TARGET: verified profile supports default product/target and named Stage modules".into());
     }
-    let root = Path::new(&project.app_root)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let root = local_path(&root)?;
-    let profile_bytes =
-        crate::workspace::read_bounded(&root.join("build-profile.json5"), 1024 * 1024)?;
-    let profile_text = std::str::from_utf8(&profile_bytes).map_err(|e| e.to_string())?;
-    let profile: serde_json::Value = json5::from_str(profile_text).map_err(|e| e.to_string())?;
-    let source = profile
-        .get("modules")
-        .and_then(|v| v.as_array())
-        .and_then(|modules| {
-            modules
-                .iter()
-                .find(|module| module.get("name").and_then(|v| v.as_str()) == Some(&project.module))
-        })
-        .and_then(|module| module.get("srcPath"))
-        .and_then(|v| v.as_str())
-        .ok_or("MODULE_PATH_MISSING")?;
-    let module = root
-        .join(source)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let module = local_path(&module)?;
-    if !module.starts_with(&root) {
-        return Err("MODULE_OUTSIDE_PROJECT".into());
-    }
+    let (root, module) = resolved_module(project)?;
+    // Fail closed before hvigor starts: a declared dependency that is not installed
+    // can only produce cascading ArkTS compiler errors, never a preview.
+    dependencies::preflight(&root, &module)?;
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| e.to_string())?;
     let nonce = random

@@ -1,5 +1,12 @@
 //! Preview-only SDK task arguments and the pinned Hvigor watch-task receipt.
 
+use super::dependencies::{
+    classify_build_log, DEPENDENCIES_NOT_INSTALLED, DEPENDENCIES_NOT_INSTALLED_MESSAGE,
+};
+
+/// Diagnostics handed to a failure message, newest last.
+const FAILURE_TAIL_CHARS: usize = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildReceipt {
     Pending,
@@ -86,22 +93,34 @@ fn plain_sdk_log(mut remaining: &str) -> String {
 
 pub fn build_exit_result(module: &str, code: u32, flushed_log: &str) -> Result<(), String> {
     if code != 0 || build_receipt(module, flushed_log) == BuildReceipt::Failed {
-        return Err(format!(
-            "BUILD_FAILED: exit {code}; {}",
-            flushed_log
-                .chars()
-                .rev()
-                .take(4096)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-        ));
+        return Err(failure_message(flushed_log, &format!("exit {code}")));
     }
     if build_receipt(module, flushed_log) != BuildReceipt::Succeeded {
         return Err("BUILD_RECEIPT_MISSING: PreviewBuild graph was not confirmed".into());
     }
     Ok(())
+}
+
+/// A failed preview build leads with its classified primary cause and keeps the
+/// newest raw log appended, so the diagnostics and `ark details` paths still carry
+/// exactly the evidence they carried before.
+pub fn failure_message(log: &str, context: &str) -> String {
+    let tail: String = log
+        .chars()
+        .rev()
+        .take(FAILURE_TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if classify_build_log(log) == Some(DEPENDENCIES_NOT_INSTALLED) {
+        format!(
+            "{DEPENDENCIES_NOT_INSTALLED}: {DEPENDENCIES_NOT_INSTALLED_MESSAGE}\n[ArkDock] {context}\n{tail}"
+        )
+    } else {
+        // Unrelated failures keep today's message byte for byte.
+        format!("BUILD_FAILED: {context}; {tail}")
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +186,29 @@ mod tests {
         assert_eq!(
             build_receipt("entry", "> hvigor BUILD FAILED in 1 s"),
             BuildReceipt::Failed
+        );
+    }
+
+    #[test]
+    fn a_module_resolution_failure_leads_the_build_failure_and_keeps_the_raw_log() {
+        // The shape of the logged jingmo-for-HarmonyOS failure: unresolved imports
+        // first, then a wall of cascading ArkTS errors.
+        let log = "> hvigor WARN: \"utils\" is imported by \"entry/src/main/ets/pages/Index.ets\", but could not be resolved – treating it as an external dependency.\n> hvigor ERROR: 10505001 ArkTS Compiler Error\nError Message: Cannot find module 'utils' or its corresponding type declarations.\n> hvigor ERROR: BUILD FAILED in 14 s 126 ms";
+        let error = build_exit_result("entry", 1, log).expect_err("failed build");
+        assert!(
+            error.starts_with("PROJECT_DEPENDENCIES_NOT_INSTALLED: 该项目尚未安装依赖"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Cannot find module 'utils'"),
+            "the raw log must stay available: {error}"
+        );
+        // Unrelated compiler failures keep today's message exactly.
+        let unrelated = build_exit_result("entry", 1, "> hvigor ERROR: BUILD FAILED in 1 s")
+            .expect_err("failed build");
+        assert!(
+            unrelated.starts_with("BUILD_FAILED: exit 1; "),
+            "{unrelated}"
         );
     }
 }
