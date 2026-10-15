@@ -249,7 +249,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
           <button className="icon-button" aria-label="预览能力" title="查看方向、应用主题和输入能力" onClick={() => navigate('controls')}><Icon name="settings" size={17} /></button></div>
         {runtimeKind === 'native' && interactionMode === 'inspect' && <InspectorActionsBar enabled={Boolean(state?.phase === 'running' && state.trusted && state.backend.available) && !busy && !controls.pending && (!controls.state?.experimentalEnabled || controls.state.inputReady)}
             region={() => inspectorActions.current?.selectRegion()} refresh={() => inspectorActions.current?.refreshTree()} problem={inspectorProblem} />}
-      </section><div className="stage-caption"><span><span className={`tiny-dot ${runtimeKind === 'native' && state?.phase === 'running' ? 'live' : ''}`} />{runtimeKind === 'native' ? state?.backend.available ? 'NATIVE PREVIEW' : 'PREVIEW WORKSPACE' : 'DEVICE RUNTIME · BLOCKED'}</span><span>{state?.backend.sdkVersion ? `SDK ${state.backend.sdkVersion}` : '等待工具链'}</span></div></>}
+      </section><div className="stage-caption"><span><span className={`tiny-dot ${runtimeKind === 'native' && state?.phase === 'running' ? 'live' : ''}`} />{runtimeKind === 'native' ? state?.backend.available ? 'NATIVE PREVIEW' : 'PREVIEW WORKSPACE' : 'DEVICE RUNTIME'}</span><span>{state?.backend.sdkVersion ? `SDK ${state.backend.sdkVersion}` : '等待工具链'}</span></div></>}
           status={<BuildStatusBar snapshot={state} store={store} pending={pending} open={() => navigate('diagnostics')} />}
           statusIndicator={<BuildStatusBar snapshot={state} store={store} pending={pending} compact />}>
           <div className="native-preview-host" hidden={runtimeKind !== 'native'}>

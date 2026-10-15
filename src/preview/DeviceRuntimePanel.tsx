@@ -49,7 +49,7 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
     <p className="muted">独立设备运行方式 · 设备画面通道尚未就绪</p>
     <p className="info-note">{state?.reason ?? '等待当前工程的 HDC 设备运行状态。'}</p>
     <dl className="details-list"><div><dt>HDC</dt><dd>{state?.hdcPresent ? state.hdcPath : '没有检测到合法安装的 HDC'}</dd></div>
-      <div><dt>签名与部署</dt><dd>{state?.signatureStatus ?? '尚未核验'}</dd></div><div><dt>运行状态</dt><dd>{pending ? `请求处理中：${pending}` : state?.phase ?? '等待工程会话'}</dd></div></dl>
+      <div><dt>签名与部署</dt><dd>{state?.signatureStatus ?? '尚未获取'}</dd></div><div><dt>运行状态</dt><dd>{pending ? `请求处理中：${pending}` : state?.phase ?? '等待工程会话'}</dd></div></dl>
     <label className="device-consent"><input type="checkbox" checked={connectionConsent} disabled={Boolean(pending)}
       onChange={(event) => setConnectionConsent(event.target.checked)} />允许使用当前工程的 HDC 连接并列出设备</label>
     <div className="panel-actions"><button disabled={!state?.hdcPresent || !state.identity || !connectionConsent || Boolean(pending)}
@@ -58,10 +58,10 @@ export function DeviceRuntimePanel({ snapshot, bridge, kind }: { snapshot: AppSn
     {state?.targets.length ? <ul className="device-targets">{state.targets.map((target) => <li key={target.id}><button
       disabled={!connectionConsent || Boolean(pending)} aria-pressed={state.selectedTargetId === target.id}
       title={`${target.connectionState} · ${target.reason}`} onClick={() => void act('select', target.id)}>
-      <strong>{target.label}</strong><code>{target.id}</code><span>{target.kind === 'unknown' ? `类型待核验 · 按当前选择申请为${kind === 'emulator' ? '模拟器' : '真机'}` : target.kind === 'emulator' ? '模拟器' : '真机'} · {target.connectionState}</span>
+      <strong>{target.label}</strong><code>{target.id}</code><span>{target.kind === 'unknown' ? `设备类型未确定 · 请选择模拟器或真机` : target.kind === 'emulator' ? '模拟器' : '真机'} · {target.connectionState}</span>
     </button></li>)}</ul> : <p className="muted">没有已发现的设备；不会根据设备名称自动判定真机或模拟器。</p>}
     <button className="primary-button" disabled title={state?.reason ?? '需要可安装产物、签名、Ability 与真实设备画面接入'}>安装并启动应用 · 暂不可用</button>
-    <p className="muted">连接授权不包含安装授权。签名产物、Ability、设备前台核验与画面传输完成接入后，安装还需单独确认。</p>
+    <p className="muted">连接授权不包含安装授权。签名产物、Ability 与设备画面传输接入后，安装还需单独确认。</p>
     {error && <output className="native-control-error" role="alert">{describeError(error)}</output>}
   </div>;
 }

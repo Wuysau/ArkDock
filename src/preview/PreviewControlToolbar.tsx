@@ -38,8 +38,8 @@ export function PreviewControlToolbar({ snapshot, store, controls, busy }: { sna
       onClick={() => void controls.submit({ action: 'setOrientation', orientation: state?.orientation === 'landscape' ? 'portrait' : 'landscape' })}>
       <span className={`orientation-symbol ${state?.orientation === 'landscape' ? 'landscape' : ''}`} aria-hidden="true" />
     </button>
-    <button className="icon-button" aria-label={`切换鸿蒙应用主题，请求值${state ? state.colorMode === 'dark' ? '深色' : '浅色' : '待确认'}，传播待观察`}
-      disabled={!ready(snapshot, store, controls, 'colorMode', busy)} title={`主题请求值 · 传播待观察；${state?.capabilities.find((item) => item.name === 'colorMode')?.reason ?? '等待原生应用主题能力'}`}
+    <button className="icon-button" aria-label={`切换鸿蒙应用主题，当前${state ? state.colorMode === 'dark' ? '深色' : '浅色' : '待确认'}`}
+      disabled={!ready(snapshot, store, controls, 'colorMode', busy)} title={`应用主题只影响鸿蒙应用；${state?.capabilities.find((item) => item.name === 'colorMode')?.reason ?? '等待原生应用主题能力'}`}
       onClick={() => void controls.submit({ action: 'setColorMode', colorMode: state?.colorMode === 'dark' ? 'light' : 'dark' })}>
       <Icon name={state?.colorMode === 'dark' ? 'moon' : 'sun'} size={16} />
     </button>
