@@ -590,7 +590,18 @@
       "pairLayout": "PairLayoutStatus?",
       "display": "DisplayStatus",
       "motion": "MotionSettings",
-      "dockConfirmation": "DockConfirmation?"
+      "dockConfirmation": "DockConfirmation?",
+      "contextSource": "ContextSourceStatus?"
+    },
+    "ContextPairing": {
+      "pipeName": "string",
+      "pairingFile": "string"
+    },
+    "ContextSourceStatus": {
+      "paired": "bool",
+      "activeSessions": "u32",
+      "lastEventAt": "u64",
+      "reason": "string?"
     },
     "NativeFrame": {
       "sessionId": "string",
@@ -821,6 +832,8 @@
     }
   },
   "commandResponses": {
+    "context_pair_create": { "rust": "ContextPairing", "typescript": "ContextPairing", "error": "IpcError" },
+    "context_pair_revoke": { "rust": "bool", "typescript": "boolean", "error": "IpcError" },
     "snapshot": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "collapse_to_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "expand_from_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
@@ -968,6 +981,8 @@
     }
   },
   "commands": {
+    "context_pair_create": {},
+    "context_pair_revoke": {},
     "preview_control_state": { "scope": "RequestScope" },
     "preview_control_enable": { "scope": "RequestScope", "enabled": "bool" },
     "preview_control_submit": { "scope": "RequestScope", "request": "NativeControlRequest" },

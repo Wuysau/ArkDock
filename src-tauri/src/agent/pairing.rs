@@ -142,6 +142,14 @@ pub(crate) fn stage_credential(
     stage(path, &bytes)
 }
 
+/// Stages arbitrary credential bytes with the same local-disk bounds and private
+/// temporary-file discipline. Used by the context-source pairing, whose credential
+/// file has its own schema.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn stage_bytes(path: &Path, bytes: &[u8]) -> Result<StagedCredential, String> {
+    stage(path, bytes)
+}
+
 fn stage(path: &Path, bytes: &[u8]) -> Result<StagedCredential, String> {
     // Resolve junctions off the actor, and reject remote/mapped drives before
     // the final synchronous commit. This is a local disk save, not network I/O.

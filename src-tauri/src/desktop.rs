@@ -1,4 +1,7 @@
 //! A single backend worker owns sessions. Hooks/watchers only enqueue lightweight messages.
+use crate::context::ContextHub;
+#[cfg(windows)]
+use crate::discovery::context_source::ContextSourceResolver;
 #[cfg(not(windows))]
 use crate::discovery::resolve;
 use crate::discovery::{
@@ -22,6 +25,7 @@ use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
 mod agent_delivery;
 mod association;
+mod context_pairing;
 mod diagnostics;
 mod frame_delivery;
 mod inspection;
@@ -66,6 +70,9 @@ enum Action {
 }
 enum Message {
     Metrics(RequestScope, mpsc::Sender<Result<MotionMetrics, String>>),
+    /// A state change outside the action lifecycle (context pairing) asks the
+    /// coordinator to republish immediately instead of waiting for the next probe.
+    Publish,
     Action(
         RequestScope,
         Action,
@@ -127,6 +134,7 @@ struct Engine {
     watcher: Option<WatchGuard>,
     window_pending: Arc<Mutex<Option<WindowUpdate>>>,
     watch_pending: Arc<Mutex<PendingWatch>>,
+    context: Arc<ContextHub>,
     serial: u64,
     detaching: bool,
     frames: Arc<Mutex<FrameDelivery>>,
@@ -215,6 +223,7 @@ fn initial(backend: BackendStatus) -> AppSnapshot {
             intensity: MotionIntensity::Standard,
         },
         dock_confirmation: None,
+        context_source: None,
     }
 }
 
@@ -290,6 +299,13 @@ impl Engine {
         self.sync_control_lifecycle();
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
+        let context_events = self.context.last_event();
+        self.snapshot.context_source = Some(ContextSourceStatus {
+            paired: self.context.paired(),
+            active_sessions: self.context.live(now()).len() as u32,
+            last_event_at: context_events.as_ref().map(|(_, at)| *at).unwrap_or(0),
+            reason: context_events.map(|(reason, _)| reason),
+        });
         // Candidate categories are backend truth: they are recomputed for the snapshot
         // that is emitted, never derived again by the frontend.
         self.grade_candidates();
@@ -421,10 +437,16 @@ impl Engine {
             };
             // HWND equality is insufficient: verify the controller's current lifecycle again.
             controller.discovery_scope(&target.id)?;
+            let context = ContextSourceResolver::new(self.context.clone());
             let candidates = resolve_with_sources(
                 &target,
                 observed,
-                &[&tabs, &RegistrationRegistry::default(), &TitleResolver],
+                &[
+                    &tabs,
+                    &context,
+                    &RegistrationRegistry::default(),
+                    &TitleResolver,
+                ],
             );
             match candidates {
                 Ok(candidates) => (candidates, tabs.observation(), None),
@@ -1709,6 +1731,8 @@ pub fn run() {
             agent_delivery::agent_registration_bind,
             agent_delivery::agent_assisted_inspect,
             agent_delivery::agent_assisted_fill,
+            context_pairing::context_pair_create,
+            context_pairing::context_pair_revoke,
         ])
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
@@ -1740,6 +1764,10 @@ pub fn run() {
             let service_frames = frames.clone();
             let handle = app.handle().clone();
             let window_pending = Arc::new(Mutex::new(None));
+            let context_hub = Arc::new(crate::context::ContextHub::new());
+            #[cfg(windows)]
+            crate::context_pipe::spawn(context_hub.clone());
+            app.manage(context_pairing::ContextHubHandle(context_hub.clone()));
             let main = app
                 .get_webview_window("main")
                 .ok_or("MAIN_WINDOW_MISSING")?;
@@ -1763,6 +1791,7 @@ pub fn run() {
                     watcher: None,
                     window_pending: window_pending.clone(),
                     watch_pending: Arc::new(Mutex::new(PendingWatch::default())),
+                    context: context_hub.clone(),
                     serial: 0,
                     detaching: false,
                     frames,
@@ -1851,6 +1880,7 @@ pub fn run() {
                         Ok(Message::Data(scope, action, reply)) => {
                             engine.dispatch_data(scope, action, reply)
                         }
+                        Ok(Message::Publish) => engine.publish(),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     engine.drain_events();

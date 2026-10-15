@@ -84,3 +84,21 @@ export async function observe(state: (value: AppSnapshot) => void, frame: (value
   catch (error) { offState(); offFrame(); throw error; }
   return () => { offState(); offFrame(); offVisibility(); };
 }
+
+/**
+ * Context-source pairing is a pre-docking capability: it must work before any
+ * project or preview session exists, so it bypasses the session-scoped `request`
+ * gate on purpose. The backend still validates the calling window itself.
+ */
+export async function contextPairCreate(): Promise<CommandResults['context_pair_create']> {
+  const desktop = window.__TAURI__;
+  if (!desktop) throw new Error('缺少桌面桥接。请在 Windows 11 使用 pnpm dev 启动 ArkDock 独立应用。');
+  return desktop.core.invoke<CommandResults['context_pair_create']>('context_pair_create', {});
+}
+
+/** Revokes the context-source pairing and every live registration. */
+export async function contextPairRevoke(): Promise<boolean> {
+  const desktop = window.__TAURI__;
+  if (!desktop) throw new Error('缺少桌面桥接。');
+  return desktop.core.invoke<boolean>('context_pair_revoke', {});
+}

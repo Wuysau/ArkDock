@@ -7,15 +7,17 @@ import { Icon } from './Icon.tsx';
 import { displayPath } from './path-display.ts';
 
 const environments = { windowsLocal: 'Windows 本地', wsl: 'WSL · 预览未支持', remote: '远程 · 预览未支持' };
-export function WorkspaceStrip({ snapshot, busy, cancelling, openProject, openCandidates, manual, rediscover, cancel }: {
+export function WorkspaceStrip({ snapshot, busy, cancelling, openProject, openCandidates, manual, rediscover, cancel, pairContext, revokeContext }: {
   snapshot: AppSnapshot | null; busy: boolean; cancelling: boolean;
   openProject: () => void; openCandidates: () => void; manual: () => void; rediscover: () => void; cancel: () => void;
+  pairContext: () => void; revokeContext: () => void;
 }) {
   // A view preference belongs to this running UI, not to a workspace/build/session key.
   const [expanded, setExpanded] = useState(false);
   const id = useId();
   const ui = deriveUiState(snapshot, null);
   const project = snapshot?.project;
+  const context = snapshot?.contextSource;
   const pair = pairControl(snapshot);
   const working = snapshot?.phase === 'discovering' || snapshot?.phase === 'building';
   const failed = Boolean(snapshot?.build.error || snapshot?.phase === 'crashed');
@@ -51,10 +53,17 @@ export function WorkspaceStrip({ snapshot, busy, cancelling, openProject, openCa
             {pair.state === 'maximized' ? '共同最大化' : pair.pending ? '布局调整中' : pair.state === 'blocked' ? '布局受限' : pair.state === 'paired' ? '全贴合' : '等待布局'}
           </span>}
         </output>
+        {context && <output className={`state-strip${context.paired ? '' : ' idle'}`} aria-label="Agent 会话源">
+          <Icon name="link" size={14} />
+          <span title={context.reason ?? undefined}>{context.paired ? `Agent 会话源已配对 · ${context.activeSessions} 个活动登记` : 'Agent 会话源未配对 · 配对后 Agent 工具可自动上报当前对话工程'}</span>
+        </output>}
         {unavailable && <p className="workspace-problem">{reason}</p>}
         <div className="workspace-detail-actions">
           <button disabled={!snapshot?.target || busy} onClick={rediscover} title={!snapshot?.target ? '先连接开发窗口' : '重新读取目标工程线索'}><Icon name="refresh" size={14} />重新识别</button>
           <button onClick={openCandidates}>切换工程</button><button disabled={!snapshot || busy} onClick={manual}>手动选择</button>
+          {context?.paired
+            ? <button disabled={busy} onClick={revokeContext} title="撤销配对并清除全部已登记会话；已连接的 Agent 下一次心跳即失效">撤销会话源</button>
+            : <button disabled={busy} onClick={pairContext} title="生成配对凭证文件，配置到 Agent 工具的 MCP 设置后即可自动上报当前对话工程">配对会话源</button>}
           {snapshot?.phase === 'discovering' && <button disabled={cancelling} title="解除绑定，使当前关联会话失效；只读检查等待后端返回" onClick={cancel}>{cancelling ? '取消中…' : '取消关联'}</button>}
         </div>
       </div></div>

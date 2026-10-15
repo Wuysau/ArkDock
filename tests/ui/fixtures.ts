@@ -44,7 +44,7 @@ function base(revision: number): AppSnapshot {
     build: { generation: 0, displayedGeneration: null, buildId: null, durationMs: null, error: null, stale: false },
     diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null, pairLayout: { state: 'unbound', preferredWidthDip: 440, reason: null },
     display: { mode: 'expanded', requestId: 0, orbAutoHide: false, trayAvailable: false, reason: 'UI 演示不创建悬浮球或系统托盘。' },
-    motion: { reduced: false, intensity: 'standard' }, dockConfirmation: null,
+    motion: { reduced: false, intensity: 'standard' }, dockConfirmation: null, contextSource: null,
   };
 }
 function snapshot(scenario: Scenario, revision: number): AppSnapshot {
