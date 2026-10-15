@@ -34,7 +34,7 @@ test('搜索不静默截断候选；完整路径和模块都可检索', () => {
 
 test('不可用状态有真实下一步且不标成功', () => {
   assert.match(phaseText('sdkMissing'), /SDK/);
-  assert.match(phaseText('protocolBlocked'), /协议/);
+  assert.match(phaseText('protocolBlocked'), /工具链/);
   assert.match(phaseText('untrusted'), /信任/);
   assert.match(phaseText('unsupported'), /Windows/);
 });

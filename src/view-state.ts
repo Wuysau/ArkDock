@@ -31,7 +31,7 @@ export function phaseText(phase: Phase): string {
   const labels: Record<Phase, string> = {
     idle: '拖到应用窗口右侧，关联当前工程', discovering: '正在读取与目标相关的工程线索',
     selectProject: '请选择当前工程', untrusted: '工程未信任：仅进行只读检查',
-    sdkMissing: '未找到 SDK，请指定合法安装的工具链', protocolBlocked: '原生协议未验证，预览暂不可启动',
+    sdkMissing: '未找到 SDK，请指定合法安装的工具链', protocolBlocked: '已安装的 SDK 暂不受支持，请指定兼容的工具链',
     building: '正在构建实际工程', running: '原生预览运行中', stale: '画面来自旧代码',
     crashed: '后端已退出，请查看诊断', stopped: '预览已停止', unsupported: '桌面贴边需要 Windows 11 本地环境',
   };
