@@ -263,9 +263,7 @@ fn local_path(path: &Path) -> Result<PathBuf, String> {
     let plain = text.strip_prefix("\\\\?\\").unwrap_or(text);
     let bytes = plain.as_bytes();
     if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
-        return Err(
-            "UNSUPPORTED_NATIVE_PATH: verified profile requires a Windows-local drive".into(),
-        );
+        return Err("UNSUPPORTED_NATIVE_PATH: 需要 Windows 本地盘符路径".into());
     }
     Ok(PathBuf::from(plain))
 }
@@ -333,16 +331,14 @@ impl Runtime {
             }
             if let Ok(mut state) = worker_control_state.lock() {
                 state.input_ready = false;
-                state.reason = "Native runtime stopped; pending input cannot continue".into();
+                state.reason = "原生预览已停止，未完成的输入无法继续。".into();
             }
             worker_stop.store(true, Ordering::Release);
             if let Ok(mut mailbox) = worker_controls.lock() {
                 mailbox.cancel_all();
                 if let Some((_, Some(request))) = mailbox.take_cancel() {
-                    request.send(request.receipt(
-                        NativeControlPhase::Cancelled,
-                        "Owned native runtime stopped",
-                    ));
+                    request
+                        .send(request.receipt(NativeControlPhase::Cancelled, "原生预览已停止。"));
                 }
             }
         });
@@ -371,7 +367,9 @@ impl Runtime {
             return Err("NATIVE_INPUT_PAUSED".into());
         }
         if state.width != 360 || state.height != 640 {
-            return Err("LEGACY_INPUT_SURFACE_IDENTITY_REQUIRED: dynamic surfaces require typed native control".into());
+            return Err(
+                "LEGACY_INPUT_SURFACE_IDENTITY_REQUIRED: 当前画面尺寸需使用原生控制输入。".into(),
+            );
         }
         if point.x >= state.width || point.y >= state.height {
             return Err("INPUT_OUTSIDE_SURFACE".into());
@@ -431,13 +429,10 @@ impl Runtime {
             }
             if cancelling {
                 current.input_ready = false;
-                current.reason = "Safely cancelling native input".into();
+                current.reason = "正在安全取消原生输入。".into();
             }
         }
-        queued.send(queued.receipt(
-            NativeControlPhase::Queued,
-            "Queued for the owned native command channel",
-        ));
+        queued.send(queued.receipt(NativeControlPhase::Queued, "已加入原生命令队列。"));
         mailbox.enqueue(queued)?;
         Ok(response)
     }
@@ -445,7 +440,7 @@ impl Runtime {
         if let Ok(mut mailbox) = self.controls.lock() {
             if let Ok(mut state) = self.control_state.lock() {
                 state.input_ready = false;
-                state.reason = "Safely cancelling native input".into();
+                state.reason = "正在安全取消原生输入。".into();
             }
             mailbox.cancel_all();
         }
@@ -698,7 +693,7 @@ fn run(
             .bytes()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
     {
-        return Err("UNSUPPORTED_BUILD_TARGET: verified profile supports default product/target and named Stage modules".into());
+        return Err("UNSUPPORTED_BUILD_TARGET: 仅支持 default 产品/目标与命名 Stage 模块。".into());
     }
     let (root, module) = resolved_module(project)?;
     // Fail closed before hvigor starts: a declared dependency that is not installed
@@ -885,10 +880,7 @@ fn run(
             break;
         }
         if Instant::now() > deadline {
-            return Err(
-                "PREVIEWER_HANDSHAKE_TIMEOUT: private pipe and owned loopback listener required"
-                    .into(),
-            );
+            return Err("PREVIEWER_HANDSHAKE_TIMEOUT: 原生预览器未在限定时间内就绪。".into());
         }
         thread::sleep(Duration::from_millis(20));
     }

@@ -317,9 +317,7 @@ impl Engine {
             if cleanup {
                 self.backend.cancel_controls();
             }
-            return Err(
-                "NATIVE_CONTROL_QUEUE_BUSY: release uses the independent cancellation slot".into(),
-            );
+            return Err("NATIVE_CONTROL_QUEUE_BUSY: 释放操作使用独立的取消通道。".into());
         }
         if request.action == NativeControlAction::SwitchProfile {
             let admitted = profiles(self.snapshot.backend.available)
@@ -327,7 +325,10 @@ impl Engine {
                 .find(|profile| Some(&profile.id) == request.profile_id.as_ref())
                 .ok_or("PROFILE_UNKNOWN")?;
             let _arguments = crate::preview::configuration::profile_arguments(&admitted)?;
-            return Err("PROFILE_RESTART_BLOCKED: 当前只有既有 phone 基线通过设备依赖核验；非基线重启与回滚尚不可开放".into());
+            return Err(
+                "PROFILE_RESTART_BLOCKED: 当前仅支持 phone 基线；切换其他配置与回滚暂未开放。"
+                    .into(),
+            );
         }
         if request.action == NativeControlAction::NavigatePage
             && !request

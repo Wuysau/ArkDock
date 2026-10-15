@@ -70,7 +70,7 @@ impl DeviceRuntimeAdapter {
             self.identity = identity;
             self.phase = "blocked".into();
             self.reason = if self.identity.is_none() {
-                "DEVICE_RUNTIME_SESSION_REQUIRED: select a trusted active project first".into()
+                "DEVICE_RUNTIME_SESSION_REQUIRED: 请先选择并信任一个工程。".into()
             } else {
                 self.tool.reason.clone()
             };
@@ -92,7 +92,7 @@ impl DeviceRuntimeAdapter {
             DeviceRuntimeAction::Discover => {
                 if !request.connection_consent {
                     return self.blocked(
-                        "DEVICE_CONNECTION_CONSENT_REQUIRED: explicitly allow HDC discovery; it may start a shared server",
+                        "DEVICE_CONNECTION_CONSENT_REQUIRED: 需先允许设备发现；这可能启动共享 HDC 服务。",
                     );
                 }
                 if request.target_id.is_some() {
@@ -104,7 +104,7 @@ impl DeviceRuntimeAdapter {
                 }
                 if !cfg!(windows) {
                     return self.blocked(
-                        "DEVICE_RUNTIME_UNSUPPORTED_PLATFORM: this adapter is Windows-local only",
+                        "DEVICE_RUNTIME_UNSUPPORTED_PLATFORM: 设备运行仅支持 Windows 本地环境。",
                     );
                 }
                 // Do not run `list targets` through windows_process.rs: that
@@ -119,29 +119,35 @@ impl DeviceRuntimeAdapter {
             }
             DeviceRuntimeAction::Select => {
                 if !request.connection_consent {
-                    return self.blocked("DEVICE_CONNECTION_CONSENT_REQUIRED: selecting a target does not authorize deployment");
+                    return self.blocked(
+                        "DEVICE_CONNECTION_CONSENT_REQUIRED: 选择设备目标不代表允许部署。",
+                    );
                 }
                 let id = request.target_id.as_ref().ok_or("DEVICE_TARGET_REQUIRED")?;
-                let target = self.targets.iter().find(|target| &target.id == id).ok_or(
-                    "DEVICE_TARGET_NOT_OBSERVED: discovery must provide this exact target",
-                )?;
+                let target = self
+                    .targets
+                    .iter()
+                    .find(|target| &target.id == id)
+                    .ok_or("DEVICE_TARGET_NOT_OBSERVED: 需先通过设备发现获得该目标")?;
                 if target.connection_state != "Connected" {
-                    return self.blocked("DEVICE_TARGET_NOT_CONNECTED: authorize and reconnect the selected target on the device");
+                    return self.blocked(
+                        "DEVICE_TARGET_NOT_CONNECTED: 请在设备上授权并重新连接所选目标。",
+                    );
                 }
                 if request.kind == DeviceRuntimeKind::Unknown {
-                    return self.blocked("DEVICE_KIND_REQUIRED: explicitly identify physical device or emulator; transport and loopback address do not prove device kind");
+                    return self.blocked("DEVICE_KIND_REQUIRED: 请手动选择真机或模拟器。");
                 }
                 self.selected_target_id = Some(id.clone());
                 self.kind = request.kind;
                 if self.kind == DeviceRuntimeKind::Emulator {
-                    self.blocked("FULL_EMULATOR_RUNTIME_UNAVAILABLE: user-selected kind is unverified; a compatible legally installed full application runtime, image and device services are required")
+                    self.blocked("FULL_EMULATOR_RUNTIME_UNAVAILABLE: 暂未接入模拟器运行。")
                 } else {
-                    self.blocked("DEVICE_DEPLOYMENT_BLOCKED: user-selected kind is unverified; installable HAP build receipt and target-bound signature verification are missing")
+                    self.blocked("DEVICE_DEPLOYMENT_BLOCKED: 暂未接入设备部署；当前构建产物不是可安装的 HAP。")
                 }
             }
             DeviceRuntimeAction::Deploy => {
                 if !request.deployment_consent {
-                    return self.blocked("DEVICE_DEPLOYMENT_CONSENT_REQUIRED: explicitly authorize installation of a specific signed HAP onto the selected device");
+                    return self.blocked("DEVICE_DEPLOYMENT_CONSENT_REQUIRED: 需明确允许将已签名 HAP 安装到所选设备。");
                 }
                 self.require_selected(&request)?;
                 self.blocked("未接入：当前构建产物不是可安装的 HAP，无法部署到设备。")
@@ -161,7 +167,7 @@ impl DeviceRuntimeAdapter {
             DeviceRuntimeAction::Disconnect => {
                 self.cancel();
                 self.phase = "disconnected".into();
-                self.reason = "Local target selection released; shared HDC server and other device sessions were not changed".into();
+                self.reason = "已释放本地设备选择；共享 HDC 服务与其他设备会话未受影响。".into();
                 Ok(self.snapshot())
             }
             DeviceRuntimeAction::Cancel => {
@@ -178,7 +184,7 @@ impl DeviceRuntimeAdapter {
         self.selected_target_id = None;
         self.kind = DeviceRuntimeKind::Unknown;
         self.phase = "cancelled".into();
-        self.reason = "Device runtime request cancelled; no deployment, input, capture or shared-server command was issued".into();
+        self.reason = "设备运行请求已取消；未执行部署、输入、截屏或共享服务命令。".into();
     }
 
     fn require_selected(&self, request: &DeviceRuntimeRequest) -> Result<(), String> {
@@ -240,14 +246,14 @@ fn validate_identity(identity: &NativeControlIdentity) -> Result<(), String> {
 
 fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
     let observed = (|| -> Result<(String, String), String> {
-        let sdk = sdk.ok_or("HDC_MISSING: no local SDK was selected")?;
+        let sdk = sdk.ok_or("HDC_MISSING: 尚未选择本地 SDK。")?;
         if !sdk.is_absolute() {
             return Err("HDC_SDK_ROOT_NOT_ABSOLUTE".into());
         }
         reject_reparse_ancestors(sdk)?;
         let root = sdk
             .canonicalize()
-            .map_err(|error| format!("HDC_SDK_INACCESSIBLE: {error}"))?;
+            .map_err(|error| format!("HDC_SDK_INACCESSIBLE: SDK 目录无法访问（{error}）"))?;
         if !root.is_dir() {
             return Err("HDC_SDK_NOT_DIRECTORY".into());
         }
@@ -257,9 +263,9 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
             match fs::symlink_metadata(&path) {
                 Ok(_) => {
                     reject_reparse_ancestors(&path)?;
-                    let path = path
-                        .canonicalize()
-                        .map_err(|error| format!("HDC_FILE_INACCESSIBLE: {error}"))?;
+                    let path = path.canonicalize().map_err(|error| {
+                        format!("HDC_FILE_INACCESSIBLE: SDK 文件无法访问（{error}）")
+                    })?;
                     if !path.starts_with(&root) {
                         return Err("HDC_FILE_OUTSIDE_SDK".into());
                     }
@@ -268,29 +274,36 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("HDC_FILE_INACCESSIBLE: {error}")),
+                Err(error) => {
+                    return Err(format!(
+                        "HDC_FILE_INACCESSIBLE: SDK 文件无法访问（{error}）"
+                    ))
+                }
             }
         }
         if candidates.len() > 1 {
-            return Err("HDC_TOOL_AMBIGUOUS: choose a specific SDK toolchain root; no executable was selected automatically".into());
+            return Err(
+                "HDC_TOOL_AMBIGUOUS: 找到多个 hdc.exe，请指定具体的 SDK 工具链目录。".into(),
+            );
         }
         let path = candidates
             .first()
-            .ok_or("HDC_MISSING: no hdc.exe found at bounded SDK toolchain locations")?;
-        let mut file = File::open(path).map_err(|error| format!("HDC_FILE_OPEN: {error}"))?;
+            .ok_or("HDC_MISSING: 在 SDK 工具链目录中未找到 hdc.exe。")?;
+        let mut file = File::open(path)
+            .map_err(|error| format!("HDC_FILE_OPEN: 无法打开 SDK 文件（{error}）"))?;
         let metadata = file
             .metadata()
-            .map_err(|error| format!("HDC_FILE_METADATA: {error}"))?;
+            .map_err(|error| format!("HDC_FILE_METADATA: 无法读取 SDK 文件信息（{error}）"))?;
         if !metadata.is_file()
             || is_reparse(&metadata)
             || metadata.len() < 2
             || metadata.len() > TOOL_SIZE_LIMIT
         {
-            return Err("HDC_FILE_REJECTED: regular bounded executable required".into());
+            return Err("HDC_FILE_REJECTED: 需要常规的可执行文件。".into());
         }
         let mut header = [0u8; 2];
         file.read_exact(&mut header)
-            .map_err(|error| format!("HDC_FILE_HEADER: {error}"))?;
+            .map_err(|error| format!("HDC_FILE_HEADER: 无法读取文件头（{error}）"))?;
         if header != *b"MZ" {
             return Err("HDC_FILE_NOT_WINDOWS_EXECUTABLE".into());
         }
@@ -301,7 +314,7 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         loop {
             let read = file
                 .read(&mut buffer)
-                .map_err(|error| format!("HDC_FILE_READ: {error}"))?;
+                .map_err(|error| format!("HDC_FILE_READ: 读取 SDK 文件失败（{error}）"))?;
             if read == 0 {
                 break;
             }
@@ -324,9 +337,14 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         Ok((path, sha256)) => ToolObservation {
             path: Some(path),
             sha256: Some(sha256),
-            reason: "HDC_EXECUTION_UNVERIFIED: local file and digest observed without executing it; server lifecycle, SDK/device compatibility, signed HAP and foreground evidence remain blocked".into(),
+            reason: "HDC_EXECUTION_UNVERIFIED: 已找到 HDC 工具，但设备发现、部署与画面暂未接入。"
+                .into(),
         },
-        Err(reason) => ToolObservation { path: None, sha256: None, reason },
+        Err(reason) => ToolObservation {
+            path: None,
+            sha256: None,
+            reason,
+        },
     }
 }
 
@@ -336,7 +354,7 @@ fn reject_reparse_ancestors(path: &Path) -> Result<(), String> {
             continue;
         }
         let metadata = fs::symlink_metadata(ancestor)
-            .map_err(|error| format!("HDC_PATH_INACCESSIBLE: {error}"))?;
+            .map_err(|error| format!("HDC_PATH_INACCESSIBLE: 路径无法访问（{error}）"))?;
         if is_reparse(&metadata) {
             return Err("HDC_REPARSE_PATH_REJECTED".into());
         }

@@ -218,21 +218,14 @@ impl PreviewBackend for NativePreviewer {
         self.workspace_id = Some(project.id.clone());
         self.session_id = Some(session_id.to_owned());
         if !trusted {
-            return self.reject(
-                "TRUST_REQUIRED: project execution has not been authorized".into(),
-                None,
-            );
+            return self.reject("TRUST_REQUIRED: 尚未授权执行该工程。".into(), None);
         }
         if session_id.is_empty() || session_id.len() > 256 {
-            return self.reject(
-                "INVALID_SESSION: an active bounded session token is required".into(),
-                None,
-            );
+            return self.reject("INVALID_SESSION: 需要有效的预览会话。".into(), None);
         }
         if project.environment != Environment::WindowsLocal {
             return self.reject(
-                "UNSUPPORTED_ENVIRONMENT: native preview supports only Windows-local projects"
-                    .into(),
+                "UNSUPPORTED_ENVIRONMENT: 原生预览仅支持 Windows 本地工程".into(),
                 None,
             );
         }
@@ -249,7 +242,7 @@ impl PreviewBackend for NativePreviewer {
             || self.workspace_id.as_deref() != Some(task.workspace_id.as_str())
         {
             return self.reject(
-                "STALE_SESSION: refresh does not belong to the current workspace session".into(),
+                "STALE_SESSION: 该刷新不属于当前工作区会话。".into(),
                 Some(task.build_id.clone()),
             );
         }
@@ -261,7 +254,7 @@ impl PreviewBackend for NativePreviewer {
                 .and_then(|sdk| {
                     windows::verified_root(sdk, self.status.sdk_version.as_deref().unwrap_or(""))
                 })
-                .ok_or("SDK_CHANGED: reselect the verified SDK")?;
+                .ok_or("SDK_CHANGED: 请重新选择已验证的 SDK")?;
             let project = self.project.clone().ok_or("PROJECT_REQUIRED")?;
             self.runtime.take();
             self.runtime = Some(windows::Runtime::launch(sdk, project, task.clone()));
@@ -374,10 +367,10 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
     let inspection = sdk.map(inspect_sdk);
     let detected = inspection.as_ref().and_then(|result| result.as_ref().ok());
     let reason = if !windows {
-        "UNSUPPORTED_PLATFORM: native Windows Previewer requires a Windows desktop".to_owned()
+        "UNSUPPORTED_PLATFORM: 原生预览仅支持 Windows 桌面。".to_owned()
     } else {
         match inspection.as_ref() {
-            None => "SDK_MISSING: select a legally obtained local SDK; no SDK root is configured".into(),
+            None => "SDK_MISSING: 尚未配置 SDK 目录，请在桌面环境选择合法安装的本地 SDK。".into(),
             Some(Err(error)) => format!("SDK_MISSING: {error}"),
             Some(Ok(_)) => "未接入：已找到 SDK 文件，但当前版本的构建、命名管道、画面与输入协议不在支持范围内。".into(),
         }
@@ -389,8 +382,8 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         let report = environment::inspect_environment(Some(root));
         report.execution_blocker().map(|check| {
             format!(
-                "SDK_DEPENDENCY_UNAVAILABLE: {}: {}",
-                check.dependency, check.detail
+                "SDK_DEPENDENCY_UNAVAILABLE: {} 组件缺失或不兼容，原生预览暂不可启动。",
+                check.dependency
             )
         })
     });
@@ -428,9 +421,9 @@ struct SdkInspection {
 fn inspect_sdk(sdk: &Path) -> Result<SdkInspection, String> {
     let root = sdk
         .canonicalize()
-        .map_err(|error| format!("configured SDK is inaccessible ({error})"))?;
+        .map_err(|error| format!("配置的 SDK 目录无法访问（{error}）"))?;
     if !root.is_dir() {
-        return Err("configured SDK root is not a directory".into());
+        return Err("配置的 SDK 根目录不是文件夹".into());
     }
     let mut queue = VecDeque::from([(root.clone(), 0)]);
     let mut directories = 0;
@@ -440,9 +433,7 @@ fn inspect_sdk(sdk: &Path) -> Result<SdkInspection, String> {
     while let Some((directory, depth)) = queue.pop_front() {
         directories += 1;
         if directories > SDK_MAX_DIRECTORIES {
-            return Err(
-                "SDK probe directory limit reached; select a specific SDK version root".into(),
-            );
+            return Err("SDK 目录数量超出探测上限；请选择具体的 SDK 版本根目录".into());
         }
         let manifest = directory.join("oh-uni-package.json");
         if let Some((component, version)) = read_package_manifest(&root, &manifest) {
@@ -455,21 +446,18 @@ fn inspect_sdk(sdk: &Path) -> Result<SdkInspection, String> {
         if depth == SDK_MAX_DEPTH {
             continue;
         }
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| format!("SDK directory cannot be inspected ({error})"))?;
+        let entries =
+            fs::read_dir(&directory).map_err(|error| format!("无法读取 SDK 目录（{error}）"))?;
         let mut next = Vec::new();
         for entry in entries {
             entries_seen += 1;
             if entries_seen > SDK_MAX_ENTRIES {
-                return Err(
-                    "SDK probe entry limit reached; select a specific SDK version root".into(),
-                );
+                return Err("SDK 目录条目超出探测上限；请选择具体的 SDK 版本根目录".into());
             }
-            let entry = entry
-                .map_err(|error| format!("SDK directory entry cannot be inspected ({error})"))?;
+            let entry = entry.map_err(|error| format!("无法读取 SDK 目录条目（{error}）"))?;
             let file_type = entry
                 .file_type()
-                .map_err(|error| format!("SDK directory entry cannot be inspected ({error})"))?;
+                .map_err(|error| format!("无法读取 SDK 目录条目（{error}）"))?;
             // Do not walk symlinks/junctions out of the selected root.
             if file_type.is_dir()
                 && !file_type.is_symlink()
@@ -501,7 +489,7 @@ fn inspect_sdk(sdk: &Path) -> Result<SdkInspection, String> {
             }
         }
     }
-    Err("no matching ets/previewer package manifests and Windows Previewer binary were found in the supported bounded layout".into())
+    Err("在支持的目录结构中未找到匹配的 ets/previewer 包清单与 Windows Previewer 程序".into())
 }
 
 fn sdk_directory_name(name: &str) -> bool {
@@ -753,7 +741,7 @@ mod tests {
         assert!(!backend.capabilities().available);
         assert_eq!(
             backend.start(&project(), false, "session"),
-            Err("TRUST_REQUIRED: project execution has not been authorized".into())
+            Err("TRUST_REQUIRED: 尚未授权执行该工程。".into())
         );
         assert!(backend.start(&project(), true, "session").is_err());
         assert!(backend.frame().is_none());
