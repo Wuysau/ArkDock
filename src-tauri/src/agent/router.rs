@@ -350,7 +350,8 @@ impl AgentRouter {
                         }
                         Ok(_) => {
                             record.delivery.state = DeliveryState::Failed;
-                            record.delivery.reason = "AGENT_RECEIPT_MISMATCH".into();
+                            record.delivery.reason =
+                                "提交回执与本次请求不一致；请检查目标会话。".into();
                         }
                         Err(error) => {
                             record.delivery.state = DeliveryState::Failed;
@@ -360,7 +361,7 @@ impl AgentRouter {
                 }
             } else {
                 record.delivery.state = DeliveryState::Unsupported;
-                record.delivery.reason = "AGENT_ADAPTER_NOT_IMPLEMENTED".into();
+                record.delivery.reason = "未接入：当前通道不支持向该会话提交。".into();
             }
         }
         Ok(record.delivery.clone())

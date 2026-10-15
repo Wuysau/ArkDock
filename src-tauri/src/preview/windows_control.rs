@@ -703,13 +703,17 @@ impl<'a> ControlWorker<'a> {
                         router_confirmed || *action == NativeControlAction::SetOrientation;
                     receipt.current_route = state.current_route;
                     receipt.frame_sequence = Some(sequence);
-                    let payload_changed =
-                        operation.baseline_hash.is_some_and(|before| before != hash);
-                    receipt.reason = format!("New native frame observed; JPEG payload changed={payload_changed}. Decoded pixel change is not independently measured.");
+                    receipt.reason = if operation.baseline_hash == Some(hash) {
+                        "已观察到原生画面；画面与上一帧相同。".into()
+                    } else {
+                        "已观察到新的原生画面。".into()
+                    };
                     if *action == NativeControlAction::SetColorMode {
-                        receipt.reason = "ColorMode acknowledged and a new frame observed; Previewer provides no public theme readback, so theme propagation still requires user observation".into();
+                        receipt.reason =
+                            "已请求切换应用主题；主题是否生效请以预览画面为准。".into();
                     } else if *action == NativeControlAction::SetResolution {
-                        receipt.reason = format!("ResolutionSwitch acknowledged; native {width}x{height} frame observed. DPI propagation has no public readback and remains unconfirmed; JPEG payload changed={payload_changed}.");
+                        receipt.reason =
+                            format!("已切换到 {width}×{height}；DPI 是否生效请以预览画面为准。");
                     }
                     operation.request.send(receipt);
                     let request = &operation.request.request;

@@ -45,7 +45,7 @@ impl Default for RuntimeControlState {
             dpi: 160,
             current_route: None,
             input_ready: false,
-            reason: "Native runtime has not produced its first frame".into(),
+            reason: "等待原生运行时返回首帧。".into(),
         }
     }
 }
@@ -53,7 +53,7 @@ impl Default for RuntimeControlState {
 impl RuntimeControlState {
     pub fn stopped() -> Self {
         Self {
-            reason: "PREVIEW_SESSION_REQUIRED".into(),
+            reason: "尚未启动原生预览会话。".into(),
             ..Self::default()
         }
     }

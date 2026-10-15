@@ -362,6 +362,10 @@ impl Drop for NativePreviewer {
 }
 
 /// Scan only the explicitly supplied SDK root. No PATH search or execution occurs.
+///
+/// A present SDK that is outside the locally supported range keeps the structured
+/// `PROTOCOL_UNVERIFIED` error code from the IPC error table; `reason` is product
+/// copy only.
 pub fn probe(sdk: Option<&Path>) -> BackendStatus {
     probe_for_platform(sdk, cfg!(windows))
 }
@@ -375,7 +379,7 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         match inspection.as_ref() {
             None => "SDK_MISSING: select a legally obtained local SDK; no SDK root is configured".into(),
             Some(Err(error)) => format!("SDK_MISSING: {error}"),
-            Some(Ok(_)) => "PROTOCOL_UNVERIFIED: SDK files are present, but this SDK version's build, named-pipe, frame and input protocol has not been verified".into(),
+            Some(Ok(_)) => "未接入：已找到 SDK 文件，但当前版本的构建、命名管道、画面与输入协议不在支持范围内。".into(),
         }
     };
     #[cfg(windows)]
@@ -401,7 +405,7 @@ fn probe_for_platform(sdk: Option<&Path>, windows: bool) -> BackendStatus {
         mode: "nativePreviewer".into(),
         available,
         reason: if available {
-            "HarmonyOS 26.0.0.105：Stage phone 360×640 点击基线；新增官方控制命令为未验收实验入口，需单独启用；PreviewBuild 刷新重启运行时".into()
+            "HarmonyOS 26.0.0.105：Stage phone 360×640 原生预览与点击可用；其余原生控制需在预览能力页显式启用。".into()
         } else {
             reason
         },
@@ -788,7 +792,7 @@ mod tests {
         pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
         fs::write(previewer.join("Previewer.exe"), pe).unwrap();
         let status = probe_for_platform(Some(sdk.path()), true);
-        assert!(status.reason.starts_with("PROTOCOL_UNVERIFIED:"));
+        assert!(status.reason.starts_with("未接入："));
         assert!(!status.available);
         assert_eq!(status.sdk_version.as_deref(), Some("4.0.0.1"));
         fs::write(

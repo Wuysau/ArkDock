@@ -392,7 +392,7 @@ pub fn parse_target_stdout(stdout: &[u8]) -> Result<Vec<DeviceRuntimeTarget>, St
             label: format!("{} · {} · {}", fields[3], fields[1], fields[0]),
             kind: DeviceRuntimeKind::Unknown,
             connection_state: fields[2].into(),
-            reason: "HDC list observation only; transport, device name and loopback address do not prove physical device or emulator kind".into(),
+            reason: "未接入：无法自动识别真机或模拟器，请手动选择类型。".into(),
         });
     }
     Ok(targets)

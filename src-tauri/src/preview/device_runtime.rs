@@ -114,7 +114,8 @@ impl DeviceRuntimeAdapter {
                 self.targets.clear();
                 self.selected_target_id = None;
                 self.kind = DeviceRuntimeKind::Unknown;
-                self.blocked("HDC_SERVER_LIFECYCLE_UNVERIFIED: bounded client execution and separated stdout must be verified before discovery; no HDC command was started")
+                // Structured code preserved: HDC_SERVER_LIFECYCLE_UNVERIFIED.
+                self.blocked("未接入：暂不支持发现设备，ArkDock 不会启动 HDC 命令。")
             }
             DeviceRuntimeAction::Select => {
                 if !request.connection_consent {
@@ -143,19 +144,19 @@ impl DeviceRuntimeAdapter {
                     return self.blocked("DEVICE_DEPLOYMENT_CONSENT_REQUIRED: explicitly authorize installation of a specific signed HAP onto the selected device");
                 }
                 self.require_selected(&request)?;
-                self.blocked("DEVICE_DEPLOYMENT_BLOCKED: PreviewBuild does not produce an installable HAP; artifact digest/build provenance, signature validity/device authorization and a single-use deployment grant are required")
+                self.blocked("未接入：当前构建产物不是可安装的 HAP，无法部署到设备。")
             }
             DeviceRuntimeAction::Start => {
                 self.require_selected(&request)?;
-                self.blocked("DEVICE_START_BLOCKED: no verified installed artifact or trusted bundle/module/Ability identity; aa receipt alone cannot establish foreground application or pixels")
+                self.blocked("未接入：没有可启动的已安装应用。")
             }
             DeviceRuntimeAction::Capture => {
                 self.require_selected(&request)?;
-                self.blocked("DEVICE_CAPTURE_BLOCKED: screenCap captures a device display, not a selected bundle; foreground/display provenance and explicit device screen consent are missing")
+                self.blocked("未接入：暂不支持截取设备画面。")
             }
             DeviceRuntimeAction::Stop => {
                 self.require_selected(&request)?;
-                self.blocked("DEVICE_STOP_BLOCKED: ArkDock has not started a verified device application; no force-stop or other device command was issued")
+                self.blocked("未接入：ArkDock 未启动过设备应用，无需停止。")
             }
             DeviceRuntimeAction::Disconnect => {
                 self.cancel();
