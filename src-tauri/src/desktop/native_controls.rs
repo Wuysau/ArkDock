@@ -191,7 +191,7 @@ impl Engine {
             NativeControlAvailability::Unavailable
         };
         let experimental_reason = if available {
-            "官方公开协议实验接入；当前 SDK 新命令 NOT_RUN — 等待用户验收，需显式启用。回执不等于画面或功能完成。".to_owned()
+            "实验性原生控制，需在预览能力页显式启用；命令结果以预览画面为准。".to_owned()
         } else {
             self.snapshot.backend.reason.clone()
         };
@@ -214,22 +214,31 @@ impl Engine {
             .as_ref()
             .and_then(|state| state.current_route.as_ref())
             .is_some_and(|route| self.controls.pages.contains(route));
-        capabilities.push(NativeControlCapability { name: "page".into(), status: if self.controls.pages.len() <= 1 || !route_known {
-            NativeControlAvailability::Blocked
-        } else { status }, reason: if self.controls.pages.len() == 1 {
-            "当前编译工程只有一个页面；保持入口页，重新加载请使用预览刷新".into()
-        } else if self.controls.pages.is_empty() {
-            if self.controls.page_reason.is_empty() { "等待当前构建的真实页面资源，未核验源码列表不可开放导航".into() }
-                else { self.controls.page_reason.clone() }
-        } else if !route_known {
-            "尚未取得可核验的原生当前路由；禁止替换页面，以保留当前有效画面".into()
-        }
-            else { "已读取可信工程与 PreviewBuild 页面资源；导航还须原生 CurrentJsRouter 事件及后续帧确认，SDK NOT_RUN".into() } });
+        capabilities.push(NativeControlCapability {
+            name: "page".into(),
+            status: if self.controls.pages.len() <= 1 || !route_known {
+                NativeControlAvailability::Blocked
+            } else {
+                status
+            },
+            reason: if self.controls.pages.len() == 1 {
+                "当前编译工程只有一个页面；保持入口页，重新加载请使用预览刷新".into()
+            } else if self.controls.pages.is_empty() {
+                if self.controls.page_reason.is_empty() {
+                    "未接入：当前构建没有可切换的页面。".into()
+                } else {
+                    self.controls.page_reason.clone()
+                }
+            } else if !route_known {
+                "当前原生路由尚未确认，暂不切换页面，以保留当前画面。".into()
+            } else {
+                "页面来自当前构建产物；切换结果以原生画面为准。".into()
+            },
+        });
         capabilities.push(NativeControlCapability {
             name: "profile".into(),
             status: NativeControlAvailability::Blocked,
-            reason: "仅 phone 基线具备 SDK 证据；tablet/watch 依赖未核验，不调用空 DeviceType 命令"
-                .into(),
+            reason: "未接入：仅支持 phone 基线，tablet/watch 配置暂不开放。".into(),
         });
         capabilities.push(NativeControlCapability { name: "ime".into(), status: NativeControlAvailability::Blocked,
             reason: "公开 KeyPress 仅逐 Unicode 码点提交；缺原生 preedit、候选词、撤销及光标编辑事务，完整中文 IME 未支持".into() });
