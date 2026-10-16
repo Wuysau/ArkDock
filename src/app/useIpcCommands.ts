@@ -4,6 +4,7 @@ import type { AppSnapshot, CommandArgs } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
 import { isStaleScope } from '../ipc/errors.ts';
 import { currentScope, responseStillCurrent, sameTarget, scopeStillCurrent } from '../request-state.ts';
+import { runSnapshotCommand } from './command-navigation.ts';
 import type { DesktopSession } from './useDesktopSession.ts';
 import type { Notices } from './notices.ts';
 import type { Panel } from './navigation.ts';
@@ -51,11 +52,12 @@ export function useIpcCommands({ bridge, session, notices, navigationRevision, o
     setPending(command);
     clear();
     const scope = currentScope(stateRef.current);
-    const navigation = navigationRevision.current;
     try {
-      const result = await bridge.request(command, args, scope);
-      receive(result);
-      return navigation === navigationRevision.current && responseStillCurrent(result, stateRef.current);
+      const registrationId = command === 'context_select_project' && 'registrationId' in args
+        && typeof args.registrationId === 'string' ? args.registrationId : undefined;
+      return await runSnapshotCommand(command, () => bridge.request(command, args, scope), {
+        snapshot: () => stateRef.current, receive, revision: () => navigationRevision.current, open: openPanel,
+      }, registrationId);
     } catch (reason) {
       if (scopeStillCurrent(stateRef.current, scope)) report(reason);
       return false;
@@ -64,7 +66,7 @@ export function useIpcCommands({ bridge, session, notices, navigationRevision, o
       activeCommand.current = null;
       setPending(null);
     }
-  }, [bridge, receive, stateRef, clear, report, navigationRevision]);
+  }, [bridge, receive, stateRef, clear, report, navigationRevision, openPanel]);
 
   const cancelAssociation = useCallback(async () => {
     if (cancelRequested.current) return;
