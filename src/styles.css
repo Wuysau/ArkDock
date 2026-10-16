@@ -146,7 +146,11 @@ h2 { font-size: 19px; font-weight: 650; }
 h3 { font-size: 15px; line-height: 1.6; font-weight: 600; }
 code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.app { position: relative; height: 100dvh; min-height: 0; overflow: hidden; background: var(--shell-gradient); border: 1px solid var(--border-strong); border-radius: var(--radius-shell); transition: opacity var(--motion-display) var(--ease), background-color var(--motion-state) var(--ease), border-color var(--motion-state) var(--ease); }
+/* The native window owns the outer shape: Windows 11 rounds the real window edge,
+   so a CSS radius and ring here paint a second, inner rounded boundary with a
+   background-colored crescent between the two arcs. The shell fills the whole
+   client area instead, and every panel keeps its own border. */
+.app { position: relative; height: 100dvh; min-height: 0; overflow: hidden; background: var(--shell-gradient); border: 0; border-radius: 0; transition: opacity var(--motion-display) var(--ease), background-color var(--motion-state) var(--ease); }
 .app[data-display="collapsing"], .app[data-display="orb"], .app[data-display="hidden"] { opacity: 0; pointer-events: none; }
 .dock-ripple { position: absolute; inset: 0; z-index: 40; overflow: hidden; border-radius: inherit; pointer-events: none; contain: paint; }
 .dock-ripple-wave { position: absolute; top: 50%; left: 0; width: 200vmax; height: 200vmax; border: 1px solid rgb(120 184 255 / 42%); border-radius: 50%; background: radial-gradient(circle, rgb(75 130 255 / 3%) 60%, rgb(75 130 255 / 8%) 69%, transparent 72%); opacity: 0; transform: translate(-50%, -50%) scale(.025); animation: dock-ripple var(--motion-ripple) var(--ease) both; }
