@@ -869,6 +869,7 @@
     "hide_to_tray": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "show_from_tray": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "set_orb_auto_hide": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
+    "set_orb_opacity": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "set_motion_preferences": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "get_display_mode": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "minimize_window": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
