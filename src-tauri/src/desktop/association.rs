@@ -13,27 +13,6 @@
 //! - manual and historical choices are carried forward as *candidates* only.
 use super::*;
 
-/// Generic UIA is intentionally not sampled by lightweight polls. Preserve its
-/// existing lease for the same target while independently refreshing other sources.
-/// Never renew timestamps merely because the context source was polled.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(super) struct UnsampledTabEvidence<'a>(pub(super) &'a [Candidate]);
-
-impl crate::discovery::WorkspaceResolver for UnsampledTabEvidence<'_> {
-    fn evidence(&self, target: &TargetInfo, observed: u64) -> Result<Vec<Evidence>, String> {
-        let mut retained = Vec::new();
-        for item in self.0.iter().flat_map(|candidate| &candidate.evidence) {
-            if item.source == EvidenceSource::Uia
-                && crate::discovery::current_target_evidence(item, target, observed)
-                && !retained.contains(item)
-            {
-                retained.push(item.clone());
-            }
-        }
-        Ok(retained)
-    }
-}
-
 /// Canonical comparison form for an already identified workspace path.
 ///
 /// This never opens a foreign path: the caller decides whether canonicalization is
@@ -370,7 +349,6 @@ pub(super) fn revoke_unverified_evidence(candidates: &mut [Candidate]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::WorkspaceResolver;
     use crate::ipc::model::{ProcessRef, SessionRef};
 
     fn target() -> TargetInfo {
@@ -383,19 +361,6 @@ mod tests {
                 started_at: "90".into(),
             },
         }
-    }
-
-    #[test]
-    fn polling_another_source_keeps_unsampled_uia_only_until_its_original_expiry() {
-        let mut evidence = strong_evidence("a", 100, 200);
-        evidence.source = EvidenceSource::Uia;
-        let candidates = [candidate("a", vec![evidence.clone()])];
-        let source = UnsampledTabEvidence(&candidates);
-        assert_eq!(source.evidence(&target(), 150).unwrap(), vec![evidence]);
-        assert!(source.evidence(&target(), 200).unwrap().is_empty());
-        let mut reused_target = target();
-        reused_target.process.started_at = "91".into();
-        assert!(source.evidence(&reused_target, 150).unwrap().is_empty());
     }
 
     fn project(id: &str) -> ProjectRef {

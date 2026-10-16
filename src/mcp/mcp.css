@@ -1,0 +1,11 @@
+.mcp-panel { display: grid; gap: var(--space-3); min-width: 0; }
+.mcp-panel .settings-card { margin: 0; min-width: 0; }
+.mcp-panel label, .mcp-entry { display: grid; gap: var(--space-1); }
+.mcp-panel input { width: 100%; box-sizing: border-box; margin-bottom: var(--space-2); }
+.mcp-panel code, .mcp-panel pre { font: 11px/1.7 "Cascadia Code", Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+.mcp-entry { padding: var(--space-3) 0; border-top: 1px solid var(--line); }
+.mcp-entry > span, .mcp-entry > p { font-size: 11px; }
+.mcp-entry > p { margin: var(--space-1) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+.mcp-panel output { color: var(--muted); overflow-wrap: anywhere; }
+.agent-delivery select { width: 100%; margin-bottom: var(--space-2); }

@@ -14,6 +14,8 @@ export interface UiBridge {
   readFrame?: typeof readPreviewFrame;
   readDeviceFrame?: typeof readDeviceFrame;
   transfer?: typeof transfer;
+  mcpStatus?: typeof mcpStatus;
+  mcpRevokeContext?: typeof mcpRevokeContext;
   observeControlReceipts?: typeof observeControlReceipts;
   observeFrameReady?: typeof observeFrameReady;
 }
@@ -25,6 +27,8 @@ export const nativeBridge: UiBridge = {
   readFrame: readPreviewFrame,
   readDeviceFrame,
   transfer,
+  mcpStatus,
+  mcpRevokeContext,
   observeControlReceipts,
   observeFrameReady,
 };
@@ -95,7 +99,7 @@ export async function readDeviceFrame(scope: RequestScope, identity: DeviceRunId
   return bytes;
 }
 
-export type DataCommand = Exclude<keyof CommandArgs, 'read_preview_frame' | 'read_device_frame' | 'enable_binary_preview_frames' | 'disable_binary_preview_frames' | 'click_preview' | 'snapshot' | 'minimize_window' | 'close_window' | 'maximize_pair' | 'restore_pair' | 'begin_drag' | 'rediscover' | 'select_candidate' | 'select_directory' | 'inspect_directory_path' | 'detach' | 'set_trust' | 'configure_sdk' | 'refresh_preview' | 'stop_preview' | 'arrange_side_by_side'>;
+export type DataCommand = Exclude<keyof CommandArgs, 'mcp_status' | 'mcp_revoke_context' | 'read_preview_frame' | 'read_device_frame' | 'enable_binary_preview_frames' | 'disable_binary_preview_frames' | 'click_preview' | 'snapshot' | 'minimize_window' | 'close_window' | 'maximize_pair' | 'restore_pair' | 'begin_drag' | 'rediscover' | 'select_candidate' | 'select_directory' | 'inspect_directory_path' | 'detach' | 'set_trust' | 'configure_sdk' | 'refresh_preview' | 'stop_preview' | 'arrange_side_by_side'>;
 
 /** Typed data replies use the same validated desktop entry, outside AppSnapshot. */
 export async function transfer<K extends DataCommand>(command: K, args: Omit<CommandArgs[K], 'scope'>, scope: RequestScope): Promise<CommandResults[K]> {
@@ -121,21 +125,20 @@ export async function observe(state: (value: AppSnapshot) => void, frame: (value
 }
 
 /**
- * Context-source pairing is a pre-docking capability: it must work before any
- * project or preview session exists, so it bypasses the session-scoped `request`
- * gate on purpose. The backend still validates the calling window itself.
+ * MCP setup is available before docking. The backend validates the calling window;
+ * task data continues to use the scoped transfer gate.
  */
-export async function contextPairCreate(): Promise<CommandResults['context_pair_create']> {
+export async function mcpStatus(): Promise<CommandResults['mcp_status']> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。请在 Windows 11 使用 pnpm dev 启动 ArkDock 独立应用。');
-  try { return await desktop.core.invoke<CommandResults['context_pair_create']>('context_pair_create', {}); }
+  try { return await desktop.core.invoke<CommandResults['mcp_status']>('mcp_status', {}); }
   catch (reason) { throw normalizeError(reason); }
 }
 
-/** Revokes the context-source pairing and every live registration. */
-export async function contextPairRevoke(): Promise<boolean> {
+/** Revokes only the selected MCP context. */
+export async function mcpRevokeContext(contextId: string): Promise<boolean> {
   const desktop = window.__TAURI__;
   if (!desktop) throw new Error('缺少桌面桥接。');
-  try { return await desktop.core.invoke<boolean>('context_pair_revoke', {}); }
+  try { return await desktop.core.invoke<boolean>('mcp_revoke_context', { contextId }); }
   catch (reason) { throw normalizeError(reason); }
 }

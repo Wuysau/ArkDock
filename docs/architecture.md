@@ -34,7 +34,7 @@ It delegates cohesive policy to sibling modules, which never own state of their 
 | `desktop/frame_delivery.rs` | the bounded latest-first frame mailbox and its identity checks | publish state or schedule builds |
 | `desktop/diagnostics.rs` | the bounded, scope-stamped diagnostic list | decide phases or retry |
 | `desktop/inspection.rs` | Inspector, selection and native control use cases | touch window or camera state |
-| `desktop/agent_delivery.rs` | every Agent command surface, pairing commit, and assisted work | bypass pairing or delivery authorization |
+| `desktop/mcp_bridge.rs` | generic MCP actor admission, task submission and pre-docking setup IPC | infer host conversations or bypass project trust |
 | `desktop/native_controls.rs` | native control and device runtime IPC | widen a scope that the coordinator rejected |
 | `desktop/visibility.rs` | reading the process's own main HWND visibility | dispatch to the WebView thread |
 
@@ -82,3 +82,9 @@ get_motion_metrics 通过独立低频受控请求读取累计计数，不随每�
 原生绘制的几何拒绝与真正 API 绘制失败分别处理：拒绝暂不绘制，下一有效采样恢复；
 真正失败才启用静态 Outline 降级。临时粒子置顶有生产者租约，取消/减少动画/隐藏撤销；
 Orb 的置顶仅在入口可见时存在，main 保持普通 Z 序。延迟取消补偿优先于旧 JointGroup 的跟随与解绑恢复。
+
+## Generic MCP process boundary
+
+The same executable branches on --mcp before any desktop initialization. The native stdio entry negotiates MCP and forwards bounded business calls over an authenticated same-user named pipe. The desktop Engine drains source events and checks actual project trust before task access; MCP registration remains a suggestion until explicit project confirmation. Native MCP modules separate protocol/transport, private credentials and the context/task domain.
+
+A context is an opaque logical workspace handle, not a host conversation identity. Submitted tasks own immutable selection and image bytes, separate from disposable preview artifacts. Claim proofs bind a task to a connection/context; source rebuild does not erase already claimed evidence, while project/trust revocation does. Disconnect never automatically reassigns a claim.

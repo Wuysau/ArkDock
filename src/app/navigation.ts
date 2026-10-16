@@ -1,9 +1,9 @@
 import type { AppSnapshot, TargetInfo } from '../ipc/model.ts';
 
-export type Panel = 'projects' | 'sdk' | 'trust' | 'path' | 'settings' | 'menu' | 'controls' | 'diagnostics' | 'help';
+export type Panel = 'projects' | 'sdk' | 'trust' | 'path' | 'settings' | 'menu' | 'controls' | 'diagnostics' | 'help' | 'mcp';
 export const panelNames: Record<Panel, string> = {
   projects: '选择关联工程', sdk: '设备与原生工具链', trust: '工程信任', path: '工程身份与路径',
-  settings: '偏好设置', menu: '更多操作', controls: '预览能力', diagnostics: '运行日志', help: '使用帮助',
+  mcp: 'MCP 接入', settings: '偏好设置', menu: '更多操作', controls: '预览能力', diagnostics: '运行日志', help: '使用帮助',
 };
 
 /** Lifecycle keys already used for an automatic popup, so it is never repeated. */

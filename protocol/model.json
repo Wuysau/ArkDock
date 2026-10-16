@@ -82,45 +82,88 @@
       "candidate",
       "unavailable"
     ],
-    "AgentKind": [
-      "codex",
-      "claude"
+    "NativeControlAction": [
+      "pointerDown",
+      "pointerMove",
+      "pointerUp",
+      "pointerCancel",
+      "cancelAll",
+      "textCommit",
+      "keyPress",
+      "setOrientation",
+      "setResolution",
+      "setColorMode",
+      "navigatePage",
+      "queryRouter",
+      "switchProfile"
     ],
-    "AgentTransportKind": [
-      "unsupported",
-      "explicitBridge",
-      "claudeChannel",
-      "codexAppServer",
-      "assistedWindow",
-      "codexDesktopPlugin"
+    "NativeControlPhase": [
+      "queued",
+      "commandAccepted",
+      "awaitingFrame",
+      "observed",
+      "failed",
+      "cancelled",
+      "timedOut",
+      "blocked"
     ],
-    "DeliveryState": [
-      "READY",
-      "UNSUPPORTED",
-      "SESSION_UNVERIFIED",
-      "SENDING",
-      "SUBMITTED",
-      "FAILED",
-      "EXPIRED",
-      "TRANSPORT_ACCEPTED",
-      "AGENT_ACKNOWLEDGED",
-      "COMPLETED",
-      "FILLED_PENDING_USER_SEND",
-      "UNKNOWN"
+    "NativeControlAvailability": [
+      "available",
+      "experimental",
+      "blocked",
+      "unavailable"
     ],
-    "NativeControlAction": ["pointerDown", "pointerMove", "pointerUp", "pointerCancel", "cancelAll", "textCommit", "keyPress", "setOrientation", "setResolution", "setColorMode", "navigatePage", "queryRouter", "switchProfile"],
-    "NativeControlPhase": ["queued", "commandAccepted", "awaitingFrame", "observed", "failed", "cancelled", "timedOut", "blocked"],
-    "NativeControlAvailability": ["available", "experimental", "blocked", "unavailable"],
-    "PreviewOrientation": ["portrait", "landscape"],
-    "PreviewColorMode": ["light", "dark"],
-    "PreviewKey": ["enter", "backspace", "delete", "tab", "escape", "arrowUp", "arrowDown", "arrowLeft", "arrowRight", "home", "end"],
-    "DeviceRuntimeKind": ["unknown", "emulator", "physicalDevice"],
-    "DeviceRuntimeAction": ["discover", "select", "build", "deploy", "start", "stop", "capture", "streamStart", "streamStop", "input", "emulatorList", "emulatorStart", "emulatorStop", "disconnect", "cancel"],
-    "DeviceInputKind": ["click", "doubleClick", "longClick", "swipe", "drag", "text", "key"],
-    "DeliveryMode": [
-      "native",
-      "assisted",
-      "copy"
+    "PreviewOrientation": [
+      "portrait",
+      "landscape"
+    ],
+    "PreviewColorMode": [
+      "light",
+      "dark"
+    ],
+    "PreviewKey": [
+      "enter",
+      "backspace",
+      "delete",
+      "tab",
+      "escape",
+      "arrowUp",
+      "arrowDown",
+      "arrowLeft",
+      "arrowRight",
+      "home",
+      "end"
+    ],
+    "DeviceRuntimeKind": [
+      "unknown",
+      "emulator",
+      "physicalDevice"
+    ],
+    "DeviceRuntimeAction": [
+      "discover",
+      "select",
+      "build",
+      "deploy",
+      "start",
+      "stop",
+      "capture",
+      "streamStart",
+      "streamStop",
+      "input",
+      "emulatorList",
+      "emulatorStart",
+      "emulatorStop",
+      "disconnect",
+      "cancel"
+    ],
+    "DeviceInputKind": [
+      "click",
+      "doubleClick",
+      "longClick",
+      "swipe",
+      "drag",
+      "text",
+      "key"
     ],
     "CandidateCategory": [
       "current",
@@ -204,19 +247,9 @@
       "PAGE_PATH_INVALID",
       "PAGE_PROFILE_INVALID",
       "PAGE_NOT_IN_COMPILED_ARTIFACT",
-      "AGENT_INSTRUCTION_REQUIRED",
-      "AGENT_SESSION_ID_INVALID",
-      "AGENT_TIMESTAMP_INVALID",
-      "AGENT_CONTEXT_INVALID",
-      "AGENT_BINDING_REQUIRED",
-      "AGENT_PAIR_PATH_INVALID",
-      "PAIRING_PATH_INVALID",
-      "ASSISTED_PROMPT_REQUIRED",
-      "ASSISTED_ACTION_INVALID",
       "EXPORT_CANCELLED",
       "DIRECTORY_SELECTION_CANCELLED",
       "SDK_SELECTION_CANCELLED",
-      "PAIRING_SAVE_CANCELLED",
       "STALE_REQUEST",
       "STALE_TARGET",
       "TARGET_REQUIRED",
@@ -271,7 +304,6 @@
       "LAST_SUCCESS_REQUIRED",
       "TRUST_REQUIRED",
       "TRUST_FINGERPRINT_CHANGED",
-      "AGENT_LOCAL_TRUSTED_WORKSPACE_REQUIRED",
       "UNSUPPORTED_ENVIRONMENT",
       "UNSUPPORTED_PLATFORM",
       "WINDOWING_UNAVAILABLE",
@@ -307,15 +339,6 @@
       "SELECTION_CLEANUP_FAILED",
       "EXPORT_WRITE_FAILED",
       "EXPORT_WORKER_FAILED",
-      "PAIRING_LOCAL_DISK_REQUIRED",
-      "PAIRING_PRIVATE_ACL_FAILED",
-      "PAIRING_RANDOM_FAILED",
-      "PAIRING_REPLACE_FAILED",
-      "PAIRING_ROLLBACK_FAILED",
-      "PAIRING_SERIALIZE_FAILED",
-      "PAIRING_WRITE_FAILED",
-      "PAIRING_WRITE_TIMEOUT",
-      "PAIRING_CANCELLED",
       "CANDIDATE_LIMIT",
       "CANDIDATE_DISAPPEARED",
       "PROJECT_CHANGED_OR_INVALID",
@@ -358,10 +381,6 @@
       "NATIVE_CONTROL_MAILBOX",
       "INSPECTOR_CHANNEL_UNVERIFIED_AFTER_TIMEOUT",
       "DEVICE_TARGET_NOT_CONNECTED",
-      "AGENT_TRANSPORT_UNAVAILABLE",
-      "AGENT_TRANSPORT_UNSUPPORTED",
-      "AGENT_TRANSPORT_LEASE_EXPIRED",
-      "AGENT_TRANSPORT_DELIVERY_LIMIT_REPAIR_REQUIRED",
       "SELECTION_NOT_FOUND",
       "SELECTION_EXPIRED",
       "SELECTION_EXPIRED_BEFORE_DISPATCH",
@@ -381,94 +400,176 @@
       "SELECTION_JPEG_INVALID",
       "SELECTION_JPEG_DIMENSIONS",
       "SELECTION_CROP_FAILED",
-      "AGENT_ADAPTER_NOT_IMPLEMENTED",
-      "AGENT_BINDING_EXPIRED",
-      "AGENT_BINDING_LIMIT",
-      "AGENT_BINDING_NOT_FOUND",
-      "AGENT_BUSY_RETRY_AFTER_CURRENT_TURN",
-      "AGENT_DELIVERY_LIMIT_WAIT_FOR_SELECTION_EXPIRY",
-      "AGENT_DELIVERY_NOT_FOUND",
-      "AGENT_PAIR_ALREADY_USED",
-      "AGENT_PAIR_EXPIRED",
-      "AGENT_PAIR_EXPIRED_OR_WRONG_KIND",
-      "AGENT_PAIR_PREPARE_REQUIRED",
-      "AGENT_PAIR_PREPARE_SUPERSEDED",
-      "AGENT_PAIR_REQUIRED",
-      "AGENT_PAIR_REVOKED",
-      "AGENT_PAIR_SCOPE_CHANGED",
-      "AGENT_PAIRING_IN_PROGRESS",
-      "AGENT_PREVIEW_SESSION_REQUIRED",
-      "AGENT_RECEIPT_INVALID",
-      "AGENT_RECEIPT_MISMATCH",
-      "AGENT_RECEIPT_SCOPE_MISMATCH",
-      "AGENT_RECEIPT_TRANSITION_INVALID",
-      "AGENT_REGISTRATION_EXPIRED",
-      "AGENT_REGISTRATION_INVALID",
-      "AGENT_REGISTRATION_REQUIRED",
-      "AGENT_REGISTRATION_SCOPE_INVALID",
-      "AGENT_REQUEST_DEADLINE",
-      "AGENT_ROUTE_NOT_FOUND",
-      "AGENT_RUNTIME_LEASE_EXPIRED",
-      "AGENT_RUNTIME_UNAVAILABLE",
-      "AGENT_SELECTION_CHANGED",
-      "AGENT_SELECTION_SCOPE_MISMATCH",
-      "AGENT_SESSION_CHANGED_REPAIR_REQUIRED",
-      "AGENT_SESSION_MISMATCH",
-      "AGENT_TARGET_LIFECYCLE_MISMATCH",
-      "AGENT_TARGET_REQUIRED",
-      "AGENT_WORKSPACE_MISMATCH",
-      "AGENT_WORKSPACE_REQUIRED",
-      "AGENT_UNAUTHORIZED",
       "PAIR_REQUIRED",
-      "ASSISTED_CANCELLED",
-      "ASSISTED_REPLY_INVALID",
-      "ASSISTED_REQUEST_PENDING",
-      "ASSISTED_SCOPE_CHANGED_RECONFIRM_REQUIRED",
-      "ASSISTED_TIMEOUT_OR_CANCELLED",
-      "ASSISTED_UNAVAILABLE",
-      "INTERNAL"
+      "INTERNAL",
+      "MCP_REQUEST_REJECTED"
+    ],
+    "McpTaskState": [
+      "pending",
+      "claimed",
+      "acknowledged",
+      "completed",
+      "failed",
+      "expired",
+      "unknown"
     ]
   },
   "structs": {
     "NativeControlIdentity": {
-      "workspaceId": "string", "sessionId": "string", "buildId": "string", "generation": "u64", "width": "u32", "height": "u32"
+      "workspaceId": "string",
+      "sessionId": "string",
+      "buildId": "string",
+      "generation": "u64",
+      "width": "u32",
+      "height": "u32"
     },
     "NativeControlRequest": {
-      "identity": "NativeControlIdentity", "action": "NativeControlAction", "gestureId": "string?", "x": "u32?", "y": "u32?", "text": "string?", "key": "PreviewKey?", "orientation": "PreviewOrientation?", "colorMode": "PreviewColorMode?", "page": "string?", "profileId": "string?", "width": "u32?", "height": "u32?", "dpi": "u32?"
+      "identity": "NativeControlIdentity",
+      "action": "NativeControlAction",
+      "gestureId": "string?",
+      "x": "u32?",
+      "y": "u32?",
+      "text": "string?",
+      "key": "PreviewKey?",
+      "orientation": "PreviewOrientation?",
+      "colorMode": "PreviewColorMode?",
+      "page": "string?",
+      "profileId": "string?",
+      "width": "u32?",
+      "height": "u32?",
+      "dpi": "u32?"
     },
     "NativeControlReceipt": {
-      "operationId": "string", "identity": "NativeControlIdentity", "action": "NativeControlAction", "phase": "NativeControlPhase", "commandAccepted": "bool", "frameObserved": "bool", "pixelsChanged": "bool", "configurationConfirmed": "bool", "currentRoute": "string?", "frameSequence": "u64?", "requestedAt": "u64", "observedAt": "u64", "reason": "string"
+      "operationId": "string",
+      "identity": "NativeControlIdentity",
+      "action": "NativeControlAction",
+      "phase": "NativeControlPhase",
+      "commandAccepted": "bool",
+      "frameObserved": "bool",
+      "pixelsChanged": "bool",
+      "configurationConfirmed": "bool",
+      "currentRoute": "string?",
+      "frameSequence": "u64?",
+      "requestedAt": "u64",
+      "observedAt": "u64",
+      "reason": "string"
     },
     "NativeControlCapability": {
-      "name": "string", "status": "NativeControlAvailability", "reason": "string"
+      "name": "string",
+      "status": "NativeControlAvailability",
+      "reason": "string"
     },
     "PreviewDeviceProfile": {
-      "id": "string", "label": "string", "deviceType": "string", "width": "u32", "height": "u32", "dpi": "u32", "shape": "string", "projectModel": "string", "requiresRestart": "bool", "status": "NativeControlAvailability", "reason": "string"
+      "id": "string",
+      "label": "string",
+      "deviceType": "string",
+      "width": "u32",
+      "height": "u32",
+      "dpi": "u32",
+      "shape": "string",
+      "projectModel": "string",
+      "requiresRestart": "bool",
+      "status": "NativeControlAvailability",
+      "reason": "string"
     },
     "NativeControlState": {
-      "identity": "NativeControlIdentity?", "experimentalEnabled": "bool", "inputReady": "bool", "capabilities": "NativeControlCapability[]", "operations": "NativeControlReceipt[]", "pages": "string[]", "currentPage": "string?", "profiles": "PreviewDeviceProfile[]", "currentProfileId": "string", "orientation": "PreviewOrientation", "colorMode": "PreviewColorMode", "width": "u32", "height": "u32", "dpi": "u32", "reason": "string"
+      "identity": "NativeControlIdentity?",
+      "experimentalEnabled": "bool",
+      "inputReady": "bool",
+      "capabilities": "NativeControlCapability[]",
+      "operations": "NativeControlReceipt[]",
+      "pages": "string[]",
+      "currentPage": "string?",
+      "profiles": "PreviewDeviceProfile[]",
+      "currentProfileId": "string",
+      "orientation": "PreviewOrientation",
+      "colorMode": "PreviewColorMode",
+      "width": "u32",
+      "height": "u32",
+      "dpi": "u32",
+      "reason": "string"
     },
     "DeviceRuntimeTarget": {
-      "id": "string", "label": "string", "kind": "DeviceRuntimeKind", "connectionState": "string", "reason": "string"
+      "id": "string",
+      "label": "string",
+      "kind": "DeviceRuntimeKind",
+      "connectionState": "string",
+      "reason": "string"
     },
     "DeviceRuntimeState": {
-      "identity": "DeviceRunIdentity?", "kind": "DeviceRuntimeKind", "hdcPath": "string?", "toolSha256": "string?", "hdcPresent": "bool", "targets": "DeviceRuntimeTarget[]", "selectedTargetId": "string?", "phase": "string", "deploymentReady": "bool", "signatureStatus": "string", "foregroundVerified": "bool", "frameReady": "bool", "reason": "string",
-      "busy": "bool", "operationId": "u64", "bundleName": "string?", "moduleName": "string?", "abilityName": "string?", "artifactSha256": "string?", "deploymentToken": "string?", "frame": "DeviceFrameMetadata?", "streaming": "bool", "emulators": "DeviceEmulator[]", "selectedEmulator": "string?"
+      "identity": "DeviceRunIdentity?",
+      "kind": "DeviceRuntimeKind",
+      "hdcPath": "string?",
+      "toolSha256": "string?",
+      "hdcPresent": "bool",
+      "targets": "DeviceRuntimeTarget[]",
+      "selectedTargetId": "string?",
+      "phase": "string",
+      "deploymentReady": "bool",
+      "signatureStatus": "string",
+      "foregroundVerified": "bool",
+      "frameReady": "bool",
+      "reason": "string",
+      "busy": "bool",
+      "operationId": "u64",
+      "bundleName": "string?",
+      "moduleName": "string?",
+      "abilityName": "string?",
+      "artifactSha256": "string?",
+      "deploymentToken": "string?",
+      "frame": "DeviceFrameMetadata?",
+      "streaming": "bool",
+      "emulators": "DeviceEmulator[]",
+      "selectedEmulator": "string?"
     },
     "DeviceRunIdentity": {
-      "runId": "string", "workspaceId": "string", "targetId": "string?", "generation": "u64"
+      "runId": "string",
+      "workspaceId": "string",
+      "targetId": "string?",
+      "generation": "u64"
     },
     "DeviceFrameMetadata": {
-      "runId": "string", "targetId": "string", "bundleName": "string", "sequence": "u64", "width": "u32", "height": "u32", "captureStartedAt": "u64", "receivedAt": "u64", "payloadLength": "u32", "foregroundVerified": "bool"
+      "runId": "string",
+      "targetId": "string",
+      "bundleName": "string",
+      "sequence": "u64",
+      "width": "u32",
+      "height": "u32",
+      "captureStartedAt": "u64",
+      "receivedAt": "u64",
+      "payloadLength": "u32",
+      "foregroundVerified": "bool"
     },
     "DeviceEmulator": {
-      "name": "string", "running": "bool", "owned": "bool", "hdcTarget": "string?", "reason": "string"
+      "name": "string",
+      "running": "bool",
+      "owned": "bool",
+      "hdcTarget": "string?",
+      "reason": "string"
     },
     "DeviceInputRequest": {
-      "kind": "DeviceInputKind", "frameSequence": "u64", "x": "u32?", "y": "u32?", "endX": "u32?", "endY": "u32?", "velocity": "u32?", "text": "string?", "keyCode": "u32?"
+      "kind": "DeviceInputKind",
+      "frameSequence": "u64",
+      "x": "u32?",
+      "y": "u32?",
+      "endX": "u32?",
+      "endY": "u32?",
+      "velocity": "u32?",
+      "text": "string?",
+      "keyCode": "u32?"
     },
     "DeviceRuntimeRequest": {
-      "identity": "DeviceRunIdentity", "action": "DeviceRuntimeAction", "targetId": "string?", "kind": "DeviceRuntimeKind", "connectionConsent": "bool", "deploymentConsent": "bool", "captureConsent": "bool", "inputConsent": "bool", "deploymentToken": "string?", "input": "DeviceInputRequest?", "emulatorName": "string?"
+      "identity": "DeviceRunIdentity",
+      "action": "DeviceRuntimeAction",
+      "targetId": "string?",
+      "kind": "DeviceRuntimeKind",
+      "connectionConsent": "bool",
+      "deploymentConsent": "bool",
+      "captureConsent": "bool",
+      "inputConsent": "bool",
+      "deploymentToken": "string?",
+      "input": "DeviceInputRequest?",
+      "emulatorName": "string?"
     },
     "MotionMetrics": {
       "frames": "u64",
@@ -607,10 +708,6 @@
       "motion": "MotionSettings",
       "dockConfirmation": "DockConfirmation?",
       "contextSource": "ContextSourceStatus?"
-    },
-    "ContextPairing": {
-      "pipeName": "string",
-      "pairingFile": "string"
     },
     "ContextSourceStatus": {
       "paired": "bool",
@@ -757,144 +854,207 @@
       "createdAt": "u64",
       "expiresAt": "u64"
     },
-    "AgentCapabilities": {
-      "identifyCurrentSession": "bool",
-      "directSend": "bool",
-      "images": "bool",
-      "fileReferences": "bool",
-      "busyState": "bool",
-      "receipt": "bool",
-      "cancelPending": "bool"
+    "McpConfiguration": {
+      "command": "string",
+      "args": "string[]",
+      "json": "string"
     },
-    "AgentAdapterStatus": {
-      "agentKind": "AgentKind",
-      "capabilities": "AgentCapabilities",
-      "status": "DeliveryState",
-      "reason": "string"
+    "McpContext": {
+      "contextId": "string",
+      "registrationId": "string",
+      "clientName": "string",
+      "displayName": "string",
+      "originalProject": "string",
+      "executionDirectory": "string",
+      "environment": "Environment",
+      "confirmed": "bool",
+      "connected": "bool"
     },
-    "AgentSessionBinding": {
-      "bindingId": "string",
-      "agentKind": "AgentKind",
-      "targetId": "string",
-      "process": "ProcessRef",
-      "workspaceId": "string",
-      "agentSessionId": "string",
-      "conversationOrThreadId": "string",
-      "transportKind": "AgentTransportKind",
-      "writable": "bool",
-      "capabilities": "AgentCapabilities",
-      "observedAt": "u64",
-      "expiresAt": "u64",
-      "reason": "string",
-      "transportInstanceId": "string?",
-      "agentVersion": "string?",
-      "verifiedAt": "u64",
-      "bindingEvidence": "string"
-    },
-    "AgentBindingDraft": {
-      "agentKind": "AgentKind",
-      "agentSessionId": "string",
-      "conversationOrThreadId": "string"
-    },
-    "AgentSessionList": {
-      "adapters": "AgentAdapterStatus[]",
-      "bindings": "AgentSessionBinding[]",
-      "registrations": "AgentRegistration[]"
-    },
-    "AgentDelivery": {
-      "requestId": "string",
+    "McpTaskSummary": {
+      "taskId": "string",
+      "contextId": "string",
       "selectionId": "string",
-      "bindingId": "string?",
-      "state": "DeliveryState",
-      "prompt": "string",
-      "target": "AgentSessionBinding?",
-      "receiptId": "string?",
-      "reason": "string",
+      "state": "McpTaskState",
       "createdAt": "u64",
       "updatedAt": "u64",
-      "idempotencyKey": "string",
-      "deliveryMode": "DeliveryMode",
-      "transportReceipt": "string?",
-      "agentAcknowledgment": "string?"
-    },
-    "AgentRegistration": {
-      "registrationId": "string",
-      "agentKind": "AgentKind",
-      "agentVersion": "string",
-      "transportKind": "AgentTransportKind",
-      "transportInstanceId": "string",
-      "agentSessionId": "string",
-      "conversationOrThreadId": "string",
-      "workspaceId": "string",
-      "workspaceRoot": "string",
-      "pid": "u32",
-      "capabilities": "AgentCapabilities",
-      "observedAt": "u64",
       "expiresAt": "u64",
-      "busy": "bool",
-      "reason": "string"
+      "summary": "string?",
+      "validation": "string?"
     },
-    "AgentPairing": {
-      "pairingId": "string",
-      "endpoint": "string",
-      "token": "string",
-      "agentKind": "AgentKind",
-      "workspaceId": "string",
-      "workspaceRoot": "string",
-      "expiresAt": "u64",
-      "configPath": "string?"
-    },
-    "AssistedOffer": {
-      "confirmationId": "string",
-      "targetId": "string",
-      "app": "string",
-      "pid": "u32",
-      "composerName": "string",
-      "expiresAt": "u64",
-      "reason": "string"
-    },
-    "AssistedFill": {
-      "state": "DeliveryState",
-      "receiptId": "string?",
-      "reason": "string"
+    "McpStatus": {
+      "available": "bool",
+      "reason": "string",
+      "configuration": "McpConfiguration",
+      "contexts": "McpContext[]",
+      "tasks": "McpTaskSummary[]"
     }
   },
   "commandResponses": {
-    "context_select_project": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "context_pair_create": { "rust": "ContextPairing", "typescript": "ContextPairing", "error": "IpcError" },
-    "context_pair_revoke": { "rust": "bool", "typescript": "boolean", "error": "IpcError" },
-    "snapshot": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "collapse_to_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "expand_from_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "hide_to_tray": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "show_from_tray": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "set_orb_auto_hide": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "set_orb_opacity": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "set_motion_preferences": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "get_display_mode": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "minimize_window": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "close_window": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "maximize_pair": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "restore_pair": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "begin_drag": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "rediscover": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "select_candidate": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "select_directory": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "inspect_directory_path": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "configure_sdk": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "detach": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "set_trust": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "refresh_preview": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "stop_preview": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "arrange_side_by_side": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "click_preview": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
-    "preview_control_state": { "rust": "NativeControlState", "typescript": "NativeControlState", "error": "IpcError" },
-    "preview_control_enable": { "rust": "NativeControlState", "typescript": "NativeControlState", "error": "IpcError" },
-    "preview_control_submit": { "rust": "NativeControlReceipt", "typescript": "NativeControlReceipt", "error": "IpcError" },
-    "preview_control_cancel": { "rust": "NativeControlReceipt", "typescript": "NativeControlReceipt", "error": "IpcError" },
-    "device_runtime_state": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "IpcError" },
-    "device_runtime_action": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "IpcError" },
-    "read_device_frame": { "rust": "tauri::ipc::Response", "typescript": "ArrayBuffer", "error": "IpcError" },
+    "context_select_project": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "snapshot": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "collapse_to_orb": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "expand_from_orb": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "hide_to_tray": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "show_from_tray": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "set_orb_auto_hide": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "set_orb_opacity": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "set_motion_preferences": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "get_display_mode": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "minimize_window": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "close_window": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "maximize_pair": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "restore_pair": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "begin_drag": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "rediscover": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "select_candidate": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "select_directory": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "inspect_directory_path": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "configure_sdk": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "detach": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "set_trust": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "refresh_preview": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "stop_preview": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "arrange_side_by_side": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "click_preview": {
+      "rust": "AppSnapshot",
+      "typescript": "AppSnapshot",
+      "error": "IpcError"
+    },
+    "preview_control_state": {
+      "rust": "NativeControlState",
+      "typescript": "NativeControlState",
+      "error": "IpcError"
+    },
+    "preview_control_enable": {
+      "rust": "NativeControlState",
+      "typescript": "NativeControlState",
+      "error": "IpcError"
+    },
+    "preview_control_submit": {
+      "rust": "NativeControlReceipt",
+      "typescript": "NativeControlReceipt",
+      "error": "IpcError"
+    },
+    "preview_control_cancel": {
+      "rust": "NativeControlReceipt",
+      "typescript": "NativeControlReceipt",
+      "error": "IpcError"
+    },
+    "device_runtime_state": {
+      "rust": "DeviceRuntimeState",
+      "typescript": "DeviceRuntimeState",
+      "error": "IpcError"
+    },
+    "device_runtime_action": {
+      "rust": "DeviceRuntimeState",
+      "typescript": "DeviceRuntimeState",
+      "error": "IpcError"
+    },
+    "read_device_frame": {
+      "rust": "tauri::ipc::Response",
+      "typescript": "ArrayBuffer",
+      "error": "IpcError"
+    },
     "get_motion_metrics": {
       "rust": "MotionMetrics",
       "typescript": "MotionMetrics",
@@ -960,68 +1120,59 @@
       "typescript": "ArrayBuffer",
       "error": "IpcError"
     },
-    "agent_session_list": {
-      "rust": "AgentSessionList",
-      "typescript": "AgentSessionList",
+    "mcp_status": {
+      "rust": "McpStatus",
+      "typescript": "McpStatus",
       "error": "IpcError"
     },
-    "agent_session_bind": {
-      "rust": "AgentSessionBinding",
-      "typescript": "AgentSessionBinding",
-      "error": "IpcError"
-    },
-    "agent_delivery_prepare": {
-      "rust": "AgentDelivery",
-      "typescript": "AgentDelivery",
-      "error": "IpcError"
-    },
-    "agent_delivery_send": {
-      "rust": "AgentDelivery",
-      "typescript": "AgentDelivery",
-      "error": "IpcError"
-    },
-    "agent_delivery_status": {
-      "rust": "AgentDelivery",
-      "typescript": "AgentDelivery",
-      "error": "IpcError"
-    },
-    "agent_pair_create": {
-      "rust": "AgentPairing",
-      "typescript": "AgentPairing",
-      "error": "IpcError"
-    },
-    "agent_pair_revoke": {
+    "mcp_revoke_context": {
       "rust": "bool",
       "typescript": "bool",
       "error": "IpcError"
     },
-    "agent_registration_bind": {
-      "rust": "AgentSessionBinding",
-      "typescript": "AgentSessionBinding",
+    "mcp_submit_task": {
+      "rust": "McpTaskSummary",
+      "typescript": "McpTaskSummary",
       "error": "IpcError"
     },
-    "agent_assisted_inspect": {
-      "rust": "AssistedOffer",
-      "typescript": "AssistedOffer",
-      "error": "IpcError"
-    },
-    "agent_assisted_fill": {
-      "rust": "AgentDelivery",
-      "typescript": "AgentDelivery",
+    "mcp_retry_task": {
+      "rust": "McpTaskSummary",
+      "typescript": "McpTaskSummary",
       "error": "IpcError"
     }
   },
   "commands": {
-    "context_select_project": { "scope": "RequestScope", "registrationId": "string" },
-    "context_pair_create": {},
-    "context_pair_revoke": {},
-    "preview_control_state": { "scope": "RequestScope" },
-    "preview_control_enable": { "scope": "RequestScope", "enabled": "bool" },
-    "preview_control_submit": { "scope": "RequestScope", "request": "NativeControlRequest" },
-    "preview_control_cancel": { "scope": "RequestScope", "identity": "NativeControlIdentity" },
-    "device_runtime_state": { "scope": "RequestScope" },
-    "device_runtime_action": { "scope": "RequestScope", "request": "DeviceRuntimeRequest" },
-    "read_device_frame": { "scope": "RequestScope", "identity": "DeviceRunIdentity", "afterSequence": "u64" },
+    "context_select_project": {
+      "scope": "RequestScope",
+      "registrationId": "string"
+    },
+    "preview_control_state": {
+      "scope": "RequestScope"
+    },
+    "preview_control_enable": {
+      "scope": "RequestScope",
+      "enabled": "bool"
+    },
+    "preview_control_submit": {
+      "scope": "RequestScope",
+      "request": "NativeControlRequest"
+    },
+    "preview_control_cancel": {
+      "scope": "RequestScope",
+      "identity": "NativeControlIdentity"
+    },
+    "device_runtime_state": {
+      "scope": "RequestScope"
+    },
+    "device_runtime_action": {
+      "scope": "RequestScope",
+      "request": "DeviceRuntimeRequest"
+    },
+    "read_device_frame": {
+      "scope": "RequestScope",
+      "identity": "DeviceRunIdentity",
+      "afterSequence": "u64"
+    },
     "get_motion_metrics": {
       "scope": "RequestScope"
     },
@@ -1168,44 +1319,19 @@
       "selectionId": "string",
       "crop": "bool"
     },
-    "agent_session_list": {
-      "scope": "RequestScope"
+    "mcp_status": {},
+    "mcp_revoke_context": {
+      "contextId": "string"
     },
-    "agent_session_bind": {
+    "mcp_submit_task": {
       "scope": "RequestScope",
-      "draft": "AgentBindingDraft"
-    },
-    "agent_delivery_prepare": {
-      "scope": "RequestScope",
-      "selectionId": "string",
-      "bindingId": "string?"
-    },
-    "agent_delivery_send": {
-      "scope": "RequestScope",
-      "requestId": "string"
-    },
-    "agent_delivery_status": {
-      "scope": "RequestScope",
-      "requestId": "string"
-    },
-    "agent_pair_create": {
-      "scope": "RequestScope",
-      "agentKind": "AgentKind"
-    },
-    "agent_pair_revoke": {
-      "scope": "RequestScope"
-    },
-    "agent_registration_bind": {
-      "scope": "RequestScope",
-      "registrationId": "string"
-    },
-    "agent_assisted_inspect": {
-      "scope": "RequestScope"
-    },
-    "agent_assisted_fill": {
-      "scope": "RequestScope",
-      "confirmationId": "string",
+      "contextId": "string",
       "selectionId": "string"
+    },
+    "mcp_retry_task": {
+      "scope": "RequestScope",
+      "taskId": "string",
+      "contextId": "string"
     }
   }
 }

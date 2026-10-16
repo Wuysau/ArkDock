@@ -2,9 +2,8 @@
 // This driver neither supplies native frames nor sends any Agent message.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { connectWebview } from './webview-driver.mjs';
 import { activateOwnedHeader, requireOwnedTargetEdge } from './window-input.mjs';
 
@@ -14,16 +13,10 @@ const url = process.env.ARKDOCK_PROBE_URL ?? 'http://127.0.0.1:1420/';
 const project = resolve('examples/native-counter');
 const normalizedPath = (path) => path.replaceAll('\\','/').replace(/^\/\/\?\//,'').toLowerCase();
 const evidence = resolve(process.env.ARKDOCK_INSPECTOR_EVIDENCE ?? 'artifacts/inspector-ui');
-const appId = process.env.ARKDOCK_TEST_APP_ID ?? 'dev.arkdock.desktop';
-if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]{1,100}$/.test(appId)) throw new Error('Invalid explicit test application identifier');
 const checks = [];
 const report = {capturedAt:new Date().toISOString(),platform:process.platform,sdkVersion:'26.0.0.105',checks};
-if(process.env.ARKDOCK_DELIVERY_ONLY==='1') {
-  if(process.env.ARKDOCK_HOLD_FOR_DELIVERY!=='1')throw new Error('Delivery-only setup requires explicit held-fixture lifecycle');
-  report.scope='Actual native selection setup only; full Inspector assertions are recorded separately';
-}
 const pause = (ms) => new Promise((done) => setTimeout(done,ms));
-let view, host, dockHandle, originalWindow, projectId, originalTrust = false, nativeLog, keepFixture = false;
+let view, host, dockHandle, originalWindow, projectId, originalTrust = false, nativeLog;
 function blocked(message) { const error = new Error(message); error.blocked = true; throw error; }
 function action(kind, handle, values = {}) {
   const args=['-NoProfile','-File',resolve('tests/native/window-actions.ps1'),'-Action',kind,'-Handle',String(handle)];
@@ -67,10 +60,10 @@ async function inspectorAction(testId) {
   await clickControl('document.querySelector(".toolbar-trigger")');
   await until('Inspector controls collapsed',()=>view.evaluate('document.querySelector(".chrome-top")?.dataset.open==="false"'));
 }
-async function assertNoUiAgentSubmission() {
-  const forbidden=['agent_delivery_prepare','agent_delivery_send','agent_pair_create','agent_pair_revoke','agent_session_list'];
+async function assertNoUiMcpMutation() {
+  const forbidden=['mcp_submit_task','mcp_retry_task','mcp_revoke_context','context_select_project'];
   const calls=await view.evaluate(`window.__arkdockInspectorSmoke.calls.filter(call=>call.source==='ui'&&${JSON.stringify(forbidden)}.includes(call.command))`);
-  assert.deepEqual(calls,[],'Copy/fill UI must neither prepare/send messages nor pair/revoke/poll Agent sessions');
+  assert.deepEqual(calls,[],'Copy and Inspector actions must not submit, retry, revoke or confirm an MCP context');
 }
 function assertCompactPrompt(prompt,selection) {
   assert.ok(prompt.includes(selection.userInstruction));
@@ -94,62 +87,24 @@ async function capture(name) {
   const result=await view.send('Page.captureScreenshot',{format:'png'});
   writeFileSync(join(evidence,`${name}.png`),Buffer.from(result.data,'base64'));
 }
-async function verifyMcp(selection) {
-  if (!process.env.APPDATA) blocked('Explicit Windows APPDATA unavailable; selection store was not scanned');
-  const directory=join(process.env.APPDATA,appId,'selection-context-v1');
-  if(!existsSync(join(directory,selection.selectionId,'context.json'))) blocked('Expected task selection artifact unavailable in own selection subdirectory; no scan performed');
-  const capability=join(evidence,'mcp-grant.json');
-  const grant={version:1,directory,workspaceId:selection.workspaceId,sessionId:selection.sessionId,
-    selectionIds:[selection.selectionId],allowedTools:['arkdock.get_current_selection','arkdock.get_selection','arkdock.get_selection_context','arkdock.get_selection_screenshot'],expiresAt:Date.now()+60000};
-  writeFileSync(capability,`${JSON.stringify(grant,null,2)}\n`);
-  const child=spawn(process.execPath,[resolve('tools/selection-provider.mjs'),'--directory',directory,
-    '--workspace',selection.workspaceId,'--session',selection.sessionId,'--capability',capability],
-  {windowsHide:true,stdio:['pipe','pipe','pipe']});
-  let serial=0,buffer='',errors='';const pending=new Map();
-  child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
-  child.stdin.on('error',()=>{/* The owned provider may exit after a rejected grant. */});
-  child.stderr.on('data',(chunk)=>{errors+=chunk;});
-  child.stdout.on('data',(chunk)=>{
-    buffer+=chunk;let newline;
-    while((newline=buffer.indexOf('\n'))>=0){
-      const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);
-      let message;try{message=JSON.parse(line);}catch{continue;}
-      const entry=pending.get(message.id);if(!entry)continue;pending.delete(message.id);clearTimeout(entry.timer);
-      if(message.error)entry.reject(new Error(message.error.message));else entry.done(message.result);
-    }
-  });
-  child.once('error',(error)=>{for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(error);}pending.clear();});
-  child.once('exit',(code)=>{for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(new Error(`MCP provider exit ${code}: ${errors.trim()}`));}pending.clear();});
-  function request(method,params={}) {
-    const id=++serial;
-    return new Promise((done,reject)=>{
-      const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`MCP timeout: ${method}`));},10000);
-      pending.set(id,{done,reject,timer});child.stdin.write(`${JSON.stringify({jsonrpc:'2.0',id,method,params})}\n`);
-    });
-  }
-  try {
-    const initialized=await request('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'arkdock-native-selection-smoke',version:'1'}});
-    child.stdin.write(`${JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})}\n`);
-    const listed=await request('tools/list');assert.equal(listed.tools.length,4);
-    const context=await request('tools/call',{name:'arkdock.get_selection_context',arguments:{selectionId:selection.selectionId}});
-    assert.equal(context.isError,undefined);assert.equal(context.structuredContent.selectionId,selection.selectionId);
-    assert.equal(context.structuredContent.userInstruction,selection.userInstruction);
-    const hashes=[];
-    for(const crop of [false,true]){
-      const result=await request('tools/call',{name:'arkdock.get_selection_screenshot',arguments:{selectionId:selection.selectionId,crop}});
-      assert.equal(result.isError,undefined);assert.equal(result.content[0].mimeType,'image/jpeg');
-      const bytes=Buffer.from(result.content[0].data,'base64'),metadata=crop?selection.crop:selection.screenshot;
-      const hash=createHash('sha256').update(bytes).digest('hex');assert.equal(hash,metadata.sha256);hashes.push({crop,sha256:hash,byteLength:bytes.length});
-    }
-    const denied=await request('tools/call',{name:'arkdock.get_selection',arguments:{selectionId:'sel-not-authorized'}});
-    assert.equal(denied.isError,true);assert.equal(denied.content[0].text,'SELECTION_NOT_AUTHORIZED');
-    return {protocolVersion:initialized.protocolVersion,tools:listed.tools.map((tool)=>tool.name),selectionId:selection.selectionId,
-      sourceStatus:context.structuredContent.sourceEvidence.status,hashes,deniedOtherSelection:true,agentMessagesSent:0};
-  } finally {
-    if(!child.stdin.destroyed)child.stdin.end();
-    if(child.exitCode===null){await Promise.race([new Promise((done)=>child.once('exit',done)),pause(1000)]);if(child.exitCode===null)child.kill();}
-  }
+// Native stdio handshake, transport and claim isolation belong to
+// src-tauri/tests/mcp_stdio_process.rs; this driver stays within Inspector/UI scope.
+async function mcpStatus() {
+  return view.evaluate('(window.__arkdockInspectorSmoke?.driverInvoke??window.__TAURI__.core.invoke)("mcp_status",{})');
 }
+function requireNoMcpClient(status) {
+  if(status.contexts.some(context=>context.connected)||status.tasks.length)
+    blocked('Dedicated Inspector probe requires no MCP clients or queued tasks; existing contexts and tasks were preserved');
+}
+function assertMcpConfiguration(status) {
+  assert.equal(status.available,true,status.reason);
+  assert.ok(status.configuration.command.toLowerCase().endsWith('.exe'),'MCP configuration must use the native executable');
+  assert.deepEqual(status.configuration.args,['--mcp']);
+  const config=JSON.parse(status.configuration.json);
+  assert.deepEqual(config.mcpServers.arkdock,{command:status.configuration.command,args:['--mcp']});
+  if(process.env.ARKDOCK_DESKTOP_EXE)assert.equal(normalizedPath(status.configuration.command),normalizedPath(resolve(process.env.ARKDOCK_DESKTOP_EXE)));
+}
+
 try {
   mkdirSync(evidence,{recursive:true});
   if(process.platform!=='win32'||!process.env.ARKDOCK_SDK) blocked('Windows and explicit ARKDOCK_SDK required');
@@ -159,6 +114,10 @@ try {
   try {view=await connectWebview(port,5000,url,ownedPid);} catch(error) {blocked(`Owned debugger unavailable: ${error.message}`);}
   const initial=await snapshot();
   if(initial.target||initial.sessionId) blocked('Dedicated probe must start detached; no user association was changed');
+  await check('Generic MCP configuration is readable before docking without starting a client',async()=>{
+    const status=await mcpStatus();requireNoMcpClient(status);assertMcpConfiguration(status);
+    report.mcpSetup={beforeDocking:true,command:status.configuration.command,args:status.configuration.args,clientStarted:false};
+  });
   if(!initial.backend.available) blocked(initial.backend.reason);
   dockHandle=action('find',0,{ProcessId:ownedPid}).handle;
   if(!dockHandle) blocked('Explicit task-owned ArkDock window not found');
@@ -199,10 +158,10 @@ try {
     await toggleInspector();
   await view.evaluate(`(() => {
     const originalBridge=window.__TAURI__,original=originalBridge.core.invoke;
-    const smoke=window.__arkdockInspectorSmoke={trees:[],selections:[],creates:[],calls:[],errors:[],pairFiles:[]};
+    const smoke=window.__arkdockInspectorSmoke={trees:[],selections:[],creates:[],calls:[],errors:[]};
     const recorded=async(source,command,args)=>{
       smoke.calls.push({source,command,at:performance.now(),...(command==='selection_prompt'?{detailed:args?.detailed}:{})});
-      try {const result=await original(command,args);if(command==='inspector_get_tree')smoke.trees.push(result);if(command==='selection_create'){smoke.selections.push(result);smoke.creates.push(args.draft);}if(command==='agent_pair_create')smoke.pairFiles.push(result.configPath);return result;}
+      try {const result=await original(command,args);if(command==='inspector_get_tree')smoke.trees.push(result);if(command==='selection_create'){smoke.selections.push(result);smoke.creates.push(args.draft);}return result;}
       catch(error){smoke.errors.push({source,command,error:String(error)});throw error;}
     };
     smoke.driverInvoke=(command,args)=>recorded('driver',command,args);
@@ -210,7 +169,6 @@ try {
     smoke.cleanup=()=>{window.__TAURI__=originalBridge;};
   })()`);
   let tree,selection;
-  if(process.env.ARKDOCK_DELIVERY_ONLY!=='1') {
   await check('Actual SDK inspector tree, overlay hover and component pick do not trigger native onClick',async()=>{
     const count=nativeCount();
     await toggleInspector();
@@ -261,7 +219,7 @@ try {
       report.hiddenInspection.push({mode,pausedQueryCount:paused,resumedQueryCount:await queryCount(),sessionPreserved:true});
     }
   });
-  await check('Bad build and wrong scope are rejected; compact copy never submits or pairs an Agent session',async()=>{
+  await check('Bad build and wrong scope are rejected; compact copy does not submit an MCP task',async()=>{
     const draft=await view.evaluate('window.__arkdockInspectorSmoke.creates.at(-1)');
     await assert.rejects(invoke('selection_create',{draft:{...draft,frame:{...draft.frame,buildId:'wrong-build'}}}),/STALE_SELECTION_FRAME|SELECTION_BUILD_STALE/);
     const state=await snapshot();
@@ -284,89 +242,39 @@ try {
     report.promptVerified={defaultCompact:true,explicitCompact:true,detailedRetainsIdentitiesAndNode:true,compactLength:prompt.length,detailedLength:detailed.length};
     await clickControl('document.querySelector(".selection-technical > summary")');
     await until('Technical details collapsed',()=>view.evaluate('document.querySelector(".selection-technical")?.open===false'));
-    assert.deepEqual(await view.evaluate('(() => {const panel=document.querySelector(".agent-delivery");const button=panel?.querySelector(".selection-primary");return {label:button?.textContent.trim(),disabled:button?.disabled,clipboardWarning:panel?.textContent.includes("复制会覆盖剪贴板"),userDecidesSend:panel?.textContent.includes("发送由你决定"),noPairingUi:!panel?.textContent.includes("连接与授权")};})()'),
-      {label:'复制修改要求',disabled:false,clipboardWarning:true,userDecidesSend:true,noPairingUi:true});
+    await until('Read-only MCP status shown in the selection panel',()=>view.evaluate('window.__arkdockInspectorSmoke.calls.some(c=>c.source==="ui"&&c.command==="mcp_status")'));
+    assert.deepEqual(await view.evaluate('(() => {const panel=document.querySelector(".agent-delivery");const submit=panel?.querySelector(".selection-primary");const copy=panel?.querySelector(".composer-actions button");return {submitLabel:submit?.textContent.trim(),submitDisabled:submit?.disabled,copyLabel:copy?.textContent.trim(),copyDisabled:copy?.disabled,context:panel?.querySelector("select")?.value};})()'),
+      {submitLabel:'提交到 MCP',submitDisabled:true,copyLabel:'复制修改要求',copyDisabled:false,context:''});
     // Exercise the real component and native prompt construction while keeping
     // the user's system clipboard untouched. This proves UI routing only.
     await view.evaluate('(() => {const smoke=window.__arkdockInspectorSmoke;smoke.originalClipboardWrite=navigator.clipboard.writeText;navigator.clipboard.writeText=async(text)=>{smoke.copiedPrompt=text;};})()');
     try {
-      await clickControl('document.querySelector(".agent-delivery .selection-primary")');
+      await clickControl('document.querySelector(".agent-delivery .composer-actions button")');
       await until('Explicit copy confirmation',()=>view.evaluate('document.querySelector(".agent-delivery")?.textContent.includes("修改要求已复制")'));
       const copied=await view.evaluate('window.__arkdockInspectorSmoke.copiedPrompt');
       assertCompactPrompt(copied,selection);assert.equal(copied,prompt);
       assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.source==="ui"&&c.command==="selection_prompt").at(-1)?.detailed'),false);
-      await assertNoUiAgentSubmission();
-      assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.command==="agent_delivery_send").length'),0);
-      report.copyFallback={nativePromptVerified:true,compactUiRouteVerified:true,noUiPrepareSendPairOrPolling:true,systemClipboardWritten:false,agentMessagesSent:0};
-      await capture('delivery-copy-fallback');
+      await assertNoUiMcpMutation();
+      report.copyFallback={nativePromptVerified:true,compactUiRouteVerified:true,noUiMcpMutation:true,systemClipboardWritten:false,agentMessagesSent:0};
+      await capture('selection-copy-fallback');
       await clickControl('document.querySelector(".selection-technical > summary")');
       await clickControl('[...document.querySelectorAll(".selection-technical button")].find(b=>b.textContent==="复制详细诊断提示词")');
       await until('Explicit detailed copy confirmation',()=>view.evaluate('document.querySelector(".selection-panel > output")?.textContent.includes("详细诊断提示词已复制")'));
       assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.copiedPrompt'),detailed);
       assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.source==="ui"&&c.command==="selection_prompt").at(-1)?.detailed'),true);
-      await assertNoUiAgentSubmission();
+      await assertNoUiMcpMutation();
       report.detailedCopyUi={explicitDetailRouteVerified:true,fullPromptPreserved:true,systemClipboardWritten:false};
       await clickControl('document.querySelector(".selection-technical > summary")');
     } finally { await view.evaluate('navigator.clipboard.writeText=window.__arkdockInspectorSmoke.originalClipboardWrite'); }
-    await clickControl('[...document.querySelectorAll(".agent-delivery button")].find(b=>b.textContent==="检查目标输入框")');
-    await until('Unknown owned fixture safely refuses assisted fill',()=>view.evaluate('document.querySelector(".agent-delivery output")?.textContent.includes("请复制修改要求")'));
-    assert.equal(await view.evaluate('document.querySelector(".agent-delivery .selection-primary")?.textContent.trim()'),'复制修改要求');
-    assert.equal(await view.evaluate('!!document.querySelector(".agent-confirmation")'),false,'Unsupported composer must not offer a confirmed write');
-    assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.source==="ui"&&c.command==="agent_assisted_fill").length'),0);
-    await assertNoUiAgentSubmission();
-    report.assistedFallback={unknownOwnedFixtureRefused:true,externalWindowWrites:0};
   });
-  await check('Independent backend protocol retains unsupported direct delivery without calling send',async()=>{
-    report.adapters=await invoke('agent_session_list');
-    assert.equal(report.adapters.adapters.length,2);assert.ok(report.adapters.adapters.every((adapter)=>adapter.status==='UNSUPPORTED'&&!adapter.capabilities.directSend));
-    const prepared=await invoke('agent_delivery_prepare',{selectionId:selection.selectionId,bindingId:null});
-    const duplicate=await invoke('agent_delivery_prepare',{selectionId:selection.selectionId,bindingId:null});
-    assert.equal(prepared.requestId,duplicate.requestId);assert.equal(prepared.state,'UNSUPPORTED');
-    assert.ok(prepared.prompt.includes(selection.selectionId));assert.ok(prepared.prompt.includes(selection.userInstruction));
-    // Explicit driver calls verify the legacy protocol. Product UI does not
-    // prepare these deliveries, and this driver never invokes send either.
-    report.delivery=await invoke('agent_delivery_status',{requestId:prepared.requestId});
-    assert.equal(report.delivery.state,'UNSUPPORTED');assert.equal(report.delivery.receiptId,null);
-    await assertNoUiAgentSubmission();
-    assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.command==="agent_delivery_send").length'),0);
-  });
-  await check('Real saved native context and JPEGs are readable through explicitly scoped stdio MCP',async()=>{
-    report.mcp=await verifyMcp(selection);
-  });
-  await check('Independent pairing protocol saves only an explicitly selected local file and revokes without installing a host connection',async()=>{
-    if(!process.env.ARKDOCK_DESKTOP_EXE) blocked('Explicit owned desktop executable required for native save-dialog validation');
-    const pairingDirectory=resolve('.local/agent-delivery');mkdirSync(pairingDirectory,{recursive:true});
-    const pairingPath=join(pairingDirectory,`ui-pairing-${Date.now()}.json`);
-    const beforePairing=await snapshot();
-    assert.equal(existsSync(pairingPath),false);
-    try {
-      // Pairing is an explicit backend protocol probe, not an action available
-      // in the simplified copy/fill panel. Start it without awaiting the native
-      // file dialog, so the owned-dialog driver can confirm the save separately.
-      await view.evaluate(`(() => {
-        const smoke=window.__arkdockInspectorSmoke;smoke.pairRequest={result:null,error:null};
-        void smoke.driverInvoke('agent_pair_create',${JSON.stringify({agentKind:'codex',scope:{targetId:beforePairing.target.id,sessionId:beforePairing.sessionId}})})
-          .then(result=>{smoke.pairRequest.result=result;}).catch(error=>{smoke.pairRequest.error=String(error);});
-      })()`);
-      const saved=JSON.parse(execFileSync('pwsh',['-NoProfile','-File',resolve('tests/native/pairing-save.ps1'),'-OwnerPid',String(ownedPid),'-OwnerExe',resolve(process.env.ARKDOCK_DESKTOP_EXE),'-Destination',pairingPath],{encoding:'utf8',windowsHide:true,timeout:20000}));
-      assert.equal(saved.ownerPid,ownedPid);
-      await until('Native pairing file returned through explicit driver IPC',async()=>{
-        const request=await view.evaluate('window.__arkdockInspectorSmoke.pairRequest');
-        if(request.error)throw new Error(request.error);
-        return request.result&&await view.evaluate(`window.__arkdockInspectorSmoke.pairFiles.includes(${JSON.stringify(pairingPath)})`);
-      });
-      assert.equal(existsSync(pairingPath),true);
-      const paired=await invoke('agent_session_list');assert.equal(paired.bindings.length,0);assert.equal(paired.registrations.length,0);
-      const revocation=await invoke('agent_pair_revoke');assert.equal(revocation,true);
-      const revoked=await invoke('agent_session_list');assert.equal(revoked.bindings.length,0);assert.equal(revoked.registrations.length,0);
-      const afterPairing=await snapshot();assert.equal(afterPairing.sessionId,beforePairing.sessionId);assert.equal(afterPairing.build.buildId,beforePairing.build.buildId);assert.equal(afterPairing.phase,'running');
-      await assertNoUiAgentSubmission();
-      assert.equal(await view.evaluate('window.__arkdockInspectorSmoke.calls.filter(c=>c.command==="agent_delivery_send").length'),0);
-      report.pairingProtocol={source:'driver',nativeSaveDialog:true,explicitLocalFile:true,revoked:true,hostInstalled:false,agentMessagesSent:0,previewSessionPreserved:true,noUiPairingOrPolling:true};
-    } finally {
-      await invoke('agent_pair_revoke');
-      if(existsSync(pairingPath))unlinkSync(pairingPath);
-    }
+  await check('No MCP client leaves task submission gated and creates no queued task',async()=>{
+    const before=await mcpStatus();requireNoMcpClient(before);assertMcpConfiguration(before);
+    await assert.rejects(invoke('mcp_submit_task',{contextId:'ctx-inspector-unconfirmed',selectionId:selection.selectionId}),/MCP_CONTEXT|CONFIRM|UNAVAILABLE/);
+    const after=await mcpStatus();assert.deepEqual(after.tasks,before.tasks);assert.deepEqual(after.contexts,before.contexts);
+    await assertNoUiMcpMutation();
+    report.mcp={configurationVerified:true,noClientStarted:true,unconfirmedSubmitRejected:true,noQueuedTask:true,
+      scope:'Inspector UI/configuration only; does not claim native stdio task coverage',
+      nativeProtocolTests:'src-tauri/tests/mcp_stdio_process.rs'};
   });
   await check('Native window resize retains accurate component hit coordinates',async()=>{
     await clickControl('document.querySelector("button[aria-label=关闭组件详情]")');
@@ -395,25 +303,6 @@ try {
     await until('Real ArkUI onClick after Esc',()=>nativeCount()===count+1);
     const state=await snapshot();assert.equal(state.sessionId,running.sessionId);assert.equal(state.build.buildId,running.build.buildId);assert.equal(state.build.generation,running.build.generation);await capture('normal-click-restored');
   });
-  }
-  if(process.env.ARKDOCK_HOLD_FOR_DELIVERY==='1') {
-    await toggleInspector();
-    if(await view.evaluate('!!document.querySelector("button[aria-label=关闭组件详情]")'))await clickControl('document.querySelector("button[aria-label=关闭组件详情]")');
-    const previousTrees=await view.evaluate('window.__arkdockInspectorSmoke.trees.length');
-    await inspectorAction('inspector-refresh-tree');
-    const currentTree=await until('Fresh Inspector tree and component overlay for explicitly authorized delivery',()=>view.evaluate(`(() => {const overlay=document.querySelector('[data-testid=selection-overlay]');return window.__arkdockInspectorSmoke.trees.length>${previousTrees}&&overlay&&!overlay.classList.contains('region-mode')&&window.__arkdockInspectorSmoke.trees.at(-1);})()`));
-    const button=currentTree.nodes.find((node)=>node.componentType==='Button');assert.ok(button?.bounds);
-    const previous=await view.evaluate('window.__arkdockInspectorSmoke.selections.length');
-    await clickPoint(await framePoint(button.bounds.x+button.bounds.width/2,button.bounds.y+button.bounds.height/2));
-    await until('Retained actual native selection',()=>view.evaluate(`window.__arkdockInspectorSmoke.selections.length>${previous}`));
-    const selected=await view.evaluate('window.__arkdockInspectorSmoke.selections.at(-1)');
-    const saved=await invoke('selection_update_instruction',{selectionId:selected.selectionId,userInstruction:'请确认收到所选组件和截图，不修改源码'});
-    assert.equal(saved.selectionKind,'component');assert.equal(saved.selectedNode.componentType,'Button');
-    report.retained={desktopPid:ownedPid,fixturePid:host.pid,workspaceId:saved.workspaceId,sessionId:saved.sessionId,selectionId:saved.selectionId,projectId,originalTrust,workspacePath:project,releaseFile:join(evidence,'release-held-fixture')};
-    keepFixture=true;
-    checks.push({status:'PASS',name:'Actual SDK Button selection and screenshot retained with a live owned fixture for explicitly authorized delivery'});
-    await capture('native-selection-retained-for-delivery');
-  }
 } catch(error) {
   checks.push({status:error.blocked?'BLOCKED':'FAIL',name:error.message});process.exitCode=error.blocked?2:1;
   if(view){try{report.failureSnapshot=await snapshot();report.failureDom=await view.evaluate('document.body.innerText');report.driverErrors=await view.evaluate('window.__arkdockInspectorSmoke?.errors');report.failureTree=await view.evaluate('window.__arkdockInspectorSmoke?.trees.at(-1)');await capture('failure');}catch{/* Keep primary failure. */}}
@@ -421,15 +310,15 @@ try {
   if(view){
     const cleanup=async(name,task)=>{try{await task();}catch(error){checks.push({status:'FAIL',name:`Owned fixture cleanup ${name}: ${error.message}`});process.exitCode=1;}};
     await cleanup('instrumentation',()=>view.evaluate('window.__arkdockInspectorSmoke?.cleanup()'));
-    if(projectId&&!keepFixture){
+    if(projectId){
       await cleanup('selection',async()=>{const current=await snapshot();if(current.trusted&&current.sessionId)await invoke('selection_clear',{selectionId:null});});
       if(!originalTrust)await cleanup('trust',()=>invoke('set_trust',{projectId,trusted:false}));
     }
-    if(host&&!keepFixture)await cleanup('detach',()=>invoke('detach'));
-    if(!keepFixture)view.close();
+    if(host)await cleanup('detach',()=>invoke('detach'));
+    view.close();
   }
-  if(host&&host.exitCode===null&&!keepFixture)host.kill();
-  if(dockHandle&&originalWindow&&!keepFixture){
+  if(host&&host.exitCode===null)host.kill();
+  if(dockHandle&&originalWindow){
     try {
       const current=action('info',dockHandle);
       if(current.processId===ownedPid)action('move',dockHandle,{X:originalWindow.left,Y:originalWindow.top,Width:originalWindow.right-originalWindow.left,Height:originalWindow.bottom-originalWindow.top});
@@ -439,10 +328,4 @@ try {
   report.status=checks.some((check)=>check.status==='FAIL')?'FAIL':checks.some((check)=>check.status==='BLOCKED')?'BLOCKED':'PASS';
   mkdirSync(evidence,{recursive:true});writeFileSync(join(evidence,'report.json'),`${JSON.stringify(report,null,2)}\n`);
   console.log(`${report.status} real SDK Inspector UI: ${JSON.stringify(checks)}`);
-  if(keepFixture) {
-    console.log(`HELD owned fixture ${host.pid}; explicit release file ${report.retained.releaseFile}`);
-    const deadline=Date.now()+15*60_000;
-    while(Date.now()<deadline&&!existsSync(report.retained.releaseFile)&&host.exitCode===null)await pause(500);
-    try {await invoke('agent_pair_revoke');await invoke('selection_clear',{selectionId:null});await invoke('set_trust',{projectId,trusted:false});await invoke('detach');} finally {view.close();if(host.exitCode===null)host.kill();}
-  }
 }

@@ -118,10 +118,7 @@ enum Command {
     MaximizePair(String, mpsc::SyncSender<Result<(), String>>),
     RestorePair(String, mpsc::SyncSender<Result<(), String>>),
     #[cfg(feature = "desktop")]
-    Scope(
-        String,
-        mpsc::SyncSender<Result<super::DiscoveryScope, String>>,
-    ),
+    Scope(String, mpsc::SyncSender<Result<(), String>>),
 }
 
 pub(super) struct Controller {
@@ -154,7 +151,7 @@ impl Controller {
         self.request(|reply| Command::Motion(settings, reply))
     }
     #[cfg(feature = "desktop")]
-    pub fn discovery_scope(&self, target_id: &str) -> Result<super::DiscoveryScope, String> {
+    pub fn discovery_scope(&self, target_id: &str) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.commands
             .try_send(Command::Scope(target_id.to_owned(), tx))
@@ -637,9 +634,7 @@ impl Native {
                             .target
                             .as_ref()
                             .filter(|target| target.info.id == id && self.valid(target))
-                            .map(|target| super::DiscoveryScope {
-                                handle: target.identity.handle,
-                            })
+                            .map(|_| ())
                             .ok_or("STALE_TARGET: discovery scope is no longer live".to_owned());
                         let _ = reply.send(result);
                     }
