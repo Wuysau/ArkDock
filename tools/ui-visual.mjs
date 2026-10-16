@@ -65,8 +65,9 @@ async function check(name, operation) {
 }
 async function load(scenario = 'welcome', theme = 'dark', width = 440, height = 820, scale = 1) {
   // The banner is outside the product surface, so ArkDock retains the requested DIP height.
+  const scheme = theme === 'light' || theme === 'minimal-light' ? 'light' : 'dark';
   await driver.send('Emulation.setDeviceMetricsOverride', { width, height: height + 44, deviceScaleFactor: scale, mobile: false });
-  await driver.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }, { name: 'prefers-color-scheme', value: theme }] });
+  await driver.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }, { name: 'prefers-color-scheme', value: scheme }] });
   await driver.send('Page.navigate', { url: `${url}?scenario=${scenario}&theme=${theme}` });
   await waitUntil(() => driver.evaluate('!!window.__ARKDOCK_DEMO__ && !!document.querySelector(".app") && !!document.querySelector("footer").dataset.preview'), 'Demo application state did not initialize');
   if (['running', 'recovery', 'stale', 'diagnostics'].includes(scenario)) await waitUntil(()=>driver.evaluate('document.querySelector(".native-frame")?.dataset.renderStatus==="displayed"'), 'Fixture calibration bitmap was not actually presented');
@@ -226,13 +227,49 @@ try {
       await screenshot(`running-dark-440x820-dpr-${scale}`);
     }
   });
-  await check('V4: core text, secondary text and primary action exceed 4.5:1 contrast in both shell themes', async () => {
-    for (const theme of ['dark','light']) {
-      await load('trust',theme);
+  await check('V4: core text, secondary text and primary action exceed 4.5:1 contrast in all shell themes', async () => {
+    for (const theme of ['dark', 'light', 'minimal-light', 'titanium-dark']) {
+      await load('trust', theme);
       const colors = await driver.evaluate('(()=>{const root=getComputedStyle(document.documentElement),button=getComputedStyle(document.querySelector(".primary-button"));return {text:root.getPropertyValue("--text").trim(),muted:root.getPropertyValue("--muted").trim(),background:root.getPropertyValue("--bg").trim(),panel:root.getPropertyValue("--panel").trim(),buttonText:button.color,buttonBackground:button.backgroundColor};})()');
       const ratios={textOnBackground:contrastRatio(colors.text,colors.background),mutedOnPanel:contrastRatio(colors.muted,colors.panel),primaryAction:contrastRatio(colors.buttonText,colors.buttonBackground)};
       contrast.push({theme,colors,ratios});assert.ok(Object.values(ratios).every(value=>value>=4.5),`${theme}: ${JSON.stringify(ratios)}`);
     }
+  });
+  await check('V1: Minimal Light and Titanium Dark themes fit 360×640 / 440×820 / 520×960, persist, fallback safely, and leave native frame unfiltered', async () => {
+    for (const theme of ['minimal-light', 'titanium-dark']) {
+      for (const [width, height] of sizes) {
+        for (const name of ['welcome', 'running', 'multi', 'trust']) {
+          await load(name, theme, width, height);
+          const bounds = await driver.evaluate('({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,theme:document.documentElement.dataset.theme,app:document.querySelector(".app").getBoundingClientRect().toJSON(),footer:document.querySelector("footer").getBoundingClientRect().toJSON()})');
+          assert.equal(bounds.theme, theme);
+          assert.ok(bounds.scrollWidth <= width, `${name}/${theme}/${width}: horizontal overflow`);
+          assert.ok(bounds.scrollHeight <= height + 44, `${name}/${theme}/${height}: outer vertical overflow`);
+          assert.ok(bounds.footer.bottom <= height + 45, `${name}/${theme}/${height}: footer cropped`);
+          if (width === 440 && height === 820) await screenshot(`${name}-${theme}-${width}x${height}`);
+        }
+      }
+    }
+    await load('running', 'dark', 440, 820);
+    const beforeSession = (await state()).fixture.sessionId;
+    await click('[aria-label="更多操作"]'); await click('button', '偏好设置'); await pause(40);
+    for (const [label, id, scheme] of [['极简浅色', 'minimal-light', 'light'], ['深色钛金', 'titanium-dark', 'dark'], ['浅色', 'light', 'light'], ['深色', 'dark', 'dark'], ['跟随系统', 'system', 'dark']]) {
+      await click('button', label); await pause(30);
+      const current = await driver.evaluate('({theme:document.documentElement.dataset.theme,stored:localStorage.getItem("arkdock:theme"),scheme:getComputedStyle(document.documentElement).colorScheme,pressed:document.querySelector(`[data-theme-id="${document.documentElement.dataset.theme}"] .theme-card-button`)?.getAttribute("aria-pressed"),frameFilter:getComputedStyle(document.querySelector(".native-frame")).filter,surfaceFilter:getComputedStyle(document.querySelector(".native-surface")).filter,displayed:document.querySelector(".native-frame")?.dataset.renderStatus,dialogScrollWidth:document.querySelector("dialog")?.scrollWidth,dialogClientWidth:document.querySelector("dialog")?.clientWidth})');
+      assert.equal(current.theme, id);
+      assert.equal(current.stored, id);
+      assert.equal(current.scheme, scheme);
+      assert.equal(current.pressed, 'true');
+      assert.equal(current.frameFilter, 'none');
+      assert.equal(current.surfaceFilter, 'none');
+      assert.equal(current.displayed, 'displayed');
+      assert.ok(current.dialogScrollWidth <= current.dialogClientWidth + 1, `${id}: settings dialog horizontal overflow`);
+      if (id === 'minimal-light' || id === 'titanium-dark') await screenshot(`settings-${id}-440x820`);
+    }
+    assert.equal((await state()).fixture.sessionId, beforeSession);
+    assert.equal(await driver.evaluate('window.__ARKDOCK_DEMO__.calls.some(e=>["refresh_preview","rediscover","detach"].includes(e.command))'), false);
+    await driver.evaluate('localStorage.setItem("arkdock:theme", "unsupported-legacy-theme")');
+    await driver.send('Page.reload'); await pause(200);
+    assert.equal(await driver.evaluate('document.documentElement.dataset.theme'), 'dark');
   });
   await check('V2: reliable candidate bypasses selection; trust gates execution', async () => {
     await load('reliable'); assert.equal((await state()).workspace, 'untrusted');

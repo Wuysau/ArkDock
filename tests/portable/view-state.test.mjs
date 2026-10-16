@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applySnapshot, acceptFrame, filterCandidates, needsDirectoryFallback, phaseText } from '../../src/view-state.ts';
+import { applyTheme, isTheme, parseTheme, readTheme, themeOptions } from '../../src/theme.ts';
 
 test('迟到快照不覆盖较新后端状态', () => {
   const current = { revision: 8, sessionId: 'live', phase: 'untrusted' };
@@ -44,4 +45,34 @@ test('仅无效或不支持环境的候选仍能使用目录兜底', () => {
   assert.equal(needsDirectoryFallback([{ valid: false, project: { environment: 'windowsLocal' } }]), true);
   assert.equal(needsDirectoryFallback([{ valid: true, project: { environment: 'wsl' } }]), true);
   assert.equal(needsDirectoryFallback([{ valid: true, project: { environment: 'windowsLocal' } }]), false);
+});
+
+test('主题偏好支持极简浅色与深色钛金，保留原有主题并对非法存储值安全回退', () => {
+  assert.deepEqual(themeOptions.map((item) => item.id), ['minimal-light', 'titanium-dark', 'dark', 'light', 'system']);
+  for (const id of ['minimal-light', 'titanium-dark', 'dark', 'light', 'system']) {
+    assert.equal(isTheme(id), true);
+    assert.equal(parseTheme(id), id);
+  }
+  for (const invalid of [null, undefined, '', 'neon', 'DARK', '{"theme":"light"}']) {
+    assert.equal(isTheme(invalid), false);
+    assert.equal(parseTheme(invalid), 'dark');
+  }
+  const previousStorage = globalThis.localStorage;
+  const previousDocument = globalThis.document;
+  const store = new Map();
+  globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) };
+  globalThis.document = { documentElement: { dataset: {} } };
+  try {
+    assert.equal(readTheme(), 'dark');
+    for (const id of ['minimal-light', 'titanium-dark', 'light', 'dark', 'system']) {
+      applyTheme(id);
+      assert.equal(globalThis.document.documentElement.dataset.theme, id);
+      assert.equal(readTheme(), id);
+    }
+    store.set('arkdock:theme', 'corrupted-value');
+    assert.equal(readTheme(), 'dark');
+  } finally {
+    if (previousStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousStorage;
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
 });

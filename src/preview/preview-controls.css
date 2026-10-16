@@ -9,9 +9,10 @@
 .native-text-capture { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; clip-path: inset(50%); overflow: hidden; pointer-events: none; }
 .native-surface-wrap:has(.native-text-capture:focus) .native-surface { outline: 2px solid var(--accent); outline-offset: -3px; }
 .native-input-bar { position: absolute; right: 8px; bottom: 8px; left: 8px; z-index: 2; display: flex; justify-content: flex-end; align-items: center; gap: 6px; pointer-events: none; }
-.native-input-toggle { flex-shrink: 0; padding: 3px 7px; font-size: 10px; background: var(--glass); pointer-events: auto; }
-.native-input-status { max-width: 260px; padding: 4px 7px; border-radius: 6px; background: var(--glass); color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-.native-input-feedback { position: absolute; right: 8px; bottom: 42px; left: 8px; z-index: 2; padding: 6px 8px; border-radius: 6px; background: var(--glass); color: var(--danger); font-size: 11px; overflow-wrap: anywhere; pointer-events: none; }
+.native-input-toggle { flex-shrink: 0; padding: 4px 10px; font-size: 11px; font-weight: 500; background: var(--input-pill-bg, var(--glass)); color: var(--input-pill-color, var(--text)); border-color: var(--input-pill-border, var(--line)); box-shadow: var(--input-pill-shadow, var(--shadow-floating)); pointer-events: auto; }
+.native-input-toggle:hover:enabled { background: var(--input-pill-hover-bg, var(--selected)); color: var(--input-pill-color, var(--text)); border-color: var(--accent); }
+.native-input-status { max-width: 260px; padding: 4px 7px; border-radius: 6px; background: var(--glass); border: 1px solid var(--line); color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.native-input-feedback { position: absolute; right: 8px; bottom: 42px; left: 8px; z-index: 2; padding: 6px 8px; border-radius: 6px; background: var(--glass); border: 1px solid var(--line); color: var(--danger); font-size: 11px; overflow-wrap: anywhere; pointer-events: none; }
 .native-controls-settings { margin-bottom: 12px; }
 .native-config-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .native-config-fields label, .native-profile-select, .native-resolution-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }
@@ -21,10 +22,10 @@
 .native-resolution, .native-control-receipts { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
 .native-resolution summary, .native-control-receipts summary { cursor: pointer; font-size: 11px; }
 .native-resolution-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }
-.native-resolution-fields input { width: 100%; padding: 5px; }
+.native-resolution-fields input { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: var(--radius-button); background: var(--surface-elevated, var(--surface)); }
 .native-control-receipts article { padding: 8px 0; overflow-wrap: anywhere; }
 .native-control-receipts p, .native-control-receipts small { font-size: 10px; color: var(--muted); margin: 4px 0; }
-.native-control-error { display: block; margin: 8px 0; padding: 8px; color: var(--danger); background: var(--glass); border-radius: 8px; overflow-wrap: anywhere; font-size: 11px; }
+.native-control-error { display: block; margin: 8px 0; padding: 8px; color: var(--danger); background: var(--glass); border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; font-size: 11px; }
 .device-runtime-panel { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 4px; scrollbar-width: thin; }
 .device-runtime-panel h3 { margin: 8px 0; }
 .device-runtime-panel .details-list dd { overflow-wrap: anywhere; }
