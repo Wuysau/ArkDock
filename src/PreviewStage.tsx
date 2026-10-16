@@ -55,7 +55,7 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
   const [textState, setTextState] = useState<'idle' | 'waiting' | 'ready'>('idle');
   const [inputFeedback, setInputFeedback] = useState<string | null>(null);
   const [available, setAvailable] = useState({ width: 0, height: 0, horizontalInset: 0, verticalInset: 0 });
-  const ui = deriveUiState(snapshot, displayed);
+  const ui = deriveUiState(snapshot, displayed, controlState);
   useEffect(() => {
     const element = viewport.current;
     const device = shell.current;
@@ -195,7 +195,7 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
               if (!canClick || (event.key !== 'Enter' && event.key !== ' ')) return;
               event.preventDefault();
               const actual = store.getDisplayed();
-              if (!actual || !deriveUiState(snapshot, actual).inputAllowed) return;
+              if (!actual || !deriveUiState(snapshot, actual, controlState).inputAllowed) return;
               const point = { x: Math.floor(actual.width / 2), y: Math.floor(actual.height / 2) };
               if (streaming && nativeInput) { const element = event.currentTarget; if (startGesture(element, actual, point)) finishGesture(element, actual, point); }
               else onClick(actual, point.x, point.y);
@@ -204,7 +204,7 @@ export function PreviewStage({ snapshot, store, zoom, busy, onClick, interaction
               if (event.detail > 0 && suppressClick.current) { suppressClick.current = false; return; }
               // Assistive activation has no pointer location; key handlers prevent the browser's duplicate click.
               const actual = store.getDisplayed();
-              if (!actual || !deriveUiState(snapshot, actual).inputAllowed) return;
+              if (!actual || !deriveUiState(snapshot, actual, controlState).inputAllowed) return;
               if (event.detail === 0) {
                 const point = { x: Math.floor(actual.width / 2), y: Math.floor(actual.height / 2) };
                 if (streaming && nativeInput) { const element = event.currentTarget; if (startGesture(element, actual, point)) finishGesture(element, actual, point); }

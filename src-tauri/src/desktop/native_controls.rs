@@ -1,6 +1,6 @@
 //! Native control and device IPC. Every execution revalidates the current scope.
 use super::*;
-use crate::preview::configuration::{compiled_pages, profiles, DEFAULT_PROFILE};
+use crate::preview::configuration::{compiled_pages, compiled_pages_at, profiles_for_project};
 use crate::preview::control::ControlReceiver;
 
 struct PendingControl {
@@ -68,7 +68,7 @@ impl Controls {
     }
 
     pub(super) fn reset(&mut self) {
-        self.enabled = false;
+        self.enabled = true;
         self.identity = None;
         self.pending.clear();
         self.operations.clear();
@@ -114,7 +114,6 @@ impl Engine {
         if changed {
             self.backend.cancel_controls();
             self.controls.reset();
-            self.device_runtime.cancel();
             self.controls.identity = identity;
         } else {
             self.controls.identity = identity;
@@ -160,12 +159,7 @@ impl Engine {
         if !cleanup {
             self.ensure_native_surface_ready()?;
         }
-        let project = self.snapshot.project.as_ref().ok_or("PROJECT_REQUIRED")?;
-        if !self
-            .store
-            .as_ref()
-            .is_some_and(|store| store.is_trusted(project))
-        {
+        if self.snapshot.project.is_none() || !self.snapshot.trusted {
             return Err("TRUST_REQUIRED".into());
         }
         Ok(())
@@ -177,7 +171,11 @@ impl Engine {
         let runtime = self.backend.control_runtime_state();
         if self.native_input_ready() && !self.controls.pages_checked {
             if let Some(project) = &self.snapshot.project {
-                match compiled_pages(project) {
+                let pages = match self.backend.artifact_context() {
+                    Some(artifacts) => compiled_pages_at(project, &artifacts),
+                    None => compiled_pages(project),
+                };
+                match pages {
                     Ok(pages) => self.controls.pages = pages,
                     Err(error) => self.controls.page_reason = error,
                 }
@@ -186,12 +184,12 @@ impl Engine {
         }
         let available = self.snapshot.backend.available;
         let status = if available {
-            NativeControlAvailability::Experimental
+            NativeControlAvailability::Available
         } else {
             NativeControlAvailability::Unavailable
         };
         let experimental_reason = if available {
-            "实验性原生控制，需在预览能力页显式启用；命令结果以预览画面为准。".to_owned()
+            "原生控制已接入，当前画面就绪后可使用。".to_owned()
         } else {
             self.snapshot.backend.reason.clone()
         };
@@ -235,13 +233,34 @@ impl Engine {
                 "页面来自当前构建产物；切换结果以原生画面为准。".into()
             },
         });
+        let sdk_root = self.backend.verified_sdk_root();
+        let profiles = profiles_for_project(
+            sdk_root.as_deref(),
+            available,
+            self.snapshot.project.as_ref(),
+        );
         capabilities.push(NativeControlCapability {
             name: "profile".into(),
-            status: NativeControlAvailability::Blocked,
-            reason: "未接入：仅支持 phone 基线，tablet/watch 配置暂不开放。".into(),
+            status: if profiles
+                .iter()
+                .any(|p| p.status == NativeControlAvailability::Available)
+            {
+                NativeControlAvailability::Available
+            } else {
+                NativeControlAvailability::Blocked
+            },
+            reason: "按工程支持的设备类型选择；切换将重启预览，失败时恢复上一配置。".into(),
         });
-        capabilities.push(NativeControlCapability { name: "ime".into(), status: NativeControlAvailability::Blocked,
-            reason: "公开 KeyPress 仅逐 Unicode 码点提交；缺原生 preedit、候选词、撤销及光标编辑事务，完整中文 IME 未支持".into() });
+        capabilities.push(NativeControlCapability {
+            name: "ime".into(),
+            status: if available {
+                NativeControlAvailability::Available
+            } else {
+                NativeControlAvailability::Unavailable
+            },
+            reason: "使用本机输入法确认文字后发送到原生焦点；候选词和组合编辑在本机输入法完成。"
+                .into(),
+        });
         NativeControlState {
             identity: self.controls.identity.clone(),
             experimental_enabled: self.controls.enabled,
@@ -252,8 +271,8 @@ impl Engine {
             current_page: runtime
                 .as_ref()
                 .and_then(|state| state.current_route.clone()),
-            profiles: profiles(available),
-            current_profile_id: DEFAULT_PROFILE.into(),
+            profiles,
+            current_profile_id: self.backend.profile().id,
             orientation: runtime
                 .as_ref()
                 .map(|state| state.orientation.clone())
@@ -313,22 +332,45 @@ impl Engine {
         if !cleanup && !self.controls.enabled {
             return Err("EXPERIMENTAL_CONTROL_OPT_IN_REQUIRED".into());
         }
+        if request.action == NativeControlAction::SwitchProfile {
+            crate::preview::control::validate_request(&request)?;
+            let project = self.snapshot.project.clone().ok_or("PROJECT_REQUIRED")?;
+            self.backend.set_profile(
+                &project,
+                request.profile_id.as_deref().ok_or("PROFILE_REQUIRED")?,
+            )?;
+            self.backend.cancel_controls();
+            self.backend.stop();
+            self.controls.reset();
+            if let Ok(mut frames) = self.frames.lock() {
+                frames.clear_pixels();
+            }
+            self.inspection_tree = None;
+            self.inspection_anchor = None;
+            self.scheduler.request_refresh(now());
+            self.snapshot.phase = Phase::Building;
+            self.publish();
+            return Ok(NativeControlReceipt {
+                operation_id: format!("profile-{}", now()),
+                identity: request.identity,
+                action: request.action,
+                phase: NativeControlPhase::CommandAccepted,
+                command_accepted: true,
+                frame_observed: false,
+                pixels_changed: false,
+                configuration_confirmed: false,
+                current_route: None,
+                frame_sequence: None,
+                requested_at: now(),
+                observed_at: now(),
+                reason: "已安排设备配置重启，等待新配置的真实首帧。".into(),
+            });
+        }
         if self.controls.pending.len() >= 16 {
             if cleanup {
                 self.backend.cancel_controls();
             }
             return Err("NATIVE_CONTROL_QUEUE_BUSY: 释放操作使用独立的取消通道。".into());
-        }
-        if request.action == NativeControlAction::SwitchProfile {
-            let admitted = profiles(self.snapshot.backend.available)
-                .into_iter()
-                .find(|profile| Some(&profile.id) == request.profile_id.as_ref())
-                .ok_or("PROFILE_UNKNOWN")?;
-            let _arguments = crate::preview::configuration::profile_arguments(&admitted)?;
-            return Err(
-                "PROFILE_RESTART_BLOCKED: 当前仅支持 phone 基线；切换其他配置与回滚暂未开放。"
-                    .into(),
-            );
         }
         if request.action == NativeControlAction::NavigatePage
             && !request
@@ -353,7 +395,25 @@ impl Engine {
             }
         }
         if request.action == NativeControlAction::QueryRouter {
-            return Err("CURRENT_ROUTER_ASYNC_ONLY: 外部 get 不提供可靠回读，当前路由仅来自真实 CurrentJsRouter 事件".into());
+            let route = self
+                .backend
+                .control_runtime_state()
+                .and_then(|state| state.current_route);
+            return Ok(NativeControlReceipt {
+                operation_id: format!("route-{}", now()),
+                identity: request.identity,
+                action: request.action,
+                phase: NativeControlPhase::CommandAccepted,
+                command_accepted: true,
+                frame_observed: false,
+                pixels_changed: false,
+                configuration_confirmed: false,
+                current_route: route,
+                frame_sequence: None,
+                requested_at: now(),
+                observed_at: now(),
+                reason: "返回最近一次原生路由通知；不伪造同步路由读取或页面呈现。".into(),
+            });
         }
         if matches!(
             request.action,
@@ -516,6 +576,7 @@ impl Engine {
                         }
                         finished = terminal(&receipt.phase);
                         pending.receipt = receipt.clone();
+                        let _ = self.app.emit("arkdock:control-receipt", &receipt);
                         self.controls.remember(receipt);
                         if finished {
                             break;
@@ -525,6 +586,7 @@ impl Engine {
                         pending.receipt.phase = NativeControlPhase::Failed;
                         pending.receipt.reason = error;
                         pending.receipt.observed_at = now();
+                        let _ = self.app.emit("arkdock:control-receipt", &pending.receipt);
                         self.controls.remember(pending.receipt.clone());
                         finished = true;
                         break;
@@ -535,6 +597,7 @@ impl Engine {
                             pending.receipt.phase = NativeControlPhase::Cancelled;
                             pending.receipt.reason = "原生控制通道已关闭，未取得完成证据".into();
                             pending.receipt.observed_at = now();
+                            let _ = self.app.emit("arkdock:control-receipt", &pending.receipt);
                             self.controls.remember(pending.receipt.clone());
                         }
                         finished = true;
@@ -550,21 +613,34 @@ impl Engine {
     }
 
     pub(super) fn device_state(&mut self) -> DeviceRuntimeState {
-        let sdk = self.backend.configured_sdk();
+        let sdk = self
+            .backend
+            .verified_sdk_root()
+            .or_else(|| self.backend.configured_sdk());
         if self.device_sdk != sdk {
             self.device_runtime.cancel();
             self.device_runtime =
                 crate::preview::device_runtime::DeviceRuntimeAdapter::new(sdk.clone());
             self.device_sdk = sdk;
         }
-        self.device_runtime.state(self.control_identity())
+        let project = self
+            .snapshot
+            .project
+            .as_ref()
+            .filter(|project| {
+                self.store
+                    .as_ref()
+                    .is_some_and(|store| store.is_trusted(project))
+            })
+            .cloned();
+        self.device_runtime.state(project)
     }
 
     pub(super) fn device_action(
         &mut self,
         request: DeviceRuntimeRequest,
     ) -> Result<DeviceRuntimeState, String> {
-        self.validate_control_identity(&request.identity, true)?;
+        self.current_target()?;
         let _ = self.device_state();
         self.device_runtime.action(request)
     }
@@ -634,6 +710,33 @@ pub(crate) async fn device_runtime_action(
     request: DeviceRuntimeRequest,
 ) -> Result<DeviceRuntimeState, IpcError> {
     inspection::decode_data(
-        inspection::data_request(window, service, scope, DataAction::DeviceAction(request)).await?,
+        inspection::data_request(
+            window,
+            service,
+            scope,
+            DataAction::DeviceAction(Box::new(request)),
+        )
+        .await?,
     )
+}
+
+#[tauri::command]
+pub(crate) async fn read_device_frame(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    identity: DeviceRunIdentity,
+    after_sequence: u64,
+) -> Result<tauri::ipc::Response, IpcError> {
+    match inspection::data_request(
+        window,
+        service,
+        scope,
+        DataAction::DeviceFrame(identity, after_sequence),
+    )
+    .await?
+    {
+        inspection::DataResult::Bytes(bytes) => Ok(tauri::ipc::Response::new(bytes)),
+        _ => Err("DATA_REPLY_TYPE_MISMATCH".into()),
+    }
 }

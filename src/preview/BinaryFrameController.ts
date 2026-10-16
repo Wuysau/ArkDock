@@ -10,7 +10,7 @@ interface Clock {
   cancel: (handle: ReturnType<typeof setTimeout>) => void;
 }
 interface Options {
-  bridge: Pick<UiBridge, 'request' | 'readFrame'>;
+  bridge: Pick<UiBridge, 'request' | 'readFrame' | 'observeFrameReady'>;
   store: FrameStore;
   getState: () => AppSnapshot | null;
   onSnapshot?: (state: AppSnapshot) => void;
@@ -29,25 +29,41 @@ const identity = (state: AppSnapshot | null) => state?.target && state.project &
 const readable = (state: AppSnapshot | null) => Boolean(state && (state.phase === 'running'
   || (state.phase === 'building' && state.build.durationMs !== null)) && !state.build.error);
 
-/** One acknowledged mailbox owner; serial pulls at <= 30 Hz, idle backoff to 250 ms. */
+/** One acknowledged mailbox owner; ready events coalesce into one serial pull. */
 export class BinaryFrameController {
   private lease: Lease | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private visible = true;
   private pulling = false;
-  private emptyReads = 0;
+  private wakePending = false;
+  private offReady: (() => void) | null = null;
+  private readySequence = 0;
+  private readyBuild: string | null = null;
   private mode: FrameTransportMode = 'idle';
   private clock: Clock;
   private token: string;
   private leaseSerial = 0;
   private options: Options;
   readonly metrics = { reads: 0, emptyReads: 0, accepted: 0, discarded: 0, rejected: 0, errors: 0 };
+  /** WebView IPC round-trip durations, not device capture or physical presentation latency. */
+  readonly readDurationMs: number[] = [];
   constructor(options: Options) {
     this.options = options;
     // WebView2 timer functions require their Window receiver; do not call them as clock methods.
     this.clock = options.clock ?? { schedule: (callback, delay) => setTimeout(callback, delay), cancel: (handle) => clearTimeout(handle) };
     this.token = options.consumerId ?? crypto.randomUUID();
+    if (options.bridge.observeFrameReady) {
+      void options.bridge.observeFrameReady((ready) => {
+        const state = this.options.getState();
+        if (this.disposed || !state || ready.sessionId !== state.sessionId || ready.buildId !== state.build.buildId
+          || ready.generation !== state.build.generation) return;
+        const build = JSON.stringify([ready.sessionId, ready.buildId, ready.generation]);
+        if (build !== this.readyBuild) { this.readyBuild = build; this.readySequence = 0; }
+        if (ready.sequence <= this.readySequence) return;
+        this.readySequence = ready.sequence; this.wake();
+      }).then((off) => { if (this.disposed) off(); else this.offReady = off; }).catch(() => { /* 60 Hz scoped pulls recover missed notifications. */ });
+    }
   }
   getMode() { return this.mode; }
   private change(mode: FrameTransportMode, reason?: string) { this.mode = mode; this.options.onMode?.(mode, reason); }
@@ -58,7 +74,7 @@ export class BinaryFrameController {
     const previous = this.lease;
     this.cancelTimer(); this.lease = null;
     if (previous) { previous.closed = true; if (previous.acknowledged) void this.disable(previous); }
-    this.emptyReads = 0;
+    this.wakePending = false; this.readySequence = 0; this.readyBuild = null;
     if (!next || !state) { this.change('idle'); return; }
     const lease: Lease = { scope: { targetId: state.target!.id, sessionId: state.sessionId }, identity: next,
       consumerId: `${this.token.slice(0, 96)}:${++this.leaseSerial}`, acknowledged: false, closed: false };
@@ -73,10 +89,11 @@ export class BinaryFrameController {
   }
   setVisible(visible: boolean) { this.visible = visible; if (!visible) this.cancelTimer(); else this.wake(); }
   /** A confirmed user input can shorten idle backoff without creating a competing reader. */
-  wake() { this.emptyReads = 0; this.cancelTimer(); this.schedule(); }
+  wake() { this.wakePending = true; this.cancelTimer(); this.schedule(); }
   dispose() {
     if (this.disposed) return;
     this.disposed = true; this.cancelTimer();
+    this.offReady?.(); this.offReady = null;
     const lease = this.lease; this.lease = null;
     if (lease) { lease.closed = true; if (lease.acknowledged) void this.disable(lease); }
     this.change('idle');
@@ -103,27 +120,32 @@ export class BinaryFrameController {
   private schedule() {
     if (this.disposed || !this.visible || this.mode !== 'binary' || this.timer !== null || this.pulling || !this.lease) return;
     if (!readable(this.options.getState())) return;
-    const delay = Math.min(250, (1000 / 30) * 1.6 ** Math.min(this.emptyReads, 5));
+    const delay = this.wakePending ? 0 : 1000 / 60;
     this.timer = this.clock.schedule(() => { this.timer = null; void this.pull(); }, delay);
   }
   private async pull() {
     const lease = this.lease;
     if (this.disposed || !this.visible || !lease || this.mode !== 'binary' || !this.options.bridge.readFrame || !readable(this.options.getState())) return;
     this.pulling = true;
+    this.wakePending = false;
+    const started = performance.now();
     try {
       this.metrics.reads++;
       const packet = await this.options.bridge.readFrame(lease.scope, FRAME_PROTOCOL_VERSION, lease.consumerId);
       const state = this.options.getState();
       if (this.disposed || !this.visible || this.lease !== lease || lease.closed || !state || identity(state) !== lease.identity) { this.metrics.discarded++; return; }
-      if (!packet.byteLength) { this.emptyReads++; this.metrics.emptyReads++; return; }
-      this.emptyReads = 0;
+      if (!packet.byteLength) { this.metrics.emptyReads++; return; }
       let frame;
       try { frame = parseBinaryFrame(packet, state, this.options.store.getSnapshot()); }
       catch { this.metrics.rejected++; return; }
       if (!frame) { this.metrics.discarded++; return; }
       this.options.store.push(state, frame);
       if (this.options.store.getSnapshot() === frame) this.metrics.accepted++; else this.metrics.discarded++;
-    } catch { this.emptyReads = 5; this.metrics.errors++; }
-    finally { this.pulling = false; this.schedule(); }
+    } catch { this.metrics.errors++; }
+    finally {
+      this.readDurationMs.push(performance.now() - started);
+      if (this.readDurationMs.length > 120) this.readDurationMs.shift();
+      this.pulling = false; this.schedule();
+    }
   }
 }

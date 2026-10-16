@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deriveUiState, frameBelongsToCurrentBuild, mapFramePoint } from '../../src/view-state.ts';
+
+test('显式暂停交互阻止已知后端的兼容点击；未知旧后端仍保留点击能力', () => {
+  const current = snapshot();
+  assert.equal(deriveUiState(current, nativeFrame).inputAllowed, true);
+  const paused = deriveUiState(current, nativeFrame, { experimentalEnabled: false, capabilities: [] });
+  assert.equal(paused.inputAllowed, false);
+  assert.equal(paused.capabilities.click.status, 'blocked');
+  assert.match(paused.capabilities.click.reason, /暂停/);
+  assert.equal(deriveUiState(current, nativeFrame, { experimentalEnabled: true, capabilities: [] }).inputAllowed, true);
+});
 import { createFrameStore } from '../../src/frame-store.ts';
 
 const project = { id: 'workspace-1', name: 'native-project', environment: 'windowsLocal', workspaceRoot: 'D:/worktree',
@@ -83,8 +93,8 @@ test('姿态、文字、滑动与设备控制等待独立能力状态，后端�
     assert.equal(deriveUiState(null, null).capabilities[name].status, 'pending', name);
   }
   for (const name of ['emulator', 'physicalDevice']) {
-    assert.equal(ui.capabilities[name].status, 'blocked', name);
-    assert.match(ui.capabilities[name].reason, /未接入/, name);
+    assert.equal(ui.capabilities[name].status, 'pending', name);
+    assert.match(ui.capabilities[name].reason, /等待设备工具状态/, name);
   }
   const runningWithoutClick = deriveUiState(snapshot({ backend: { ...snapshot().backend, canClick: false } }), nativeFrame);
   assert.equal(runningWithoutClick.capabilities.click.status, 'unsupported');
@@ -111,9 +121,24 @@ test('原生控制报告保留实验与阻塞状态及原因，执行信任和 S
     [snapshot({ backend: { ...snapshot().backend, available: false, reason: 'SDK_MISSING' } }), 'unavailable']]) {
     for (const name of Object.keys(names)) assert.equal(deriveUiState(state, nativeFrame, reported).capabilities[name].status, status, name);
   }
-  const device = { reason: 'HDC 设备已连接；签名、部署与画面传输仍未核验', hdcPresent: true, deploymentReady: true, frameReady: false };
+  const device = { identity: { workspaceId: project.id }, reason: '尚未选择设备', hdcPresent: true, deploymentReady: false, frameReady: false };
   const withDevice = deriveUiState(snapshot(), nativeFrame, control, device);
-  for (const name of ['emulator', 'physicalDevice']) assert.deepEqual(withDevice.capabilities[name], { status: 'blocked', reason: device.reason });
+  for (const name of ['emulator', 'physicalDevice']) {
+    assert.equal(withDevice.capabilities[name].status, 'available');
+    assert.match(withDevice.capabilities[name].reason, /连接功能可用/);
+    assert.doesNotMatch(withDevice.capabilities[name].reason, /设备已连接/);
+  }
+});
+
+test('设备工具能力独立于 Previewer 可用性；未知、错工程和缺 HDC 保留实际状态', () => {
+  const unavailablePreviewer = snapshot({ sessionId: null, phase: 'protocolBlocked', backend: { ...snapshot().backend, available: false, reason: 'PROTOCOL_UNVERIFIED' } });
+  const device = { identity: { workspaceId: project.id }, hdcPresent: true, reason: '未选择目标' };
+  assert.equal(deriveUiState(unavailablePreviewer, null, null, device).capabilities.physicalDevice.status, 'available');
+  assert.equal(deriveUiState(unavailablePreviewer, null).capabilities.physicalDevice.status, 'pending');
+  assert.equal(deriveUiState(unavailablePreviewer, null, null, { ...device, identity: { workspaceId: 'old-project' } }).capabilities.emulator.status, 'pending');
+  assert.deepEqual(deriveUiState(unavailablePreviewer, null, null, { ...device, hdcPresent: false, reason: 'HDC_MISSING: SDK 未安装设备工具' }).capabilities.emulator,
+    { status: 'unavailable', reason: 'HDC_MISSING: SDK 未安装设备工具' });
+  assert.equal(deriveUiState({ ...unavailablePreviewer, trusted: false }, null, null, device).capabilities.physicalDevice.status, 'pending');
 });
 
 test('最新帧邮箱合并一帧内通知并拒绝旧会话、构建和顺序', () => {

@@ -13,6 +13,20 @@
 .native-input-status { max-width: 260px; padding: 4px 7px; border-radius: 6px; background: var(--glass); color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .native-input-feedback { position: absolute; right: 8px; bottom: 42px; left: 8px; z-index: 2; padding: 6px 8px; border-radius: 6px; background: var(--glass); color: var(--danger); font-size: 11px; overflow-wrap: anywhere; pointer-events: none; }
 .native-controls-settings { margin-bottom: 12px; }
+.preview-performance { margin: 16px 0; padding: 12px 0; border-block: 1px solid var(--line); }
+.preview-performance-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.preview-performance-heading h3 { margin: 0; font-size: 12px; }
+.preview-performance-heading > span, .preview-performance p { font-size: 10px; color: var(--muted); }
+.preview-performance table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.preview-performance th, .preview-performance td { padding: 5px 0; text-align: right; white-space: nowrap; }
+.preview-performance th:first-child { text-align: left; white-space: normal; }
+.preview-performance thead th { color: var(--muted); font-weight: 400; }
+.preview-performance tbody th { font-weight: 500; }
+.preview-performance th small { display: block; color: var(--muted); font-weight: 400; font-size: 10px; margin-top: 3px; }
+.preview-performance dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.preview-performance dt { color: var(--muted); font-size: 10px; }
+.preview-performance dd { margin: 4px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.preview-performance p { margin: 5px 0; line-height: 1.5; }
 .native-config-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .native-config-fields label, .native-profile-select, .native-resolution-fields label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }
 .native-config-fields select, .native-profile-select select { width: 100%; }

@@ -172,6 +172,7 @@ struct Engine {
     own_handle: isize,
     associated_manually: bool,
     next_workspace_probe: Instant,
+    next_trust_audit: Instant,
     /// Wall-clock instant at which candidate display semantics may change; `0` means
     /// nothing is scheduled. Set from the published snapshot, never from the frontend.
     next_candidate_recheck_at: u64,
@@ -772,11 +773,6 @@ impl Engine {
                 .map(|current| current.id.as_str()),
             &project.id,
         );
-        self.close_session();
-        self.context_binding = selected_context;
-        self.associated_manually = manual;
-        self.serial += 1;
-        let session = format!("{}-{}-{}", std::process::id(), now(), self.serial);
         project.sdk_id = self.snapshot.backend.sdk_path.as_ref().map(|path| {
             let mut hash = Sha256::new();
             hash.update(path.as_bytes());
@@ -790,6 +786,13 @@ impl Engine {
             );
             format!("sdk-{:x}", hash.finalize())
         });
+        // Reopening the same admitted project replaces only its Previewer epoch.
+        // The device runtime owns a separate project/target lifecycle.
+        self.replace_preview_association(Some(&project));
+        self.context_binding = selected_context;
+        self.associated_manually = manual;
+        self.serial += 1;
+        let session = format!("{}-{}-{}", std::process::id(), now(), self.serial);
         self.scheduler.set_workspace(&project.id, &session, now());
         self.snapshot.session_id = Some(session.clone());
         self.snapshot.project = Some(project.clone());
@@ -1141,6 +1144,11 @@ impl Engine {
     }
     fn tick(&mut self) {
         self.sync_context_binding();
+        let audit_trust = Instant::now() >= self.next_trust_audit;
+        if audit_trust {
+            self.next_trust_audit = Instant::now() + Duration::from_secs(1);
+            let _ = self.device_state();
+        }
         self.probe_workspace();
         self.refresh_candidate_semantics();
         if !self.associated_manually && self.snapshot.project.is_some() {
@@ -1181,10 +1189,11 @@ impl Engine {
         let Some(project) = self.snapshot.project.clone() else {
             return;
         };
-        if !self
-            .store
-            .as_ref()
-            .is_some_and(|store| store.is_trusted(&project))
+        if audit_trust
+            && !self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.is_trusted(&project))
         {
             self.suspend_execution();
             self.snapshot.phase = Phase::Untrusted;
@@ -1192,6 +1201,17 @@ impl Engine {
             return;
         }
         if let Some(task) = self.scheduler.next_task(now()) {
+            // Never use a cached runtime-input decision to execute project code.
+            if !self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.is_trusted(&project))
+            {
+                self.suspend_execution();
+                self.snapshot.phase = Phase::Untrusted;
+                self.publish();
+                return;
+            }
             self.snapshot.phase = Phase::Building;
             self.publish();
             let result = self
@@ -1215,6 +1235,10 @@ impl Engine {
                             Phase::Crashed
                         };
                         self.diagnostic(failure_diagnostic_code(&error), error, CheckStatus::Fail);
+                        if self.backend.rollback_profile() {
+                            self.scheduler.request_refresh(now());
+                            self.snapshot.phase = Phase::Building;
+                        }
                     }
                 }
             }
@@ -1232,6 +1256,10 @@ impl Engine {
                 };
                 if let BuildOutcome::Failure(error) = outcome {
                     self.diagnostic(failure_diagnostic_code(&error), error, CheckStatus::Fail);
+                    if self.backend.rollback_profile() {
+                        self.scheduler.request_refresh(now());
+                        self.snapshot.phase = Phase::Building;
+                    }
                 }
             }
             self.publish();
@@ -1246,6 +1274,10 @@ impl Engine {
                     Phase::Crashed
                 };
                 self.diagnostic("NATIVE_RUNTIME_FAILED", message, CheckStatus::Fail);
+                if self.backend.rollback_profile() {
+                    self.scheduler.request_refresh(now());
+                    self.snapshot.phase = Phase::Building;
+                }
             } else {
                 self.diagnostic("NATIVE_RUNTIME", message, CheckStatus::Pass);
             }
@@ -1254,6 +1286,7 @@ impl Engine {
         if let Some(frame) = self.backend.binary_frame() {
             self.drain_events();
             if self.scheduler.accept_binary_frame(&frame).is_ok() {
+                self.backend.confirm_profile();
                 let changed = frame_changes_state(&self.snapshot, &self.scheduler.status());
                 self.snapshot.phase = Phase::Running;
                 // Pixels travel separately. Later frames must not re-render the whole tool.
@@ -1277,7 +1310,15 @@ impl Engine {
                     }
                 }
                 if let Ok(mut frames) = self.frames.lock() {
+                    let ready = serde_json::json!({
+                        "sessionId": frame.metadata.session_id,
+                        "buildId": frame.metadata.build_id,
+                        "generation": frame.metadata.generation,
+                        "sequence": frame.metadata.sequence,
+                    });
                     frames.push(frame);
+                    drop(frames);
+                    let _ = self.app.emit("arkdock:frame-ready", ready);
                 }
             }
         }
@@ -1763,6 +1804,7 @@ pub fn run() {
             native_controls::preview_control_cancel,
             native_controls::device_runtime_state,
             native_controls::device_runtime_action,
+            native_controls::read_device_frame,
             inspection::inspector_get_capabilities,
             inspection::inspector_get_tree,
             inspection::selection_create,
@@ -1879,6 +1921,7 @@ pub fn run() {
                     own_handle,
                     associated_manually: false,
                     next_workspace_probe: Instant::now() + WORKSPACE_PROBE_INTERVAL,
+                    next_trust_audit: Instant::now(),
                     next_candidate_recheck_at: 0,
                 };
                 match selection_result {

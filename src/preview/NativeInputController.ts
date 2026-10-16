@@ -19,9 +19,17 @@ export class NativeInputController {
   private gesture: Gesture | null = null;
   private raf: number | null = null;
   private sequence = 0;
-  constructor(private send: (request: NativeControlRequest, scope: RequestScope) => Promise<NativeControlReceipt>,
-    private release: (identity: NativeControlIdentity, scope: RequestScope) => Promise<unknown>,
-    private fail: (reason: unknown, identity: NativeControlIdentity) => void) {}
+  /** Browser dispatch-to-receipt durations; not device input-to-photon latency. */
+  readonly receiptDurationMs: number[] = [];
+  readonly metrics = { dispatched: 0, coalescedMoves: 0 };
+  private send: (request: NativeControlRequest, scope: RequestScope) => Promise<NativeControlReceipt>;
+  private release: (identity: NativeControlIdentity, scope: RequestScope) => Promise<unknown>;
+  private fail: (reason: unknown, identity: NativeControlIdentity) => void;
+  constructor(send: (request: NativeControlRequest, scope: RequestScope) => Promise<NativeControlReceipt>,
+    release: (identity: NativeControlIdentity, scope: RequestScope) => Promise<unknown>,
+    fail: (reason: unknown, identity: NativeControlIdentity) => void) {
+    this.send = send; this.release = release; this.fail = fail;
+  }
 
   start(identity: NativeControlIdentity, scope: RequestScope, point: Point): boolean {
     if (this.gesture) { this.fail('上一原生手势尚未释放；本次点击未提交。', identity); return false; }
@@ -42,7 +50,9 @@ export class NativeInputController {
     gesture.point = point;
     // A tap remains a down/up pair. Only motion beyond three native pixels begins a drag.
     if (!gesture.dragged && Math.hypot(point.x - gesture.origin.x, point.y - gesture.origin.y) < 3) return;
-    gesture.dragged = true; gesture.pending = point;
+    gesture.dragged = true;
+    if (gesture.pending) this.metrics.coalescedMoves++;
+    gesture.pending = point;
     this.schedule(gesture);
   }
 
@@ -107,7 +117,11 @@ export class NativeInputController {
   }
   private async dispatch(gesture: Gesture, action: 'pointerDown' | 'pointerMove' | 'pointerUp', point: Point): Promise<void> {
     if (gesture.cancelled) return;
+    const started = performance.now();
+    this.metrics.dispatched++;
     const receipt = await this.send(controlRequest(gesture.identity, { action, gestureId: gesture.id, ...point }), gesture.scope);
+    this.receiptDurationMs.push(performance.now() - started);
+    if (this.receiptDurationMs.length > 120) this.receiptDurationMs.shift();
     if (gesture.cancelled) return;
     if (['failed', 'timedOut', 'blocked', 'cancelled'].includes(receipt.phase)) throw new Error(receipt.reason);
   }

@@ -1,22 +1,22 @@
-//! HDC device execution has its own identity, consent and image transport.
-//!
-//! This adapter deliberately does not start a client until HDC server ownership
-//! and separated stdout have a verified implementation. A PreviewBuild receipt,
-//! an executable's presence, or a successful client exit cannot authorize a
-//! deployment or establish that the selected application's pixels are visible.
-
+//! Project-scoped device runtime. Tools run on one cancellable worker, never Engine.
+mod deployment;
+pub(crate) mod emulator;
+mod frame;
+pub(crate) mod hdc;
 mod plans;
-
+pub(crate) mod process;
+mod session;
 pub use plans::{command_plan, parse_target_stdout, HdcCommandPlan, HdcOperation};
 
-use crate::ipc::model::{
-    DeviceRuntimeAction, DeviceRuntimeKind, DeviceRuntimeRequest, DeviceRuntimeState,
-    DeviceRuntimeTarget, NativeControlIdentity,
-};
+use crate::ipc::model::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 
 const TOOL_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 const HDC_CANDIDATES: [&str; 5] = [
@@ -26,7 +26,6 @@ const HDC_CANDIDATES: [&str; 5] = [
     "default/openharmony/toolchains/hdc.exe",
     "sdk/default/openharmony/toolchains/hdc.exe",
 ];
-
 #[derive(Clone)]
 struct ToolObservation {
     path: Option<String>,
@@ -34,214 +33,254 @@ struct ToolObservation {
     reason: String,
 }
 
-/// Local selection is ephemeral. It is not an HDC connection, install grant or
-/// a claim that a user's chosen device kind was proven by the runtime.
+pub(crate) struct DeviceWork {
+    request: DeviceRuntimeRequest,
+    cancel: Arc<AtomicBool>,
+    operation_id: u64,
+}
+pub(crate) struct DeviceContext {
+    project: ProjectRef,
+    sdk: PathBuf,
+    hdc: PathBuf,
+    state: Arc<Mutex<DeviceRuntimeState>>,
+    frame: Arc<Mutex<Option<frame::DeviceFrame>>>,
+    shutdown: Arc<AtomicBool>,
+}
+
 pub struct DeviceRuntimeAdapter {
     tool: ToolObservation,
-    identity: Option<NativeControlIdentity>,
-    targets: Vec<DeviceRuntimeTarget>,
-    selected_target_id: Option<String>,
-    kind: DeviceRuntimeKind,
-    phase: String,
-    reason: String,
+    sdk: Option<PathBuf>,
+    project: Option<ProjectRef>,
+    state: Arc<Mutex<DeviceRuntimeState>>,
+    frame: Arc<Mutex<Option<frame::DeviceFrame>>>,
+    sender: Option<mpsc::SyncSender<DeviceWork>>,
+    shutdown: Arc<AtomicBool>,
+    active_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl DeviceRuntimeAdapter {
-    /// Inspect only fixed locations below the explicitly selected SDK root.
-    /// No PATH lookup, command execution, SDK mutation or device enumeration.
     pub fn new(sdk: Option<PathBuf>) -> Self {
         let tool = observe_tool(sdk.as_deref());
         Self {
-            reason: tool.reason.clone(),
+            state: Arc::new(Mutex::new(empty_state(&tool))),
             tool,
-            identity: None,
-            targets: Vec::new(),
-            selected_target_id: None,
-            kind: DeviceRuntimeKind::Unknown,
-            phase: "blocked".into(),
+            sdk,
+            project: None,
+            frame: Arc::new(Mutex::new(None)),
+            sender: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            active_cancel: None,
         }
     }
 
-    /// Polling this method never starts HDC. A different preview identity
-    /// invalidates every previous target selection and operation scope.
-    pub fn state(&mut self, identity: Option<NativeControlIdentity>) -> DeviceRuntimeState {
-        if self.identity != identity {
+    /// Project/trust lifecycle only; Previewer rebuilds never change device identity.
+    pub fn state(&mut self, project: Option<ProjectRef>) -> DeviceRuntimeState {
+        if self.project != project {
             self.cancel();
-            self.identity = identity;
-            self.phase = "blocked".into();
-            self.reason = if self.identity.is_none() {
-                "DEVICE_RUNTIME_SESSION_REQUIRED: 请先选择并信任一个工程。".into()
-            } else {
-                self.tool.reason.clone()
-            };
+            self.project = project;
+            let mut state = empty_state(&self.tool);
+            if let Some(project) = &self.project {
+                state.identity = Some(DeviceRunIdentity {
+                    run_id: fresh_id(),
+                    workspace_id: project.id.clone(),
+                    target_id: None,
+                    generation: 1,
+                });
+                state.phase = "idle".into();
+                state.reason = "选择运行目标；设备运行不依赖 Previewer 构建或画面。".into();
+            }
+            self.state = Arc::new(Mutex::new(state));
+            self.frame = Arc::new(Mutex::new(None));
         }
         self.snapshot()
     }
 
-    /// IPC callers must additionally validate the current main window, project
-    /// trust and actual preview identity before entering this adapter.
-    pub fn action(&mut self, request: DeviceRuntimeRequest) -> Result<DeviceRuntimeState, String> {
-        validate_identity(&request.identity)?;
-        if self.identity.as_ref() != Some(&request.identity) {
-            return Err("STALE_DEVICE_RUNTIME_IDENTITY".into());
-        }
-        if let Some(target_id) = &request.target_id {
-            plans::validate_target_key(target_id)?;
-        }
-        match &request.action {
-            DeviceRuntimeAction::Discover => {
-                if !request.connection_consent {
-                    return self.blocked(
-                        "DEVICE_CONNECTION_CONSENT_REQUIRED: 需先允许设备发现；这可能启动共享 HDC 服务。",
-                    );
-                }
-                if request.target_id.is_some() {
-                    return Err("DISCOVERY_TARGET_MUST_BE_UNSET".into());
-                }
-                if self.tool.path.is_none() {
-                    let reason = self.tool.reason.clone();
-                    return self.blocked(&reason);
-                }
-                if !cfg!(windows) {
-                    return self.blocked(
-                        "DEVICE_RUNTIME_UNSUPPORTED_PLATFORM: 设备运行仅支持 Windows 本地环境。",
-                    );
-                }
-                // Do not run `list targets` through windows_process.rs: that
-                // runner combines stderr and stdout, and the installed client's
-                // shared-server/auto-start lifecycle has not been verified.
-                // No private `-p`, global `kill`, or default-device fallback.
-                self.targets.clear();
-                self.selected_target_id = None;
-                self.kind = DeviceRuntimeKind::Unknown;
-                // Structured code preserved: HDC_SERVER_LIFECYCLE_UNVERIFIED.
-                self.blocked("未接入：暂不支持发现设备，ArkDock 不会启动 HDC 命令。")
-            }
-            DeviceRuntimeAction::Select => {
-                if !request.connection_consent {
-                    return self.blocked(
-                        "DEVICE_CONNECTION_CONSENT_REQUIRED: 选择设备目标不代表允许部署。",
-                    );
-                }
-                let id = request.target_id.as_ref().ok_or("DEVICE_TARGET_REQUIRED")?;
-                let target = self
-                    .targets
-                    .iter()
-                    .find(|target| &target.id == id)
-                    .ok_or("DEVICE_TARGET_NOT_OBSERVED: 需先通过设备发现获得该目标")?;
-                if target.connection_state != "Connected" {
-                    return self.blocked(
-                        "DEVICE_TARGET_NOT_CONNECTED: 请在设备上授权并重新连接所选目标。",
-                    );
-                }
-                if request.kind == DeviceRuntimeKind::Unknown {
-                    return self.blocked("DEVICE_KIND_REQUIRED: 请手动选择真机或模拟器。");
-                }
-                self.selected_target_id = Some(id.clone());
-                self.kind = request.kind;
-                if self.kind == DeviceRuntimeKind::Emulator {
-                    self.blocked("FULL_EMULATOR_RUNTIME_UNAVAILABLE: 暂未接入模拟器运行。")
-                } else {
-                    self.blocked("DEVICE_DEPLOYMENT_BLOCKED: 暂未接入设备部署；当前构建产物不是可安装的 HAP。")
-                }
-            }
-            DeviceRuntimeAction::Deploy => {
-                if !request.deployment_consent {
-                    return self.blocked("DEVICE_DEPLOYMENT_CONSENT_REQUIRED: 需明确允许将已签名 HAP 安装到所选设备。");
-                }
-                self.require_selected(&request)?;
-                self.blocked("未接入：当前构建产物不是可安装的 HAP，无法部署到设备。")
-            }
-            DeviceRuntimeAction::Start => {
-                self.require_selected(&request)?;
-                self.blocked("未接入：没有可启动的已安装应用。")
-            }
-            DeviceRuntimeAction::Capture => {
-                self.require_selected(&request)?;
-                self.blocked("未接入：暂不支持截取设备画面。")
-            }
-            DeviceRuntimeAction::Stop => {
-                self.require_selected(&request)?;
-                self.blocked("未接入：ArkDock 未启动过设备应用，无需停止。")
-            }
-            DeviceRuntimeAction::Disconnect => {
-                self.cancel();
-                self.phase = "disconnected".into();
-                self.reason = "已释放本地设备选择；共享 HDC 服务与其他设备会话未受影响。".into();
-                Ok(self.snapshot())
-            }
-            DeviceRuntimeAction::Cancel => {
-                self.cancel();
-                Ok(self.snapshot())
-            }
-        }
+    pub fn snapshot(&self) -> DeviceRuntimeState {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Only local state is owned in the blocked implementation. Future client
-    /// workers must be cancelled by their owned Job, never by HDC server name.
-    pub fn cancel(&mut self) {
-        self.targets.clear();
-        self.selected_target_id = None;
-        self.kind = DeviceRuntimeKind::Unknown;
-        self.phase = "cancelled".into();
-        self.reason = "设备运行请求已取消；未执行部署、输入、截屏或共享服务命令。".into();
-    }
-
-    fn require_selected(&self, request: &DeviceRuntimeRequest) -> Result<(), String> {
-        let selected = self
-            .selected_target_id
-            .as_ref()
-            .ok_or("DEVICE_TARGET_SELECTION_REQUIRED")?;
-        if request.target_id.as_ref() != Some(selected) || request.kind != self.kind {
-            return Err("STALE_DEVICE_TARGET_SELECTION".into());
+    fn start_worker(&mut self) -> Result<(), String> {
+        if self.sender.is_some() {
+            return Ok(());
         }
+        let sdk = self.sdk.clone().ok_or("HDC_MISSING: 请选择本机 SDK。")?;
+        let hdc = PathBuf::from(self.tool.path.as_ref().ok_or(self.tool.reason.as_str())?);
+        let project = self.project.clone().ok_or("PROJECT_REQUIRED")?;
+        self.shutdown = Arc::new(AtomicBool::new(false));
+        let context = DeviceContext {
+            project,
+            sdk,
+            hdc,
+            state: self.state.clone(),
+            frame: self.frame.clone(),
+            shutdown: self.shutdown.clone(),
+        };
+        let (sender, receiver) = mpsc::sync_channel(8);
+        std::thread::Builder::new()
+            .name("arkdock-device".into())
+            .spawn(move || session::run(context, receiver))
+            .map_err(|_| "DEVICE_WORKER_UNAVAILABLE")?;
+        self.sender = Some(sender);
         Ok(())
     }
 
-    fn blocked(&mut self, reason: &str) -> Result<DeviceRuntimeState, String> {
-        self.phase = "blocked".into();
-        self.reason = reason.into();
-        Ok(self.snapshot())
+    pub fn action(&mut self, request: DeviceRuntimeRequest) -> Result<DeviceRuntimeState, String> {
+        let snapshot = self.snapshot();
+        if snapshot.identity.as_ref() != Some(&request.identity) {
+            return Err("STALE_DEVICE_RUNTIME_IDENTITY".into());
+        }
+        if let Some(target) = &request.target_id {
+            plans::validate_target_key(target)?;
+        }
+        if matches!(
+            request.action,
+            DeviceRuntimeAction::Cancel | DeviceRuntimeAction::Disconnect
+        ) {
+            self.cancel();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(identity) = &mut state.identity {
+                identity.generation += 1;
+                identity.target_id = None;
+            }
+            state.targets.clear();
+            state.selected_target_id = None;
+            state.busy = false;
+            state.streaming = false;
+            state.frame = None;
+            state.frame_ready = false;
+            state.foreground_verified = false;
+            state.deployment_token = None;
+            state.phase = "disconnected".into();
+            state.reason = "已断开本工具的设备会话。".into();
+            return Ok(state.clone());
+        }
+        if !request.connection_consent {
+            return Err("DEVICE_CONNECTION_CONSENT_REQUIRED".into());
+        }
+        if matches!(
+            request.action,
+            DeviceRuntimeAction::Capture | DeviceRuntimeAction::StreamStart
+        ) && !request.capture_consent
+        {
+            return Err("DEVICE_CAPTURE_CONSENT_REQUIRED".into());
+        }
+        if request.action == DeviceRuntimeAction::Input && !request.input_consent {
+            return Err("DEVICE_INPUT_CONSENT_REQUIRED".into());
+        }
+        if snapshot.busy
+            && !matches!(
+                request.action,
+                DeviceRuntimeAction::Stop | DeviceRuntimeAction::StreamStop
+            )
+        {
+            return Err("DEVICE_OPERATION_BUSY".into());
+        }
+        if let Some(cancel) = self.active_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.start_worker()?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.operation_id = state
+            .operation_id
+            .checked_add(1)
+            .ok_or("DEVICE_OPERATION_LIMIT")?;
+        state.busy = true;
+        state.reason = "正在执行设备操作…".into();
+        let operation_id = state.operation_id;
+        if let Err(error) = self.sender.as_ref().unwrap().try_send(DeviceWork {
+            request,
+            cancel: cancel.clone(),
+            operation_id,
+        }) {
+            state.busy = false;
+            return Err(format!("DEVICE_QUEUE_BUSY: {error}"));
+        }
+        self.active_cancel = Some(cancel);
+        Ok(state.clone())
     }
 
-    fn snapshot(&self) -> DeviceRuntimeState {
-        DeviceRuntimeState {
-            identity: self.identity.clone(),
-            kind: self.kind.clone(),
-            hdc_path: self.tool.path.clone(),
-            tool_sha256: self.tool.sha256.clone(),
-            hdc_present: self.tool.path.is_some(),
-            targets: self.targets.clone(),
-            selected_target_id: self.selected_target_id.clone(),
-            phase: self.phase.clone(),
-            deployment_ready: false,
-            signature_status: "notVerified".into(),
-            foreground_verified: false,
-            frame_ready: false,
-            reason: self.reason.clone(),
+    pub fn read_frame(&self, identity: &DeviceRunIdentity, after: u64) -> Result<Vec<u8>, String> {
+        // Keep the state epoch pinned until the matching packet is copied.
+        // Publishers use the same state -> frame lock order.
+        let state = self.state.lock().map_err(|_| "DEVICE_STATE_UNAVAILABLE")?;
+        if state.identity.as_ref() != Some(identity) {
+            return Err("STALE_DEVICE_RUNTIME_IDENTITY".into());
+        }
+        let frames = self.frame.lock().map_err(|_| "DEVICE_FRAME_UNAVAILABLE")?;
+        let frame = frames.as_ref().filter(|frame| {
+            state.frame_ready
+                && state.frame.as_ref() == Some(&frame.metadata)
+                && frame.metadata.run_id == identity.run_id
+                && frame.metadata.sequence > after
+                && Some(&frame.metadata.target_id) == identity.target_id.as_ref()
+        });
+        frame
+            .map(frame::DeviceFrame::encode)
+            .transpose()
+            .map(|v| v.unwrap_or_default())
+    }
+
+    pub fn cancel(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(cancel) = self.active_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.sender.take();
+        if let Ok(mut frame) = self.frame.lock() {
+            *frame = None;
         }
     }
 }
+impl Drop for DeviceRuntimeAdapter {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
 
-fn validate_identity(identity: &NativeControlIdentity) -> Result<(), String> {
-    for value in [
-        &identity.workspace_id,
-        &identity.session_id,
-        &identity.build_id,
-    ] {
-        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-            return Err("INVALID_DEVICE_RUNTIME_IDENTITY".into());
+fn fresh_id() -> String {
+    #[cfg(windows)]
+    {
+        let mut bytes = [0u8; 16];
+        if getrandom::fill(&mut bytes).is_ok() {
+            return bytes.iter().map(|b| format!("{b:02x}")).collect();
         }
     }
-    if identity.width == 0
-        || identity.height == 0
-        || identity.width > 4096
-        || identity.height > 4096
-        || u64::from(identity.width) * u64::from(identity.height) > 8_388_608
-    {
-        return Err("INVALID_DEVICE_RUNTIME_SURFACE".into());
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        super::now_ms(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    )
+}
+fn empty_state(tool: &ToolObservation) -> DeviceRuntimeState {
+    DeviceRuntimeState {
+        identity: None,
+        kind: DeviceRuntimeKind::Unknown,
+        hdc_path: tool.path.clone(),
+        tool_sha256: tool.sha256.clone(),
+        hdc_present: tool.path.is_some(),
+        targets: Vec::new(),
+        selected_target_id: None,
+        phase: "idle".into(),
+        deployment_ready: false,
+        signature_status: "notVerified".into(),
+        foreground_verified: false,
+        frame_ready: false,
+        reason: tool.reason.clone(),
+        busy: false,
+        operation_id: 0,
+        bundle_name: None,
+        module_name: None,
+        ability_name: None,
+        artifact_sha256: None,
+        deployment_token: None,
+        frame: None,
+        streaming: false,
+        emulators: Vec::new(),
+        selected_emulator: None,
     }
-    Ok(())
 }
 
 fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
@@ -337,8 +376,7 @@ fn observe_tool(sdk: Option<&Path>) -> ToolObservation {
         Ok((path, sha256)) => ToolObservation {
             path: Some(path),
             sha256: Some(sha256),
-            reason: "HDC_EXECUTION_UNVERIFIED: 已找到 HDC 工具，但设备发现、部署与画面暂未接入。"
-                .into(),
+            reason: "已找到 HDC 工具；连接后可发现设备、构建部署并查看运行画面。".into(),
         },
         Err(reason) => ToolObservation {
             path: None,
@@ -374,5 +412,74 @@ fn is_reparse(metadata: &Metadata) -> bool {
     #[cfg(not(windows))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn adapter_with_frame() -> (DeviceRuntimeAdapter, DeviceRunIdentity) {
+        let adapter = DeviceRuntimeAdapter::new(None);
+        let identity = DeviceRunIdentity {
+            run_id: "run".into(),
+            workspace_id: "project".into(),
+            target_id: Some("target".into()),
+            generation: 1,
+        };
+        let metadata = DeviceFrameMetadata {
+            run_id: "run".into(),
+            target_id: "target".into(),
+            bundle_name: "app.test".into(),
+            sequence: 7,
+            width: 1,
+            height: 1,
+            capture_started_at: 1,
+            received_at: 2,
+            payload_length: 3,
+            foreground_verified: true,
+        };
+        {
+            let mut state = adapter.state.lock().unwrap();
+            state.identity = Some(identity.clone());
+            state.frame = Some(metadata.clone());
+            state.frame_ready = true;
+        }
+        *adapter.frame.lock().unwrap() = Some(frame::DeviceFrame {
+            metadata,
+            png: vec![1, 2, 3],
+        });
+        (adapter, identity)
+    }
+
+    #[test]
+    fn device_packet_requires_current_epoch_and_published_frame() {
+        let (adapter, identity) = adapter_with_frame();
+        assert!(adapter
+            .read_frame(&identity, 6)
+            .unwrap()
+            .starts_with(b"ADDF"));
+        assert!(adapter.read_frame(&identity, 7).unwrap().is_empty());
+        adapter
+            .state
+            .lock()
+            .unwrap()
+            .frame
+            .as_mut()
+            .unwrap()
+            .sequence = 8;
+        assert!(adapter.read_frame(&identity, 6).unwrap().is_empty());
+        adapter
+            .state
+            .lock()
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .generation += 1;
+        assert_eq!(
+            adapter.read_frame(&identity, 0).unwrap_err(),
+            "STALE_DEVICE_RUNTIME_IDENTITY"
+        );
     }
 }

@@ -6,10 +6,13 @@ pub mod dependencies;
 pub mod device_runtime;
 pub mod environment;
 pub mod frames;
+pub mod profile_state;
+pub mod route_adapter;
 #[cfg(windows)]
 mod windows;
 use crate::ipc::model::{
-    BackendStatus, CheckStatus, Diagnostic, Environment, NativeFrame, ProjectRef,
+    BackendStatus, CheckStatus, Diagnostic, Environment, NativeFrame, PreviewDeviceProfile,
+    ProjectRef,
 };
 use crate::scheduler::{validate_frame, BuildTask, FrameReject};
 use std::collections::VecDeque;
@@ -64,6 +67,7 @@ pub trait PreviewBackend: Send {
 
 pub struct NativePreviewer {
     sdk: Option<PathBuf>,
+    admitted_sdk_root: Option<PathBuf>,
     status: BackendStatus,
     workspace_id: Option<String>,
     session_id: Option<String>,
@@ -71,6 +75,8 @@ pub struct NativePreviewer {
     owned_child: Option<OwnedChild>,
     mailbox: FrameMailbox,
     project: Option<ProjectRef>,
+    profile: profile_state::ProfileSelection,
+    profile_project_id: Option<String>,
     #[cfg(windows)]
     runtime: Option<windows::Runtime>,
 }
@@ -119,6 +125,69 @@ impl NativePreviewer {
         self.sdk.clone()
     }
 
+    /// Normalize a nested SDK selection to the exact fingerprinted CLI root.
+    pub fn verified_sdk_root(&self) -> Option<PathBuf> {
+        // Capability polling must not hash SDK binaries on the input thread.
+        // Launch still verifies the files immediately before execution.
+        self.admitted_sdk_root.clone()
+    }
+
+    /// Artifacts belong to the currently owned runtime/build; original project
+    /// identity remains on the scheduler, trust record and control requests.
+    pub fn artifact_context(&self) -> Option<route_adapter::BuildArtifactContext> {
+        #[cfg(windows)]
+        {
+            self.runtime
+                .as_ref()
+                .and_then(windows::Runtime::artifact_context)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    pub fn profile(&self) -> PreviewDeviceProfile {
+        self.profile.current().clone()
+    }
+
+    /// Stage only the requested launch configuration. The engine owns stopping
+    /// the old runtime and confirming or rolling back after the new first frame.
+    pub fn set_profile(
+        &mut self,
+        project: &ProjectRef,
+        id: &str,
+    ) -> Result<PreviewDeviceProfile, String> {
+        if self
+            .project
+            .as_ref()
+            .is_some_and(|current| current.id != project.id)
+            || self
+                .profile_project_id
+                .as_ref()
+                .is_some_and(|current| current != &project.id)
+        {
+            return Err("PROFILE_PROJECT_CHANGED".into());
+        }
+        let sdk = self.verified_sdk_root().ok_or("PROFILE_SDK_UNAVAILABLE")?;
+        let profile = configuration::admit_profile(id, project, &sdk, self.status.available)?;
+        let previous = self.profile.select(profile)?;
+        self.profile_project_id = Some(project.id.clone());
+        Ok(previous)
+    }
+
+    pub fn profile_switch_pending(&self) -> bool {
+        self.profile.pending()
+    }
+
+    pub fn confirm_profile(&mut self) {
+        self.profile.confirm();
+    }
+
+    pub fn rollback_profile(&mut self) -> bool {
+        self.profile.rollback()
+    }
+
     /// Synchronous dependency preflight for the refresh command: a project whose
     /// declared dependencies are not installed fails before a build is scheduled,
     /// so the user gets the structured cause instead of the ArkTS cascade it causes.
@@ -157,8 +226,10 @@ impl NativePreviewer {
 
     pub fn new(sdk: Option<PathBuf>) -> Self {
         let status = probe(sdk.as_deref());
+        let admitted_sdk_root = admitted_root(sdk.as_deref(), &status);
         Self {
             sdk,
+            admitted_sdk_root,
             status,
             workspace_id: None,
             session_id: None,
@@ -166,6 +237,8 @@ impl NativePreviewer {
             owned_child: None,
             mailbox: FrameMailbox::new(),
             project: None,
+            profile: profile_state::ProfileSelection::default(),
+            profile_project_id: None,
             #[cfg(windows)]
             runtime: None,
         }
@@ -194,9 +267,24 @@ impl NativePreviewer {
     }
 }
 
+fn admitted_root(sdk: Option<&Path>, status: &BackendStatus) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        sdk.and_then(|root| {
+            windows::verified_root(root, status.sdk_version.as_deref().unwrap_or(""))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (sdk, status);
+        None
+    }
+}
+
 impl PreviewBackend for NativePreviewer {
     fn probe(&mut self) -> BackendStatus {
         self.status = probe(self.sdk.as_deref());
+        self.admitted_sdk_root = admitted_root(self.sdk.as_deref(), &self.status);
         self.status.clone()
     }
 
@@ -233,6 +321,14 @@ impl PreviewBackend for NativePreviewer {
         if !self.status.available {
             return self.reject(self.status.reason.clone(), None);
         }
+        let sdk = self.verified_sdk_root().ok_or("PROFILE_SDK_UNAVAILABLE")?;
+        let admitted = configuration::profiles_for_project(Some(&sdk), true, Some(project));
+        self.profile.reconcile(
+            &admitted,
+            self.profile_project_id.as_ref() != Some(&project.id),
+        )?;
+        self.profile_project_id = Some(project.id.clone());
+        configuration::validate_project_profile(project, self.profile.current())?;
         self.project = Some(project.clone());
         Ok(())
     }
@@ -256,8 +352,15 @@ impl PreviewBackend for NativePreviewer {
                 })
                 .ok_or("SDK_CHANGED: 请重新选择已验证的 SDK")?;
             let project = self.project.clone().ok_or("PROJECT_REQUIRED")?;
+            let profile =
+                configuration::admit_profile(&self.profile.current().id, &project, &sdk, true)?;
             self.runtime.take();
-            self.runtime = Some(windows::Runtime::launch(sdk, project, task.clone()));
+            self.runtime = Some(windows::Runtime::launch(
+                sdk,
+                project,
+                task.clone(),
+                profile,
+            ));
             return Ok(());
         }
         self.reject(self.status.reason.clone(), Some(task.build_id.clone()))

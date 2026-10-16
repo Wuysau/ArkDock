@@ -298,7 +298,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
         motion={motion} setMotion={setMotion} intensity={intensity} setIntensity={setIntensity}
         chooseOrbAutoHide={chooseOrbAutoHide} changeDisplay={(command) => void changeDisplay(command)} pair={pair} detach={() => void detach()} open={(next) => navigate(next)} />}
       {panel === 'menu' && <MenuPanel snapshot={state} shell={shell} pair={pair} intents={menuIntents} />}
-      {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} controls={controls} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
+      {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} controls={controls} visible={previewVisible} bridge={bridge} getFrameController={() => frameController.current} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
       {panel === 'diagnostics' && <RuntimeLogs snapshot={state} />}
       {panel === 'help' && <HelpPanel />}
     </Sheet>}

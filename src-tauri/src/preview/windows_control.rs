@@ -51,6 +51,7 @@ pub(super) struct ControlWorker<'a> {
     sequence: u64,
     hash: Option<[u8; 32]>,
     route_revision: u64,
+    configuration_revision: u64,
 }
 
 impl<'a> ControlWorker<'a> {
@@ -74,6 +75,7 @@ impl<'a> ControlWorker<'a> {
             sequence: 0,
             hash: None,
             route_revision: 0,
+            configuration_revision: 0,
         }
     }
 
@@ -563,6 +565,7 @@ impl<'a> ControlWorker<'a> {
             }
         };
         if control::observes_frame(action) {
+            self.configuration_revision = self.configuration_revision.saturating_add(1);
             if let Ok(mut state) = self.state.lock() {
                 state.input_ready = false;
                 state.reason = "正在应用原生配置。".into();
@@ -616,6 +619,18 @@ impl<'a> ControlWorker<'a> {
             requested_at: super::super::now_ms(),
             legacy_click: true,
         }
+    }
+
+    /// Attach at socket receive time. A JPEG validated later cannot become
+    /// evidence for a configuration or router notification that arrived after it.
+    pub fn frame_context(&self) -> (u64, u64) {
+        (self.configuration_revision, self.route_revision)
+    }
+
+    pub fn frame_observation_ready(&self) -> bool {
+        self.operation
+            .as_ref()
+            .is_none_or(|operation| operation.observing)
     }
 
     pub fn surface(&self) -> (u32, u32) {
@@ -681,6 +696,7 @@ impl<'a> ControlWorker<'a> {
         height: u32,
         sequence: u64,
         jpeg: &[u8],
+        observing_at_receive: bool,
     ) -> Result<bool, String> {
         let hash: [u8; 32] = Sha256::digest(jpeg).into();
         let mut completed = false;
@@ -689,14 +705,17 @@ impl<'a> ControlWorker<'a> {
             if matches!(
                 action,
                 NativeControlAction::SetOrientation | NativeControlAction::SetResolution
-            ) && !operation.observing
+            ) && (!operation.observing || !observing_at_receive)
             {
                 return Ok(false);
             }
-            if *action == NativeControlAction::NavigatePage && !operation.observing {
+            if *action == NativeControlAction::NavigatePage
+                && (!operation.observing || !observing_at_receive)
+            {
                 return Ok(false);
             }
-            if operation.observing && sequence > operation.baseline_sequence {
+            if operation.observing && observing_at_receive && sequence > operation.baseline_sequence
+            {
                 let state = self
                     .state
                     .lock()
@@ -813,5 +832,137 @@ impl<'a> ControlWorker<'a> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn task() -> BuildTask {
+        BuildTask {
+            epoch: 1,
+            workspace_id: "w".into(),
+            session_id: "s".into(),
+            build_id: "b".into(),
+            generation: 1,
+            started_at: 1,
+        }
+    }
+
+    fn request(fields: Value) -> (ControlRequest, control::ControlReceiver) {
+        let mut value = json!({ "identity": { "workspaceId": "w", "sessionId": "s", "buildId": "b", "generation": 1, "width": 360, "height": 640 } });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let (reply, receiver) = mpsc::sync_channel(8);
+        (
+            ControlRequest {
+                request: serde_json::from_value(value).unwrap(),
+                operation_id: "op".into(),
+                reply,
+                requested_at: 1,
+                legacy_click: false,
+            },
+            receiver,
+        )
+    }
+
+    // Simulate matching native ACKs only; no Windows pipe or real input is used.
+    fn acknowledge(worker: &mut ControlWorker<'_>) {
+        loop {
+            let operation = worker.operation.as_mut().unwrap();
+            let Some(step) = operation.steps.pop_front() else {
+                break;
+            };
+            let name = step.name;
+            operation.waiting = Some((step, Instant::now()));
+            worker
+                .receive(&json!({ "version": "1.0.1", "command": name, "result": true }))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn asynchronous_pre_ack_rotation_frame_cannot_complete_surface_change() {
+        let task = task();
+        let state = Mutex::new(RuntimeControlState::default());
+        let mailbox = Mutex::new(ControlMailbox::default());
+        let mut worker = ControlWorker::new(&state, &mailbox, &task);
+        let before = worker.frame_context();
+        let (request, receipts) =
+            request(json!({ "action": "setOrientation", "orientation": "landscape" }));
+        worker.begin(request).unwrap();
+        assert_ne!(worker.frame_context(), before);
+        let before_ack = worker.frame_observation_ready();
+        assert!(!before_ack);
+        acknowledge(&mut worker);
+        assert!(worker.frame_observation_ready());
+        assert!(!worker.frame(640, 360, 1, b"fixture", before_ack).unwrap());
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::AwaitingFrame
+        );
+        assert!(receipts.try_recv().is_err());
+        assert!(worker.frame(640, 360, 2, b"fixture", true).unwrap());
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::Observed
+        );
+    }
+
+    #[test]
+    fn asynchronous_pre_ack_theme_frame_may_display_but_cannot_claim_observation() {
+        let task = task();
+        let state = Mutex::new(RuntimeControlState::default());
+        let mailbox = Mutex::new(ControlMailbox::default());
+        let mut worker = ControlWorker::new(&state, &mailbox, &task);
+        let (request, receipts) = request(json!({ "action": "setColorMode", "colorMode": "dark" }));
+        worker.begin(request).unwrap();
+        acknowledge(&mut worker);
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::AwaitingFrame
+        );
+        assert!(worker.frame(360, 640, 1, b"fixture", false).unwrap());
+        assert!(receipts.try_recv().is_err());
+        assert!(worker.frame(360, 640, 2, b"fixture", true).unwrap());
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::Observed
+        );
+    }
+
+    #[test]
+    fn target_router_frame_can_wait_for_ack_without_losing_its_original_revision() {
+        let task = task();
+        let state = Mutex::new(RuntimeControlState {
+            current_route: Some("pages/Index".into()),
+            ..RuntimeControlState::default()
+        });
+        let mailbox = Mutex::new(ControlMailbox::default());
+        let mut worker = ControlWorker::new(&state, &mailbox, &task);
+        let (request, receipts) =
+            request(json!({ "action": "navigatePage", "page": "pages/Detail" }));
+        worker.begin(request).unwrap();
+        let before_route = worker.frame_context();
+        worker.route_message(&json!({ "MessageType": "CurrentJsRouter", "args": { "CurrentRouter": "pages/Detail" } }));
+        assert_ne!(worker.frame_context(), before_route);
+        let revision = worker.navigation_revision().unwrap();
+        assert!(!worker.frame(360, 640, 1, b"fixture", false).unwrap());
+        assert!(!worker.navigation_frame_ready(revision));
+        acknowledge(&mut worker);
+        assert!(worker.navigation_frame_ready(revision));
+        assert!(worker.frame(360, 640, 1, b"fixture", true).unwrap());
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::AwaitingFrame
+        );
+        assert_eq!(
+            receipts.try_recv().unwrap().unwrap().phase,
+            NativeControlPhase::Observed
+        );
     }
 }

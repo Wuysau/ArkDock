@@ -16,6 +16,41 @@ pub const COMMAND_ARGUMENT_BYTES_LIMIT: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HdcOperation {
     ListTargets,
+    UdId {
+        target: String,
+    },
+    SerialNumber {
+        target: String,
+    },
+    WindowInfo {
+        target: String,
+    },
+    ProcessInfo {
+        target: String,
+        bundle: String,
+    },
+    RemoveScreenshot {
+        target: String,
+        nonce: String,
+    },
+    KeyEvent {
+        target: String,
+        code: u32,
+    },
+    DoubleClick {
+        target: String,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+    LongClick {
+        target: String,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
     Install {
         target: String,
         hap: PathBuf,
@@ -82,8 +117,113 @@ pub struct HdcCommandPlan {
 }
 
 pub fn command_plan(operation: HdcOperation) -> Result<HdcCommandPlan, String> {
+    let timeout_ms = match &operation {
+        HdcOperation::Install { .. } => 120_000,
+        HdcOperation::Screenshot { .. } | HdcOperation::ReceiveScreenshot { .. } => 20_000,
+        HdcOperation::Start { .. } => 20_000,
+        _ => CLIENT_TIMEOUT_MS,
+    };
+    let stdout_limit = match &operation {
+        HdcOperation::BundleInfo { .. } | HdcOperation::WindowInfo { .. } => 2 * 1024 * 1024,
+        _ => TARGET_STDOUT_LIMIT,
+    };
     let args = match operation {
         HdcOperation::ListTargets => vec!["list".into(), "targets".into(), "-v".into()],
+        HdcOperation::UdId { target } => targeted(
+            &target,
+            vec!["shell".into(), "bm".into(), "get".into(), "-u".into()],
+        )?,
+        // startup_init/services/modules/udid/udid_comm.c GetSerial_ reads this
+        // exact parameter. The HDC connect key is not a device serial number.
+        HdcOperation::SerialNumber { target } => targeted(
+            &target,
+            vec![
+                "shell".into(),
+                "param".into(),
+                "get".into(),
+                "ohos.boot.sn".into(),
+            ],
+        )?,
+        HdcOperation::WindowInfo { target } => targeted(
+            &target,
+            vec![
+                "shell".into(),
+                "hidumper".into(),
+                "-s".into(),
+                "WindowManagerService".into(),
+                "-a".into(),
+                "-a".into(),
+            ],
+        )?,
+        HdcOperation::ProcessInfo { target, bundle } => {
+            validate_identifier(&bundle)?;
+            targeted(&target, vec!["shell".into(), "pidof".into(), bundle])?
+        }
+        HdcOperation::RemoveScreenshot { target, nonce } => targeted(
+            &target,
+            vec![
+                "shell".into(),
+                "rm".into(),
+                "-f".into(),
+                "--".into(),
+                remote_screenshot(&nonce)?,
+            ],
+        )?,
+        HdcOperation::KeyEvent { target, code } => {
+            if code == 0 || code > 10_000 {
+                return Err("INVALID_DEVICE_KEY_CODE".into());
+            }
+            targeted(
+                &target,
+                vec![
+                    "shell".into(),
+                    "uitest".into(),
+                    "uiInput".into(),
+                    "keyEvent".into(),
+                    code.to_string(),
+                ],
+            )?
+        }
+        HdcOperation::DoubleClick {
+            target,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            validate_point((x, y), width, height)?;
+            targeted(
+                &target,
+                vec![
+                    "shell".into(),
+                    "uitest".into(),
+                    "uiInput".into(),
+                    "doubleClick".into(),
+                    x.to_string(),
+                    y.to_string(),
+                ],
+            )?
+        }
+        HdcOperation::LongClick {
+            target,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            validate_point((x, y), width, height)?;
+            targeted(
+                &target,
+                vec![
+                    "shell".into(),
+                    "uitest".into(),
+                    "uiInput".into(),
+                    "longClick".into(),
+                    x.to_string(),
+                    y.to_string(),
+                ],
+            )?
+        }
         HdcOperation::Install { target, hap } => {
             if hap.extension().and_then(|value| value.to_str()) != Some("hap") {
                 return Err("DEVICE_INSTALL_REQUIRES_HAP".into());
@@ -199,16 +339,11 @@ pub fn command_plan(operation: HdcOperation) -> Result<HdcCommandPlan, String> {
             height,
         } => gesture(&target, "drag", from, to, velocity, width, height)?,
         HdcOperation::Text { target, text } => {
-            // Space/quotes/Unicode and shell metacharacters require a separately
-            // verified HDC + device-shell encoding path. Never interpolate them.
-            if text.is_empty()
-                || text.len() > 512
-                || !text.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b',' | b'-')
-                })
-                || text.starts_with('-')
-            {
-                return Err("DEVICE_TEXT_ENCODING_UNVERIFIED: only bounded ASCII token text has a reviewed command plan".into());
+            if text.is_empty() || text.len() > 512 || text.chars().any(char::is_control) {
+                return Err(
+                    "INVALID_DEVICE_TEXT: bounded text without control characters is required"
+                        .into(),
+                );
             }
             targeted(
                 &target,
@@ -227,15 +362,38 @@ pub fn command_plan(operation: HdcOperation) -> Result<HdcCommandPlan, String> {
     }
     Ok(HdcCommandPlan {
         args,
-        timeout_ms: CLIENT_TIMEOUT_MS,
-        stdout_limit: TARGET_STDOUT_LIMIT,
+        timeout_ms,
+        stdout_limit,
         completion_requires_runtime_evidence: true,
     })
 }
 
 fn targeted(target: &str, args: Vec<String>) -> Result<Vec<String>, String> {
     validate_target_key(target)?;
+    // HDC reconstructs command argv and double-quotes a token containing spaces.
+    // Its daemon ShellCmdTrim removes that single surrounding pair. Supplying
+    // the WHOLE typed remote command as one argv preserves our POSIX quoting:
+    // no individual user text is exposed to shell expansion or field splitting.
+    // Sources: developtools_hdc src/host/main.cpp, src/common/base.cpp and
+    // src/common/async_cmd.cpp. This implements their documented transport; it
+    // does not copy source or offer a raw shell IPC endpoint.
+    let args = if args.first().is_some_and(|a| a == "shell") {
+        vec![
+            "shell".into(),
+            args[1..]
+                .iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ]
+    } else {
+        args
+    };
     Ok([vec!["-t".into(), target.into()], args].concat())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub(super) fn validate_target_key(value: &str) -> Result<(), String> {
@@ -251,7 +409,7 @@ pub(super) fn validate_target_key(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_identifier(value: &str) -> Result<(), String> {
+pub(super) fn validate_identifier(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 256
         || !value.as_bytes()[0].is_ascii_alphabetic()
@@ -280,16 +438,19 @@ fn local_path(path: &Path) -> Result<String, String> {
         || !bytes[0].is_ascii_alphabetic()
         || bytes[1] != b':'
         || !matches!(bytes[2], b'/' | b'\\')
-        || !bytes.iter().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(*byte, b'_' | b'-' | b'.' | b':' | b'/' | b'\\')
+        || path.chars().any(|ch| {
+            ch.is_control()
+                || matches!(
+                    ch,
+                    '"' | '\'' | '<' | '>' | '|' | '?' | '*' | '$' | '`' | ';' | '&'
+                )
         })
         || path
             .split(['/', '\\'])
-            .any(|component| matches!(component, "." | ".."))
+            .any(|component| matches!(component, "." | "..") || component.ends_with([' ', '.']))
         || bytes[2..].contains(&b':')
     {
-        return Err("HDC_PATH_ENCODING_UNVERIFIED: bounded absolute Windows drive paths without spaces or Unicode are required by this command plan".into());
+        return Err("INVALID_HDC_LOCAL_PATH: a bounded absolute Windows drive path without ambiguous path syntax is required".into());
     }
     Ok(path.into())
 }
@@ -368,7 +529,14 @@ pub fn parse_target_stdout(stdout: &[u8]) -> Result<Vec<DeviceRuntimeTarget>, St
         }
         // 2022 server.cpp: key / transport / status / device name.
         // New public docs append an `hdc` identifier. Unknown profiles block.
-        let fields: Vec<&str> = line.split_ascii_whitespace().collect();
+        let fields: Vec<&str> = if line.contains('\t') {
+            line.split('\t')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect()
+        } else {
+            line.split_ascii_whitespace().collect()
+        };
         if fields.len() != 4 && !(fields.len() == 5 && fields[4] == "hdc") {
             return Err("HDC_TARGET_FORMAT_UNVERIFIED".into());
         }
@@ -392,8 +560,111 @@ pub fn parse_target_stdout(stdout: &[u8]) -> Result<Vec<DeviceRuntimeTarget>, St
             label: format!("{} · {} · {}", fields[3], fields[1], fields[0]),
             kind: DeviceRuntimeKind::Unknown,
             connection_state: fields[2].into(),
-            reason: "未接入：无法自动识别真机或模拟器，请手动选择类型。".into(),
+            reason: "来自 HDC 的目标；设备类型由用户选择或自有模拟器实例关联确认。".into(),
         });
     }
     Ok(targets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_number_uses_os_parameter_not_hdc_connect_key() {
+        let plan = command_plan(HdcOperation::SerialNumber {
+            target: "127.0.0.1:1234".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "-t",
+                "127.0.0.1:1234",
+                "shell",
+                "'param' 'get' 'ohos.boot.sn'"
+            ]
+        );
+        assert!(plan.timeout_ms <= CLIENT_TIMEOUT_MS);
+    }
+    #[test]
+    fn whole_remote_command_quotes_unicode_and_metacharacters_as_data() {
+        let plan = command_plan(HdcOperation::Text {
+            target: "device1".into(),
+            text: "中文 空格 ' \" $(touch hacked); &".into(),
+        })
+        .unwrap();
+        assert_eq!(&plan.args[..3], ["-t", "device1", "shell"]);
+        assert_eq!(plan.args.len(), 4);
+        assert_eq!(
+            plan.args[3],
+            "'uitest' 'uiInput' 'text' '中文 空格 '\"'\"' \" $(touch hacked); &'"
+        );
+        // Mirror HDC's two transport steps, not the shell quote implementation:
+        // host argv reconstruction wraps the single command; daemon strips one
+        // outer pair. The original fully quoted remote program is preserved.
+        let reconstructed = format!("\"{}\"", plan.args[3]);
+        assert_eq!(&reconstructed[1..reconstructed.len() - 1], plan.args[3]);
+    }
+    #[test]
+    fn local_paths_support_spaces_and_unicode_but_reject_ambiguous_syntax() {
+        assert_eq!(
+            local_path(Path::new("D:\\中文 工程\\entry-signed.hap")).unwrap(),
+            "D:\\中文 工程\\entry-signed.hap"
+        );
+        for path in [
+            "D:\\ok\\..\\secret.hap",
+            "D:\\a\"b.hap",
+            "D:\\x:stream.hap",
+            "D:\\folder.\\a.hap",
+            "D:\\a;echo.hap",
+        ] {
+            assert!(local_path(Path::new(path)).is_err());
+        }
+    }
+    #[test]
+    fn tab_delimited_device_names_can_contain_spaces_without_parsing_logs() {
+        let targets = parse_target_stdout(b"abc\t\tUSB\tConnected\tMy Phone\thdc\n").unwrap();
+        assert_eq!(targets[0].id, "abc");
+        assert!(targets[0].label.contains("My Phone"));
+        assert!(parse_target_stdout(b"abc\tUSB\tConnected\tPhone\n[Fail] error\n").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requires an explicitly selected ARKDOCK_TEST_POSIX_SHELL (Git bash), never a device shell"]
+    fn real_posix_shell_preserves_text_after_hdc_transport_reconstruction() {
+        use super::super::process::ToolCommandRunner;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        let executable = std::path::PathBuf::from(
+            std::env::var_os("ARKDOCK_TEST_POSIX_SHELL").expect("select an isolated host shell"),
+        );
+        let text = "中文 hello ' \" $(printf INJECTED); & `printf INJECTED` \\";
+        let plan = command_plan(HdcOperation::Text {
+            target: "fixture".into(),
+            text: text.into(),
+        })
+        .unwrap();
+        let typed_command = plan.args[3].replacen("'uitest' 'uiInput' 'text'", "printf '%s'", 1);
+        let wrapped = format!("\"{typed_command}\"");
+        let device_command = &wrapped[1..wrapped.len() - 1];
+        let result = ToolCommandRunner::run(
+            &executable,
+            &[
+                "--noprofile".into(),
+                "--norc".into(),
+                "-c".into(),
+                device_command.into(),
+            ],
+            executable.parent().unwrap(),
+            &[],
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(result.status, 0);
+        assert_eq!(result.stdout, text.as_bytes());
+        assert!(result.stderr.is_empty());
+    }
 }

@@ -1,79 +1,46 @@
-# HDC 设备运行接入边界
+# 模拟器与真机运行
 
-本次交付独立 `DeviceRuntimeAdapter`、受限 `HdcOperation` 命令计划及真实 stdout 的严格设备列表解析器。它没有执行 HDC，也没有完成安装、启动、截图、输入或模拟器运行。全部运行、构建、测试和验收状态为 **NOT_RUN — 等待用户验收**。
+设备运行独立于 Previewer。它使用可信工程的 assembleHap、SDK 签名验证工具、HDC 与设备上的 aa/bm/UItest；独立的 run/target/generation 身份和 ADDF 二进制 PNG 帧不能由 Previewer 的画面或构建收据代替。
 
-设备运行与 Native Previewer 分属不同后端。Previewer 的命名管道、JPEG 帧头、Inspector 构建关联及能力回执不能作为设备画面的证明。
+## 已实现链路
 
-## 已接入代码
+1. 显式连接后发现真实 HDC 目标。stdout/stderr 分离、有大小和超时限制；仅根据真实列表选择目标。用户选择模拟器或真机，不根据 USB/TCP 名称猜测类型。
+2. 在后台构建当前工程 HAP，核验构建任务收据、实际输出、文件摘要、应用/模块/Ability、签名和 Profile。构建前后及安装前检查源码指纹；产物复制到自有目录。已有签名配置由工程构建工具使用，不自动创建或导出密钥。
+3. 安装须确认准确目标和本次产物。短时单次 token 绑定当前运行身份、目标及摘要；重新选择或断开使旧授权失效，源文件变化由安装前的完整指纹校验拒绝。调试 Profile 的设备清单按 UDID 或 SN 精确比对。
+4. 安装和启动均解析实际回执，安装后查询包元数据，采集和输入时再核验进程及前台窗口。退出码 0 或文件存在不能单独表示成功。
+5. 单次截图和连续刷新拉取真实设备 PNG，校验格式、解码尺寸和预算后绘制。输入要求截图授权、输入授权、当前目标、前台应用证据及 5 秒内的当前帧；支持点击、双击、长按、滑动、拖动、Unicode 文字与限定按键。
+6. SDK Emulator CLI 读取本机实例；可启动指定实例并连接其明确 HDC 端点。停止仅作用于 ArkDock 自己启动并持有的进程；不结束用户已有模拟器，不自动下载镜像、接受许可或重置数据。
 
-- `src-tauri/src/preview/device_runtime.rs`：在显式选择的 SDK 下只读检查固定 HDC 路径、规则文件及 SHA256；提供 state/action/cancel 接口。state 不启动设备枚举。workspace/session/build/generation/尺寸身份变化立即释放旧选择。
-- `src-tauri/src/preview/device_runtime/plans.rs`：Rust 构造限定操作参数，不开放任意 Shell；每个设备操作都必须指定 `-t`。列表最多 64 个目标，stdout 最大 64 KiB，单行最大 1 KiB，参数总量最大 4 KiB，计划中的客户端超时为 5 秒。
-- Discover 要求 connectionConsent；Select 要求真实枚举中存在的 Connected 目标以及用户主动选择 kind。TCP、USB、设备名称和回环地址均不能判定模拟器或真机。
-- Deploy 要求 deploymentConsent，仍受 HAP/签名门禁。启动、截图、输入及停止不会因用户 consent 或客户端退出 0 被标为成功。
-- Cancel/Disconnect 释放 ArkDock 的本地选择，不调用 `hdc kill`、全局断开、提权、重启或修改设备。当前没有自有设备进程或客户端需要终止。
+所有长操作在独立 worker 上串行执行，Windows 子进程在恢复主线程前加入自有 Job；取消、超时、输出超限只结束自有进程树。HDC 复用兼容的已有 server，使用禁止自动拉起的客户端模式；不存在 server 时才持有自己的前台 server。HDC 有全局单实例约束，不宣称能在另一个端口任意并存服务，也不执行全局 kill。
 
-## 发现门禁
+## 图像与性能范围
 
-当前 Discover 返回 `HDC_SERVER_LIFECYCLE_UNVERIFIED`，不创建客户端线程或虚假的 discovering 状态。原因包括：
+当前设备画面是有界截图刷新：每次完成后间隔至少 350 ms，还受 screenCap、传输及解码耗时影响。它适合运行验证与操作，**不是 60 fps 投屏协议**。前端最多一个读取/解码流水线，切目标、取消后拒绝迟到画面；修改源码不影响设备已经安装的版本，更新版本必须重新构建部署。Previewer 的事件驱动画面优化与设备截图刷新分别统计，不能混用帧率。
 
-1. 已有 `windows_process.rs` 将 stdout 与 stderr 写入同一日志。该文件不能用作设备列表的权威 stdout。
-2. HDC 普通客户端可自动启动共享 server；尚未核验本机商业工具的 server 生命周期、归属、兼容性及取消策略。
-3. 参考 HDC 源码中的 `-p` 是未公开选项，本次不调用它来规避 auto-start。
+## 环境要求
 
-这些条件解决后，实际枚举应在有界后台线程中执行，先绑定当前身份和独立请求代次，分离 stdout/stderr，再等待真实回执并严格解析 stdout。取消只终止该线程持有的自有 Job/client；共享 server 不能按名称终止。旧身份的结果必须丢弃。当前没有开放前端注入目标列表的路径。
-
-## 官方来源与命令
-
-参考源码不等于 SDK 26 或具体设备的兼容证明。本次没有移植官方 C++ 代码或分发二进制。
-
-| 来源 | 固定参考提交 | 作用 |
-|---|---|---|
-| [developtools_hdc_standard](https://github.com/openharmony/developtools_hdc_standard/tree/08924fba62069f6716e71266391092271faf10a3) | `08924fba62069f6716e71266391092271faf10a3` | host/main.cpp、server.cpp、translate.cpp：参数重建、自动 server、列表格式与 HDC 参数 |
-| [OpenHarmony docs](https://github.com/openharmony/docs/tree/f41b9345badd47c7ab0c263344cd7f4b5a549afb) | `f41b9345badd47c7ab0c263344cd7f4b5a549afb` | aa/bm、HDC、UItest、签名 Profile |
-| [testfwk_arkxtest](https://github.com/openharmony/testfwk_arkxtest/tree/a9a8b4700b0b79ee0057f36de6e351d7e647a656) | `a9a8b4700b0b79ee0057f36de6e351d7e647a656` | uitest/server/server_main.cpp 与 input/ui_input.cpp |
-| [device_qemu](https://github.com/openharmony/device_qemu/tree/434e755fdb46ea93df016b56eb4f3033823d36d4) | `434e755fdb46ea93df016b56eb4f3033823d36d4` | 板级仿真与系统镜像依赖范围 |
-
-以下是受限计划，不是已经执行的命令或安装授权：
-
-| 操作 | 官方参数 |
-|---|---|
-| 枚举 | `hdc list targets -v` |
-| 安装 | `hdc -t TARGET install ABSOLUTE.hap` |
-| 启动 | `hdc -t TARGET shell aa start -a ABILITY -b BUNDLE -m MODULE` |
-| 停止 | `hdc -t TARGET shell aa force-stop BUNDLE` |
-| 指定包信息 | `hdc -t TARGET shell bm dump -n BUNDLE` |
-| 截图 | `hdc -t TARGET shell uitest screenCap -p /data/local/tmp/arkdock_NONCE.png` |
-| 拉取截图 | `hdc -t TARGET file recv SAME_REMOTE OWNED_LOCAL.png` |
-| 点击 | `hdc -t TARGET shell uitest uiInput click X Y` |
-| 滑动/拖动 | `hdc -t TARGET shell uitest uiInput swipe FROM_X FROM_Y TO_X TO_Y VELOCITY`；drag 使用相同参数 |
-| 已聚焦位置输入 | `hdc -t TARGET shell uitest uiInput text TEXT` |
-
-参数参见 [HDC translate.cpp](https://github.com/openharmony/developtools_hdc_standard/blob/08924fba62069f6716e71266391092271faf10a3/src/host/translate.cpp)、[aa 工具](https://github.com/openharmony/docs/blob/f41b9345badd47c7ab0c263344cd7f4b5a549afb/en/application-dev/tools/aa-tool.md)、[bm 工具](https://github.com/openharmony/docs/blob/f41b9345badd47c7ab0c263344cd7f4b5a549afb/en/application-dev/tools/bm-tool.md) 与 [UItest 指南](https://github.com/openharmony/docs/blob/f41b9345badd47c7ab0c263344cd7f4b5a549afb/en/application-dev/application-test/uitest-guidelines.md)。
-
-安装默认不附加替换、降级或自动授权权限选项。前端不能传任意 bundle、Ability、产物路径或 Shell。未来执行者必须从当前可信工程与实际构建收据读取这些值，核验安装文件摘要及自有截图目标目录。
-
-HDC 会重新拼接 argv，设备 shell 会解析命令。主机结构化参数不能解决第二层 Shell 注入。本次计划仅允许安全 token；路径限定无空格、无 Unicode 的绝对 Windows 盘符路径，文本限定 ASCII token。中文、空格、组合键、完整 IME 和多屏输入不开放。UItest 当前参考源码拒绝零坐标，速度限定 200 至 40000 px/s；这些限制不能静默转换为其他输入。
-
-## 部署、图像和模拟器阻塞
-
-- **HAP 构建缺失**：现有 `PreviewBuild` 是预览构建，不生成可安装的 HAP。需要独立可信工程打包流程、产物定位、摘要和构建代次收据。
-- **签名缺失**：需要实际验证签名链、有效期、bundle 对应关系及调试设备许可，不能以签名文件存在或 `signed: true` 替代。不能读取或导出私钥、口令等凭据。参考 [HarmonyAppProvision](https://github.com/openharmony/docs/blob/f41b9345badd47c7ab0c263344cd7f4b5a549afb/en/application-dev/security/app-provision-structure.md)。
-- **部署授权缺失**：connectionConsent 只允许连接/发现。实际 install 还需要绑定准确目标、workspace/session/build/generation、HAP 摘要、bundle/module/Ability 的短时单次授权；项目切换、重建或设备断开必须失效。
-- **输入范围缺失**：screenCap 捕获整块 display，画面不自动证明目标 bundle 前台。截图需单独授权；输入需验证前台应用、display、尺寸和帧新鲜度，以免发往设备其他应用。
-- **回执语义不足**：参考 HDC main.cpp 最终返回 0；UItest 输入函数也可能打印异常后返回成功退出码。安装、启动、输入回执、实际显示帧和完成须分别判断。
-- **设备帧未接入**：后续真实 PNG 传输必须拥有独立 deviceRunId、target/bundle/display、原生 scope、sequence、捕获时间、尺寸/载荷上限及取消状态；不得拼造 Previewer 帧头。
-- **完整模拟器缺失**：QEMU 参考仓提供内核/板级适配；标准系统指南还依赖另外获取并构建的系统镜像。尚无已核验的完整商业 HarmonyOS 应用虚拟设备、图形/输入/HDC 服务与合法安装来源；保持 `FULL_EMULATOR_RUNTIME_UNAVAILABLE`。不能自动编译 QEMU、下载镜像或将 Previewer 当模拟器。参考 [QEMU README](https://github.com/openharmony/device_qemu/blob/434e755fdb46ea93df016b56eb4f3033823d36d4/README.md) 和 [Arm 标准系统指南](https://github.com/openharmony/device_qemu/blob/434e755fdb46ea93df016b56eb4f3033823d36d4/arm_virt/linux/README.md)。
+- 已安装且受支持的本机 SDK、Node/Hvigor、Java、HDC；需要模拟器时还须合法可用的镜像与实例。
+- 工程依赖已安装，HAP 具有合法有效的签名配置；调试设备在 Profile 许可清单中。
+- 设备已连接且授权调试；设备具备 aa/bm/UItest 与可核验的前台窗口信息。无法证明前台或签名时给出具体错误，不能通过去掉校验继续输入/安装。
+- 完整原生输入法 preedit、应用专用高帧率录屏服务和多显示器设备输入未实现；本机输入法提交最终文字可用。
 
 ## 用户验收步骤
 
-全部步骤由用户执行，本次无自动测试或运行报告。
+自动化检查只覆盖解析、身份隔离、有界进程/图像、命令参数及源码/产物校验；真实模拟器与真机全链路仍须用户分别验收。
 
-1. 选择已有合法 SDK 与可信工程，检查设备运行状态中的 HDC 路径和摘要；文件观察不能显示已连接、部署就绪或已有真实画面。
-2. 未授权连接时尝试 Discover，应看到明确 consent 阻塞；允许连接后应看到 server lifecycle 的具体阻塞，并确认没有启动 HDC 或设备部署。
-3. 未出现真实发现结果时不能选择、安装或启动任意设备；不得将唯一设备、USB 或回环 TCP 自动认定为真机/模拟器。
-4. 检查 Deploy、Start、Capture 的不同阻塞原因，分别指出 HAP/签名/安装身份/前台与截图授权缺口；不能把 consent 开关变成成功回执。
-5. 检查切换工程、重建以及取消/断开会释放旧本地选择；用户既有 HDC server 和其他工具连接应保持正常。
-6. 对将来接通的后台客户端，由用户验证 timeout、取消、分离 stdout、迟到响应及真实列表格式。非法日志行、重复目标、超限、非 UTF-8 应拒绝整个结果。
-7. 对将来部署/帧/输入接通，用户先完成目标绑定签名和授权，再观察安装、Ability 启动、实际设备画面与对应输入变化；每个阶段独立记录，未观察到的阶段保持阻塞。
+1. 关联可信工程，进入设备运行，允许连接，发现并选择准确目标。无 Previewer 构建也应可操作。
+2. 构建 HAP；确认显示的应用、目标与摘要后安装，再启动。记录构建、签名、安装、启动各自结果。
+3. 授权截图并查看真实设备画面，再授权输入，逐项测试点击/长按/拖动、中文及按键。切到其他前台应用后输入应停止。
+4. 截图期间切目标或取消；旧画面与旧输入应失效。修改源码后尝试部署旧准备产物应被拒绝；已经安装的版本可继续运行。断开不能结束已有共享 HDC 或用户模拟器。
+5. 模拟器选择已有实例，启动、连接、执行上述操作，再停止 ArkDock 自己启动的实例。目标断开、签名过期/不匹配、缺 Java/UItest/镜像时应给出具体原因。
 
-本次没有执行以上步骤，所有结果仍是 **NOT_RUN — 等待用户验收**。
+## 官方参考
+
+实现参考公开协议和本机工具帮助，自行编写 Rust/TypeScript 适配；不分发 SDK、设备镜像、私钥或官方二进制。
+
+- [HDC 文档](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/dfx/hdc.md) 与 [HDC server](https://github.com/openharmony/developtools_hdc/blob/master/src/host/server.cpp)：服务生命周期、目标及文件传输。
+- [HAP signer](https://github.com/openharmony/developtools_hapsigner/blob/master/README_ZH.md)：verify-app、verify-profile 与实际签名验证输出。
+- [bm 工具](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/tools/bm-tool.md)、[aa 工具](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/tools/aa-tool.md)：安装信息和 Ability 生命周期。
+- [UItest](https://github.com/openharmony/testfwk_arkxtest/blob/master/uitest/server/server_main.cpp)：截图与输入回执；HDC 重建远程命令后仍需 POSIX 引号保护。
+- [设备 ID](https://github.com/openharmony/startup_init/blob/master/services/modules/udid/udid_comm.c)：UDID/SN 精确核验。
+- [官方 Emulator CLI](https://developer.huawei.com/consumer/cn/doc/doccenter-deveco-studio/ide-commandline-emulator)：本机实例生命周期。
