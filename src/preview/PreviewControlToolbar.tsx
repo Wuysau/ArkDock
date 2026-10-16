@@ -6,7 +6,7 @@ import { controlAvailable, displayedIdentity, identityEqual } from './useNativeC
 import { Icon } from '../Icon.tsx';
 
 function ready(snapshot: AppSnapshot | null, store: FrameStore, controls: NativeControls, name: string, busy: boolean) {
-  return !busy && !controls.pending && controls.state?.experimentalEnabled && controls.state.inputReady
+  return !busy && !controls.pending && controls.state?.inputReady
     && identityEqual(controls.state.identity, displayedIdentity(snapshot, store.getDisplayed())) && controlAvailable(controls.state, name);
 }
 export function PreviewPageSelect({ snapshot, store, controls, busy }: { snapshot: AppSnapshot | null; store: FrameStore; controls: NativeControls; busy: boolean }) {
@@ -32,7 +32,22 @@ export function PreviewPageSelect({ snapshot, store, controls, busy }: { snapsho
 export function PreviewControlToolbar({ snapshot, store, controls, busy }: { snapshot: AppSnapshot | null; store: FrameStore; controls: NativeControls; busy: boolean }) {
   useSyncExternalStore(store.subscribeDisplayed, store.getDisplayed, store.getDisplayed);
   const state = controls.state;
+  const selectedProfile = state?.profiles.find((profile) => profile.id === state.currentProfileId);
+  const profileReady = ready(snapshot, store, controls, 'profile', busy);
   return <div className="native-config-toolbar">
+    <label><span className="sr-only">预览设备配置</span><select aria-label="预览设备配置"
+      value={state?.currentProfileId ?? ''} disabled={!profileReady}
+      title={selectedProfile ? `${selectedProfile.width}×${selectedProfile.height} · ${selectedProfile.dpi} DPI · ${selectedProfile.shape}；切换后重启预览` : '等待设备配置'}
+      onChange={(event) => {
+        const profile = state?.profiles.find((candidate) => candidate.id === event.target.value);
+        if (!profileReady || !profile || profile.id === state?.currentProfileId || profile.status !== 'available') return;
+        void controls.submit({ action: 'switchProfile', profileId: profile.id });
+      }}>
+      {!state && <option value="">设备</option>}
+      {state?.profiles.map((profile) => <option key={profile.id} value={profile.id} disabled={profile.status !== 'available'} title={profile.reason}>
+        {profile.label} · {profile.width}×{profile.height}
+      </option>)}
+    </select></label>
     <button className="icon-button" aria-label={`切换设备方向，当前${state ? state.orientation === 'landscape' ? '横屏' : '竖屏' : '待确认'}`}
       disabled={!ready(snapshot, store, controls, 'orientation', busy)} title={state?.capabilities.find((item) => item.name === 'orientation')?.reason ?? '等待原生方向能力'}
       onClick={() => void controls.submit({ action: 'setOrientation', orientation: state?.orientation === 'landscape' ? 'portrait' : 'landscape' })}>

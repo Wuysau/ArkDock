@@ -6,7 +6,7 @@
 //! exercised by the user. A dispatch receipt is not a render completion proof.
 use crate::ipc::model::{
     NativeControlAction, NativeControlIdentity, NativeControlReceipt, NativeControlRequest,
-    PreviewColorMode, PreviewOrientation,
+    PreviewColorMode, PreviewDeviceProfile, PreviewOrientation,
 };
 #[cfg(windows)]
 use crate::ipc::model::{NativeControlPhase, PreviewKey};
@@ -51,6 +51,17 @@ impl Default for RuntimeControlState {
 }
 
 impl RuntimeControlState {
+    /// The launch profile has already passed SDK and project admission. Input
+    /// remains paused until that runtime supplies its first valid frame.
+    pub fn from_profile(profile: &PreviewDeviceProfile) -> Self {
+        Self {
+            width: profile.width,
+            height: profile.height,
+            dpi: profile.dpi,
+            ..Self::default()
+        }
+    }
+
     pub fn stopped() -> Self {
         Self {
             reason: "尚未启动原生预览会话。".into(),
@@ -328,6 +339,16 @@ pub fn validate_request(request: &NativeControlRequest) -> Result<(), String> {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-'))
         {
             return Err("NATIVE_PAGE_INVALID".into());
+        }
+    }
+    if let Some(profile) = &request.profile_id {
+        if profile.is_empty()
+            || profile.len() > 128
+            || !profile
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("NATIVE_PROFILE_ID_INVALID".into());
         }
     }
     Ok(())

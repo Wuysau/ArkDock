@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppSnapshot, InteractionMode } from './ipc/model.ts';
-import { nativeBridge } from './ipc/client.ts';
+import { contextPairCreate, contextPairRevoke, nativeBridge } from './ipc/client.ts';
 import type { UiBridge } from './ipc/client.ts';
 import { describeError, errorCategoryLabel } from './ipc/errors.ts';
 import { deriveUiState } from './view-state.ts';
@@ -92,6 +92,26 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const { panel, anchor, navigate: navigateTo, open: openPanel, openAutomatic, resetAutomatic } = navigation;
   const { act, cancelAssociation, pending, cancelling, pendingRef, activeCommand, cancelRequested } = commands;
   const { report, notify, clear } = notices;
+  const [contextBusy, setContextBusy] = useState(false);
+  const contextBusyRef = useRef(false);
+  const pairContextSource = () => {
+    if (contextBusyRef.current) return;
+    contextBusyRef.current = true;
+    setContextBusy(true);
+    void contextPairCreate()
+      .then((pairing) => notify(`会话源已配对：${pairing.pairingFile}。请按接入说明把该文件路径配置到 Agent 工具的 MCP 设置。`))
+      .catch((error) => notify(describeError(error)))
+      .finally(() => { contextBusyRef.current = false; setContextBusy(false); });
+  };
+  const revokeContextSource = () => {
+    if (contextBusyRef.current) return;
+    contextBusyRef.current = true;
+    setContextBusy(true);
+    void contextPairRevoke()
+      .then((revoked) => notify(revoked ? '会话源配对已撤销，全部已登记会话失效。' : '会话源尚未配对。'))
+      .catch((error) => notify(describeError(error)))
+      .finally(() => { contextBusyRef.current = false; setContextBusy(false); });
+  };
   const { motion, intensity, effectiveMotion, adoptNativeOrbChange, setMotion, setIntensity, chooseOrbAutoHide } = preferences;
 
   const ui = deriveUiState(state, null);
@@ -232,9 +252,11 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   return <main className={`app ${hasDockCandidate(state?.dockHint) ? 'target-near' : ''}`} data-binding={ui.binding} data-workspace={ui.workspace} data-pair-layout={pair.state} data-display={state?.display.mode ?? 'expanded'}>
     <div className="dock-body" {...(panel || state && state.display.mode !== 'expanded' ? { inert: '' } : {})}>
       <header className="header"><button className="drag-zone drag" aria-label="拖动 ArkDock 到目标应用窗口外侧" title="按住顶部，拖到目标窗口右侧" onPointerDown={(event) => { if (event.button === 0 && connected) void act('begin_drag', {}); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); notify('键盘移动：Alt+空格打开系统窗口菜单，选择移动。'); } }}><Icon name="grip" size={15} /><span className="mark" aria-hidden="true"><span /><span /></span><strong>ArkDock</strong></button><span className={`header-status ${ui.binding === 'bound' ? 'connected' : ''}`} title={state?.target?.title ?? statusText}><span className="dot" />{statusText}</span><div className="header-actions"><button className="collapse-orb" disabled={!connected || !nativeReady || displayBusy || state?.display.mode !== 'expanded'} aria-label="收起为悬浮球" title={connected ? '收起为悬浮球' : '桌面桥接未连接'} onClick={() => void changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" /><span className="collapse-label">收起</span></button><button className="icon-button" aria-label="更多操作" title="更多操作" onClick={() => navigate('menu')}><span className="ellipsis" aria-hidden="true">···</span></button><button className="icon-button minimize" disabled={!connected || busy} aria-label="最小化窗口" title={connected ? '最小化窗口' : '桌面桥接未连接'} onClick={() => void act('minimize_window', {})}><span aria-hidden="true">−</span></button><button className="icon-button maximize" disabled={!connected || busy || !pair.enabled} aria-label={pair.action} title={pair.reason} onClick={() => void changePair()}><Icon name={pair.state === 'maximized' ? 'restore' : 'maximize'} size={16} /></button><button className="icon-button close-window" disabled={!connected || !nativeReady || displayBusy || state?.display.mode !== 'expanded' || !trayAvailable} aria-label="隐藏到系统托盘" title={trayAvailable ? '隐藏到系统托盘，可从托盘图标恢复' : trayReason} onClick={() => void changeDisplay('hide_to_tray')}><Icon name="close" size={17} /></button></div></header>
-      <WorkspaceStrip snapshot={state} busy={busy || !connected} cancelling={cancelling}
+      <WorkspaceStrip snapshot={state} busy={busy || contextBusy || !connected} cancelling={cancelling}
         openProject={() => navigate(state?.project ? 'path' : 'projects')} openCandidates={() => navigate('projects')}
-        manual={() => void chooseDirectory()} rediscover={() => void act('rediscover', {})} cancel={() => void cancelAssociation()} />
+        manual={() => void chooseDirectory()} rediscover={() => void act('rediscover', {})} cancel={() => void cancelAssociation()}
+        pairContext={pairContextSource} revokeContext={revokeContextSource}
+        selectContext={(registrationId) => void act('context_select_project', { registrationId })} />
       <section className="preview" aria-label={runtimeKind === 'native' ? '原生预览画面' : '设备运行接入'}>
         <PreviewChrome enabled={Boolean(state?.target)} inspecting={runtimeKind === 'native' && interactionMode === 'inspect'} modalOpen={Boolean(panel)}
           toolbar={<><section className="preview-toolbar" aria-label="预览控制">
@@ -277,7 +299,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
         motion={motion} setMotion={setMotion} intensity={intensity} setIntensity={setIntensity}
         chooseOrbAutoHide={chooseOrbAutoHide} changeDisplay={(command) => void changeDisplay(command)} pair={pair} detach={() => void detach()} open={(next) => navigate(next)} />}
       {panel === 'menu' && <MenuPanel snapshot={state} shell={shell} pair={pair} intents={menuIntents} />}
-      {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} controls={controls} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
+      {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} controls={controls} visible={previewVisible} bridge={bridge} getFrameController={() => frameController.current} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
       {panel === 'diagnostics' && <RuntimeLogs snapshot={state} />}
       {panel === 'help' && <HelpPanel />}
     </Sheet>}

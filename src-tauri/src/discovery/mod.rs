@@ -5,6 +5,13 @@
 /// are covered by the base test run; `dead_code` is allowed only in that configuration.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) mod classification;
+/// Live agent context registrations bound to a docked target by process ancestry.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod context_source;
+/// Windows-only parent-PID snapshot for the ancestry binding. Compiled for every
+/// Windows build: the ancestry rule runs in the base test configuration too.
+#[cfg(windows)]
+pub(crate) mod context_source_windows;
 mod inspector;
 pub mod registration;
 mod resolver;

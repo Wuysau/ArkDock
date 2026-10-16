@@ -102,13 +102,14 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
         : !state.project || !state.trusted || !state.backend.available || state.phase === 'unsupported' ? 'unavailable'
           : state.phase === 'building' ? state.build.durationMs === null ? 'building' : 'waitingFrame'
             : state.phase === 'running' ? frameCurrent ? 'running' : 'waitingFrame' : 'idle';
-  const inputAllowed = Boolean(frameCurrent && state?.phase === 'running' && state.trusted && state.backend.available && state.backend.canClick);
+  const inputAllowed = Boolean(frameCurrent && state?.phase === 'running' && state.trusted && state.backend.available && state.backend.canClick && control?.experimentalEnabled !== false);
   const capability = (status: CapabilityStatus, reason: string): UiCapability => ({ status, reason });
   const gate: UiCapability | null = !state ? capability('pending', '等待 Windows 桌面后端连接')
     : !state.target || !state.project ? capability('pending', '先连接目标窗口并关联实际工程')
       : !state.trusted ? capability('pending', '工程执行信任尚未确认')
         : !state.backend.available ? capability('unavailable', state.backend.reason || '原生后端不可用') : null;
   const click = gate ?? (!state?.backend.canClick ? capability('unsupported', '当前原生后端未提供点击输入')
+    : control?.experimentalEnabled === false ? capability('blocked', '预览交互已暂停，可在预览能力中重新开启')
     : inputAllowed ? capability('available', '点击当前有效原生画面')
       : capability('pending', preview === 'stale' || preview === 'error' ? '旧画面不可交互，等待当前构建恢复' : '等待当前构建的有效首帧'));
   const nativeCapability = (name: string, reason: string): UiCapability => {
@@ -116,8 +117,14 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
     const actual = control?.capabilities.find((item) => item.name === name);
     return actual ? capability(actual.status, actual.reason) : capability('unavailable', control ? reason : '等待原生控制能力状态');
   };
-  const deviceCapability = (kind: 'emulator' | 'physicalDevice'): UiCapability => gate ?? capability('blocked', device?.reason
-    || (kind === 'emulator' ? '未接入：暂不支持经由 ArkDock 启动鸿蒙虚拟设备' : '未接入：暂不支持经由 ArkDock 连接真机并显示画面'));
+  const deviceCapability = (kind: 'emulator' | 'physicalDevice'): UiCapability => {
+    const label = kind === 'emulator' ? '模拟器' : '真机';
+    if (!state?.target || !state.project) return capability('pending', '先关联当前工程，再打开设备运行面板');
+    if (!state.trusted) return capability('pending', '工程执行信任尚未确认');
+    if (!device || device.identity?.workspaceId !== state.project.id) return capability('pending', `等待设备工具状态；可打开${label}面板连接并选择目标`);
+    if (!device.hdcPresent) return capability('unavailable', device.reason || '当前 SDK 未找到 HDC 设备工具');
+    return capability('available', `HDC 连接功能可用；请在${label}面板连接并选择目标，连接结果以实际发现状态为准`);
+  };
   const bindingLabels: Record<BindingState, string> = {
     unbound: '未绑定', candidate: '松开以连接', binding: '正在连接',
     bound: state?.target ? `已连接到 ${state.target.app}` : '已连接', unavailable: '窗口联动不可用',
@@ -128,7 +135,7 @@ export function deriveUiState(state: AppSnapshot | null, frame: PreviewFrame | n
   };
   const previewLabels: Record<PreviewState, string> = {
     unavailable: state?.backend.reason || '等待原生预览', idle: '预览待启动', building: '正在构建实际工程',
-    waitingFrame: '等待当前构建的原生首帧', running: state?.backend.canClick ? '原生预览可交互' : '原生预览运行中',
+    waitingFrame: '等待当前构建的原生首帧', running: control?.experimentalEnabled === false ? '预览交互已暂停' : state?.backend.canClick ? '原生预览可交互' : '原生预览运行中',
     stale: state?.build.error ? '旧画面 · 当前代码构建失败' : '旧画面 · 原生后端不可用',
     stopped: '预览已停止', error: '预览失败，请查看诊断',
   };

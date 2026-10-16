@@ -8,14 +8,15 @@ use super::control::{
     self, ControlMailbox, ControlReceiver, ControlRequest, RuntimeControlState, WireCommand,
 };
 use super::dependencies;
-use super::frames::{parse_jpeg40_for_surface, BinaryFrame, BinaryFrameMailbox};
+use super::frames::{parse_jpeg40_envelope, BinaryFrame, BinaryFrameMailbox};
+use super::route_adapter::{self, BuildArtifactContext};
 use super::NativePoint;
 use crate::inspector::{
     InspectionReceiver, InspectionRequest, InspectorCommand, RawInspectionResponse,
     INSPECTION_TIMEOUT_MS,
 };
 use crate::ipc::model::{
-    NativeControlAction, NativeControlPhase, NativeControlRequest, ProjectRef,
+    NativeControlAction, NativeControlPhase, NativeControlRequest, PreviewDeviceProfile, ProjectRef,
 };
 use crate::scheduler::BuildTask;
 use sha2::{Digest, Sha256};
@@ -41,8 +42,12 @@ use windows_sys::Win32::System::Pipes::*;
 
 #[path = "windows_control.rs"]
 mod control_worker;
+#[path = "windows_frame_validation.rs"]
+mod frame_validation;
 #[path = "windows_process.rs"]
 mod process;
+#[path = "windows_run_directory.rs"]
+mod run_directory;
 
 const FRAME_LIMIT: usize = 1024 * 1024;
 /// Build-output policy: a preview build that emits more than this much log is
@@ -196,6 +201,94 @@ fn build_arguments(sdk: &Path, module: &str, run_directory: &Path) -> Result<Vec
     Ok(arguments)
 }
 
+/// Source transformation runs in the same suspended-until-owned Windows Job
+/// boundary as builds. Its only writable destination is this run's fresh folder.
+/// Cancellation drops that Job; no project/SDK install or process discovery runs.
+fn prepare_route_artifacts(
+    sdk: &Path,
+    project: &ProjectRef,
+    root: &Path,
+    module: &Path,
+    directory: &Path,
+    stop: &AtomicBool,
+    messages: &mpsc::SyncSender<String>,
+) -> Result<Option<BuildArtifactContext>, String> {
+    if stop.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let helper = directory.join("route-adapter.mjs");
+    fs::write(&helper, route_adapter::helper_source())
+        .map_err(|error| format!("ROUTE_ADAPTER_HELPER_WRITE: {error}"))?;
+    let output = directory.join("route-adapter");
+    let report = output.join("report.json");
+    let mut args = vec![helper.to_string_lossy().into_owned()];
+    args.extend(route_adapter::arguments(
+        root,
+        &project.module,
+        &output,
+        sdk,
+        &report,
+    )?);
+    let process = process::Process::spawn(
+        &sdk.join("tool/node/node.exe"),
+        &args,
+        directory,
+        &[],
+        &directory.join("route-adapter.log"),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut degraded = false;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        process.check_capture_health()?;
+        if process.log_size() > route_adapter::REPORT_LIMIT {
+            return Err("ROUTE_ADAPTER_LOG_LIMIT".into());
+        }
+        report_log_degradation(&process, "route-adapter", messages, &mut degraded);
+        if let Some(code) = process.exit_code()? {
+            process.drain_output(Duration::from_secs(2), stop)?;
+            if stop.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            process.check_capture_health()?;
+            if process.log_size() > route_adapter::REPORT_LIMIT {
+                return Err("ROUTE_ADAPTER_LOG_LIMIT".into());
+            }
+            if code != 0 {
+                return Err(format!(
+                    "ROUTE_ADAPTER_FAILED: exit {code}; {}",
+                    process.log_tail(4096)
+                ));
+            }
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("ROUTE_ADAPTER_TIMEOUT: 60s".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    drop(process);
+    let mut artifacts = route_adapter::read_report(&report, root, module, &output)?;
+    // Hvigor's Windows path handling expects local drive paths, not the Win32
+    // canonical extended-length prefix used for the containment checks above.
+    artifacts.root = local_path(&artifacts.root)?;
+    artifacts.module = local_path(&artifacts.module)?;
+    artifacts.hvigor_home = artifacts
+        .hvigor_home
+        .as_deref()
+        .map(local_path)
+        .transpose()?;
+    let _ = messages.try_send(format!(
+        "ROUTE_ADAPTER_PREPARED: adapted={}; routes={}; report={}",
+        artifacts.adapted,
+        artifacts.route_count,
+        artifacts.report_path.display()
+    ));
+    Ok(Some(artifacts))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VerifiedProfile {
@@ -211,6 +304,8 @@ struct WorkerContext<'a> {
     inspections: &'a mpsc::Receiver<InspectionRequest>,
     controls: &'a Mutex<ControlMailbox>,
     control_state: &'a Mutex<RuntimeControlState>,
+    artifacts: &'a Mutex<Option<BuildArtifactContext>>,
+    profile: &'a PreviewDeviceProfile,
 }
 
 pub(super) fn verified_root(root: &Path, version: &str) -> Option<PathBuf> {
@@ -275,6 +370,7 @@ pub(super) struct Runtime {
     inspections: mpsc::SyncSender<InspectionRequest>,
     controls: Arc<Mutex<ControlMailbox>>,
     control_state: Arc<Mutex<RuntimeControlState>>,
+    artifacts: Arc<Mutex<Option<BuildArtifactContext>>>,
     task: BuildTask,
     pub completed: mpsc::Receiver<Completed>,
     pub frames: Arc<Mutex<BinaryFrameMailbox>>,
@@ -282,7 +378,12 @@ pub(super) struct Runtime {
     pub failure: Arc<Mutex<Option<String>>>,
 }
 impl Runtime {
-    pub fn launch(sdk: PathBuf, project: ProjectRef, task: BuildTask) -> Self {
+    pub fn launch(
+        sdk: PathBuf,
+        project: ProjectRef,
+        task: BuildTask,
+        profile: PreviewDeviceProfile,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(Mutex::new(BinaryFrameMailbox::new()));
         let (inputs, input_receiver) = mpsc::sync_channel(16);
@@ -294,7 +395,9 @@ impl Runtime {
         let worker_stop = stop.clone();
         let worker_frames = frames.clone();
         let controls = Arc::new(Mutex::new(ControlMailbox::default()));
-        let control_state = Arc::new(Mutex::new(RuntimeControlState::default()));
+        let control_state = Arc::new(Mutex::new(RuntimeControlState::from_profile(&profile)));
+        let artifacts = Arc::new(Mutex::new(None));
+        let worker_artifacts = artifacts.clone();
         let worker_controls = controls.clone();
         let worker_control_state = control_state.clone();
         let runtime_task = task.clone();
@@ -312,6 +415,8 @@ impl Runtime {
                     inspections: &inspection_receiver,
                     controls: &worker_controls,
                     control_state: &worker_control_state,
+                    artifacts: &worker_artifacts,
+                    profile: &profile,
                 },
                 || {
                     let _ = completed_tx.try_send((task.clone(), Ok(())));
@@ -349,12 +454,19 @@ impl Runtime {
             inspections,
             controls,
             control_state,
+            artifacts,
             task: runtime_task,
             completed,
             frames,
             messages,
             failure,
         }
+    }
+    pub fn artifact_context(&self) -> Option<BuildArtifactContext> {
+        self.artifacts
+            .lock()
+            .ok()
+            .and_then(|artifacts| artifacts.clone())
     }
     pub fn click(&self, point: NativePoint) -> Result<(), String> {
         // Hold the state through enqueue. A cancellation cannot mark input
@@ -684,6 +796,8 @@ fn run(
         inspections,
         controls,
         control_state,
+        artifacts,
+        profile,
     } = context;
     if project.variant != "default"
         || project.module.is_empty()
@@ -696,6 +810,8 @@ fn run(
         return Err("UNSUPPORTED_BUILD_TARGET: 仅支持 default 产品/目标与命名 Stage 模块。".into());
     }
     let (root, module) = resolved_module(project)?;
+    let profile_args = super::configuration::profile_arguments(profile)?;
+    super::configuration::validate_project_profile(project, profile)?;
     // Fail closed before hvigor starts: a declared dependency that is not installed
     // can only produce cascading ArkTS compiler errors, never a preview.
     dependencies::preflight(&root, &module)?;
@@ -705,20 +821,33 @@ fn run(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let directory = std::env::temp_dir().join("ArkDock-native").join(&nonce);
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let owned_directory = run_directory::OwnedRunDirectory::create(&nonce)?;
+    let directory = local_path(owned_directory.path())?;
     let build_log = directory.join("build.log");
     let runtime_log = directory.join("previewer.log");
-    // Wrapper dependencies retain the existing per-workspace home. Task metadata
-    // uses a fresh app-owned parent for every build; no user-cache repair/deletion.
+    let Some(build_artifacts) =
+        prepare_route_artifacts(sdk, project, &root, &module, &directory, stop, messages)?
+    else {
+        return Ok(());
+    };
+    let root = &build_artifacts.root;
+    let module = &build_artifacts.module;
+    dependencies::preflight(root, module)?;
+    // Adapted builds use a cloned wrapper cache. All task metadata is disposable;
+    // neither that build nor cancellation writes into the original project cache.
     fs::create_dir_all(directory.join("hvigor-cache")).map_err(|e| e.to_string())?;
-    let env = build_environment(sdk, &root, &directory);
+    let mut env = build_environment(sdk, root, &directory);
+    if let Some(home) = &build_artifacts.hvigor_home {
+        if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "HVIGOR_USER_HOME") {
+            *value = home.to_string_lossy().into_owned();
+        }
+    }
     let build_args = build_arguments(sdk, &project.module, &directory)?;
     let build_started = Instant::now();
     let build = process::Process::spawn(
         &sdk.join("tool/node/node.exe"),
         &build_args,
-        &root,
+        root,
         &env,
         &build_log,
     )?;
@@ -761,6 +890,14 @@ fn run(
     {
         return Err("BUILD_ARTIFACT_MISSING: modules.abc".into());
     }
+    let compiled_profile =
+        super::configuration::compiled_page_profile_at(project, &build_artifacts)?;
+    let entry_page = compiled_profile
+        .pages
+        .first()
+        .cloned()
+        .ok_or("COMPILED_PAGE_PROFILE_EMPTY")?;
+    *artifacts.lock().map_err(|_| "BUILD_ARTIFACT_CONTEXT")? = Some(build_artifacts.clone());
     let _ = messages.try_send(format!(
         "BUILD_COMPLETED: actual PreviewBuild graph succeeded; owned watch Job closed; logs {}",
         directory.display()
@@ -779,8 +916,7 @@ fn run(
         .port();
     drop(port_listener);
     let arg = |path: PathBuf| path.to_string_lossy().into_owned();
-    let page_profile = super::configuration::page_profile_name(project)?;
-    let args = vec![
+    let mut args = vec![
         "-j".into(),
         arg(assets),
         "-arp".into(),
@@ -795,27 +931,18 @@ fn run(
         port.to_string(),
         "-sid".into(),
         nonce.clone(),
-        "-or".into(),
-        "360".into(),
-        "640".into(),
-        "-cr".into(),
-        "360".into(),
-        "640".into(),
-        "-device".into(),
-        "phone".into(),
         "-pm".into(),
         "Stage".into(),
         "-av".into(),
         "ACE_2_0".into(),
         "-url".into(),
-        "pages/Index".into(),
+        entry_page,
         "-pages".into(),
-        page_profile,
+        compiled_profile.name,
         "-n".into(),
         project.module.clone(),
-        "-sd".into(),
-        "160".into(),
     ];
+    args.extend(profile_args);
     let previewer_started = Instant::now();
     let previewer = process::Process::spawn(
         &sdk.join(PREVIEWER),
@@ -895,6 +1022,8 @@ fn run(
     let mut query_id = 0u64;
     let mut held_navigation_frame: Option<(BinaryFrame, u64)> = None;
     let mut runtime_log_reported = false;
+    let validator = frame_validation::Validator::new();
+    let mut coalesced_before_validation = 0u64;
     let outcome = (|| -> Result<(), String> {
         while !stop.load(Ordering::Acquire) {
             report_log_degradation(
@@ -974,6 +1103,46 @@ fn run(
             if !first {
                 control_worker.tick(&command, inspection.is_some(), inputs)?;
             }
+            if let Some(validated) = validator.take() {
+                let candidate = validated.candidate;
+                let current = candidate.matches(
+                    task,
+                    control_worker.frame_context(),
+                    control_worker.surface(),
+                );
+                let frame = candidate.frame;
+                // Decode completed asynchronously: never reinterpret old pixels
+                // after a configuration or route notification on the command pipe.
+                if current {
+                    validated.result?;
+                    if control_worker.frame(
+                        frame.metadata.width,
+                        frame.metadata.height,
+                        frame.metadata.sequence,
+                        &frame.payload,
+                        candidate.observing_at_receive,
+                    )? {
+                        let jpeg_bytes = frame.payload.len();
+                        frames
+                            .lock()
+                            .map_err(|_| "FRAME_MAILBOX")?
+                            .push(frame)
+                            .map_err(|error| format!("FRAME_REJECTED: {error:?}"))?;
+                        if first {
+                            first = false;
+                            let _ = messages.try_send(format!(
+                                "PREVIEW_METRICS: previewerPid={}; launchToFirstFrameMs={}; jpegBytes={jpeg_bytes}",
+                                previewer.pid, previewer_started.elapsed().as_millis()
+                            ));
+                            success();
+                        }
+                    } else if let Some(revision) = candidate.navigation_revision {
+                        if control_worker.navigation_revision() == Some(revision) {
+                            held_navigation_frame = Some((frame, revision));
+                        }
+                    }
+                }
+            }
             if let Some(revision) = held_navigation_frame
                 .as_ref()
                 .map(|(_, revision)| *revision)
@@ -987,6 +1156,7 @@ fn run(
                             frame.metadata.height,
                             frame.metadata.sequence,
                             &frame.payload,
+                            true,
                         )? {
                             frames
                                 .lock()
@@ -1018,75 +1188,89 @@ fn run(
                     }
                 }
             }
-            match socket.read() {
-                Ok(Message::Binary(data)) => {
-                    sequence += 1;
-                    let (width, height) = control_worker.surface();
-                    // During native rotation/resizing, old-dimension frames can be
-                    // queued on the socket. Discard them without relabeling pixels.
-                    if data.len() >= 40
-                        && data.len() <= FRAME_LIMIT
-                        && data[..4] == [0x12, 0x34, 0x56, 0x78]
-                        && data[12..20] == data[4..12]
-                        && data[20..40].iter().all(|byte| *byte == 0)
-                    {
-                        let actual_width =
-                            u32::from_be_bytes(data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?);
-                        let actual_height =
-                            u32::from_be_bytes(data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?);
-                        if (actual_width != width || actual_height != height)
-                            && control_worker.old_surface_packet(actual_width, actual_height)
-                        {
-                            continue;
-                        }
-                    }
-                    let frame = parse_jpeg40_for_surface(
-                        &data,
-                        task,
-                        sequence,
-                        super::now_ms(),
-                        width,
-                        height,
-                    )?;
-                    if !control_worker.frame(width, height, sequence, &frame.payload)? {
-                        if let Some(revision) = control_worker.navigation_revision() {
-                            // One bounded candidate from the already observed target
-                            // route may precede its command ACK on the other stream.
-                            // Preserve its original identity/sequence/time unchanged.
-                            held_navigation_frame = Some((frame, revision));
-                        }
-                        continue;
-                    }
-                    held_navigation_frame = None;
-                    frames
-                        .lock()
-                        .map_err(|_| "FRAME_MAILBOX")?
-                        .push(frame)
-                        .map_err(|e| format!("FRAME_REJECTED: {e:?}"))?;
-                    if first {
-                        first = false;
-                        let _ = messages.try_send(format!(
-                        "PREVIEW_METRICS: previewerPid={}; launchToFirstFrameMs={}; jpegBytes={}",
-                        previewer.pid,
-                        previewer_started.elapsed().as_millis(),
-                        data.len().saturating_sub(40)
-                    ));
-                        success();
-                    }
+            let drain_started = Instant::now();
+            let mut latest_candidate = None;
+            // Drain the transport before decoding so downstream latest mailboxes
+            // do not conceal an ever-growing queue of stale socket frames.
+            // Both limits yield promptly to command ACKs and cancellation.
+            for _ in 0..8 {
+                if drain_started.elapsed() >= Duration::from_millis(2) {
+                    break;
                 }
-                Ok(Message::Close(_)) => return Err("NATIVE_SURFACE_CLOSED".into()),
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(error))
-                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(format!("NATIVE_TRANSPORT: {error}")),
+                match socket.read() {
+                    Ok(Message::Binary(data)) => {
+                        sequence += 1;
+                        let (width, height) = control_worker.surface();
+                        // During native rotation/resizing, old-dimension frames can be
+                        // queued on the socket. Discard them without relabeling pixels.
+                        if data.len() >= 40
+                            && data.len() <= FRAME_LIMIT
+                            && data[..4] == [0x12, 0x34, 0x56, 0x78]
+                            && data[12..20] == data[4..12]
+                            && data[20..40].iter().all(|byte| *byte == 0)
+                        {
+                            let actual_width = u32::from_be_bytes(
+                                data[4..8].try_into().map_err(|_| "FRAME_WIDTH")?,
+                            );
+                            let actual_height = u32::from_be_bytes(
+                                data[8..12].try_into().map_err(|_| "FRAME_HEIGHT")?,
+                            );
+                            if (actual_width != width || actual_height != height)
+                                && control_worker.old_surface_packet(actual_width, actual_height)
+                            {
+                                continue;
+                            }
+                        }
+                        let frame = parse_jpeg40_envelope(
+                            &data,
+                            task,
+                            sequence,
+                            super::now_ms(),
+                            width,
+                            height,
+                        )?;
+                        if latest_candidate
+                            .replace(frame_validation::Candidate {
+                                frame,
+                                context: control_worker.frame_context(),
+                                navigation_revision: control_worker.navigation_revision(),
+                                observing_at_receive: control_worker.frame_observation_ready(),
+                            })
+                            .is_some()
+                        {
+                            coalesced_before_validation =
+                                coalesced_before_validation.saturating_add(1);
+                        }
+                    }
+                    Ok(Message::Close(_)) => return Err("NATIVE_SURFACE_CLOSED".into()),
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        break
+                    }
+                    Err(error) => return Err(format!("NATIVE_TRANSPORT: {error}")),
+                }
+            }
+            if let Some(candidate) = latest_candidate {
+                validator.submit(candidate);
             }
             if first && Instant::now() > deadline {
                 return Err("NATIVE_FRAME_TIMEOUT: 15s".into());
             }
-            thread::sleep(Duration::from_millis(16));
+            thread::sleep(Duration::from_millis(if control_worker.busy() {
+                1
+            } else {
+                4
+            }));
         }
         Ok(())
     })();
+    let metrics = validator.metrics();
+    let _ = messages.try_send(format!(
+        "FRAME_PIPELINE_METRICS: received={sequence}; coalescedBeforeValidation={coalesced_before_validation}; submitted={}; replaced={}; validated={}; validationTotalMicros={}; validationMaxMicros={}",
+        metrics.submitted, metrics.replaced, metrics.validated, metrics.validation_micros, metrics.max_validation_micros
+    ));
     // The process Job drops immediately after this best-effort release. Even a
     // failed pipe write cannot leave a live owned Previewer in pressed state.
     control_worker.cleanup(&command);
@@ -1130,6 +1314,88 @@ fn failure_tail(process: &process::Process) -> String {
 mod tests {
     use super::*;
     use crate::preview::frames::parse_jpeg40;
+
+    #[test]
+    #[ignore = "Runs only the embedded adapter with an explicitly supplied licensed SDK; never starts Previewer"]
+    fn real_sdk_route_adapter_runs_in_owned_job_and_returns_isolated_artifacts() {
+        let sdk_input = std::env::var("ARKDOCK_SDK").expect("Set ARKDOCK_SDK explicitly");
+        let sdk = verified_root(Path::new(&sdk_input), "26.0.0.105").expect("Pinned SDK required");
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = local_path(&temporary.path().canonicalize().unwrap()).unwrap();
+        let root = directory.join("original");
+        let module = root.join("entry");
+        let run_directory = directory.join("run");
+        fs::create_dir_all(module.join("src/main/ets/pages")).unwrap();
+        fs::create_dir_all(module.join("src/main/resources/base/profile")).unwrap();
+        fs::create_dir_all(&run_directory).unwrap();
+        fs::write(
+            root.join("build-profile.json5"),
+            r#"{"modules":[{"name":"entry","srcPath":"entry"}]}"#,
+        )
+        .unwrap();
+        fs::write(module.join("oh-package.json5"), r#"{"name":"entry"}"#).unwrap();
+        fs::write(
+            module.join("src/main/module.json5"),
+            r#"{"module":{"name":"entry","routerMap":"$profile:routes"}}"#,
+        )
+        .unwrap();
+        fs::write(module.join("src/main/resources/base/profile/routes.json"), r#"{"routerMap":[{"name":"Detail","pageSourceFile":"src/main/ets/pages/Detail.ets","buildFunction":"DetailBuilder"}]}"#).unwrap();
+        let original = "@Entry\n@Component\nstruct Index { build() { Navigation() {} } }\n";
+        fs::write(module.join("src/main/ets/pages/Index.ets"), original).unwrap();
+        fs::write(
+            module.join("src/main/ets/pages/Detail.ets"),
+            "@Builder\nexport function DetailBuilder() { NavDestination() {} }\n",
+        )
+        .unwrap();
+        let project = ProjectRef {
+            id: "owned-adapter-fixture".into(),
+            name: "Fixture".into(),
+            environment: crate::ipc::model::Environment::WindowsLocal,
+            workspace_root: root.to_string_lossy().into_owned(),
+            app_root: root.to_string_lossy().into_owned(),
+            module: "entry".into(),
+            variant: "default".into(),
+            sdk_id: None,
+        };
+        let stop = AtomicBool::new(false);
+        let (messages, _receiver) = mpsc::sync_channel(16);
+        let artifacts = prepare_route_artifacts(
+            &sdk,
+            &project,
+            &root,
+            &module,
+            &run_directory,
+            &stop,
+            &messages,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(artifacts.adapted);
+        assert_eq!(artifacts.route_count, 1);
+        assert!(artifacts.root.starts_with(&run_directory));
+        assert_eq!(
+            fs::read_to_string(module.join("src/main/ets/pages/Index.ets")).unwrap(),
+            original
+        );
+        assert!(
+            fs::read_to_string(artifacts.module.join("src/main/ets/pages/Index.ets"))
+                .unwrap()
+                .contains(".navDestination(ArkDockPreviewRoutes_")
+        );
+        stop.store(true, Ordering::Release);
+        assert!(prepare_route_artifacts(
+            &sdk,
+            &project,
+            &root,
+            &module,
+            &run_directory,
+            &stop,
+            &messages
+        )
+        .unwrap()
+        .is_none());
+    }
+
     #[test]
     fn each_build_has_private_structured_cache_environment_without_project_cache_repair() {
         let sdk = Path::new("C:/SDK space & literal");

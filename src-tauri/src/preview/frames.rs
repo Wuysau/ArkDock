@@ -110,6 +110,29 @@ pub fn parse_jpeg40_for_surface(
     expected_width: u32,
     expected_height: u32,
 ) -> Result<BinaryFrame, String> {
+    let frame = parse_jpeg40_envelope(
+        data,
+        task,
+        sequence,
+        captured_at,
+        expected_width,
+        expected_height,
+    )?;
+    validate_jpeg_pixels(&frame)?;
+    Ok(frame)
+}
+
+/// Cheap bounded envelope validation on the socket owner. Only the validator's
+/// successful result may enter the public frame mailbox.
+#[cfg(windows)]
+pub(crate) fn parse_jpeg40_envelope(
+    data: &[u8],
+    task: &BuildTask,
+    sequence: u64,
+    captured_at: u64,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<BinaryFrame, String> {
     if data.len() < JPEG40_HEADER_BYTES + 4
         || data.len() > MAX_JPEG40_PACKET_BYTES
         || data[..4] != [0x12, 0x34, 0x56, 0x78]
@@ -147,8 +170,12 @@ pub fn parse_jpeg40_for_surface(
         payload: payload.to_vec(),
     };
     validate_binary_frame_envelope(&frame).map_err(|error| format!("FRAME_PAYLOAD: {error:?}"))?;
-    decode_jpeg(&frame)?;
     Ok(frame)
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_jpeg_pixels(frame: &BinaryFrame) -> Result<(), String> {
+    decode_jpeg(frame).map(|_| ())
 }
 
 #[cfg(windows)]

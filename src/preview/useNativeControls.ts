@@ -7,6 +7,7 @@ import type { FrameStore } from '../frame-store.ts';
 import type { PreviewFrame } from './frame-types.ts';
 import { deriveUiState } from '../view-state.ts';
 import { controlRequest, NativeInputController } from './NativeInputController.ts';
+import { ControlReceiptInbox } from './ControlReceiptInbox.ts';
 
 export const identityEqual = (left: NativeControlIdentity | null | undefined, right: NativeControlIdentity | null | undefined): boolean => Boolean(left && right
   && left.workspaceId === right.workspaceId && left.sessionId === right.sessionId && left.buildId === right.buildId
@@ -39,6 +40,8 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   const draining = useRef(false);
   const active = useRef(true);
   const wakeRef = useRef(wake); wakeRef.current = wake;
+  const [receipts] = useState(() => new ControlReceiptInbox(bridge.observeControlReceipts));
+  useEffect(() => { void receipts.connect(); return () => receipts.disconnect(); }, [receipts]);
   const scope = (): RequestScope => ({ targetId: context.current.snapshot?.target?.id ?? null, sessionId: context.current.snapshot?.sessionId ?? null });
   const currentState = (value: NativeControlState) => {
     const actual = context.current.snapshot;
@@ -53,14 +56,19 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   const awaitOperation = useCallback(async (receipt: NativeControlReceipt, requestScope: RequestScope, commandOnly: boolean, inputReady = false): Promise<NativeControlReceipt> => {
     if (!bridge.transfer) throw new Error('缺少原生控制桥接。');
     const deadline = performance.now() + 20_000;
-    let latest = receipt;
-    // The submit response is only Queued. Operation IDs are polled without
-    // committing every touch ACK to React application state.
+    let latest = receipts.latest(receipt);
+    // Pushed operation receipts settle input without a React update or a polling
+    // interval. A missed event/older backend falls back to a scoped state read.
     while (performance.now() < deadline) {
+      if (!sameRuntime(receipt.identity)) throw new Error('原生会话或构建已变化，旧操作不再继续。');
       if (['failed', 'timedOut', 'blocked'].includes(latest.phase)) throw new Error(latest.reason);
       const terminal = latest.phase === 'cancelled' || latest.phase === 'observed'
         || commandOnly && latest.commandAccepted && latest.phase === 'commandAccepted';
       if (terminal && !inputReady) return latest;
+      if (!terminal) {
+        const pushed = await receipts.wait(latest, receipts.connected ? 200 : 16);
+        if (pushed) { latest = pushed; continue; }
+      }
       const value = await bridge.transfer('preview_control_state', {}, requestScope);
       const operation = value.operations.find((item) => item.operationId === receipt.operationId);
       if (operation) latest = operation;
@@ -69,10 +77,11 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
         || commandOnly && latest.commandAccepted && latest.phase === 'commandAccepted';
       if (finished && (!inputReady || value.inputReady)) return latest;
       if (!sameRuntime(receipt.identity)) throw new Error('原生会话或构建已变化，旧操作不再继续。');
-      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      // A terminal cancellation can precede the runtime's ready transition.
+      if (finished) await new Promise<void>((resolve) => setTimeout(resolve, 16));
     }
     throw new Error('等待原生操作确认超时；命令接受与画面完成仍未得到确认。');
-  }, [bridge, sameRuntime]);
+  }, [bridge, sameRuntime, receipts]);
   const operationRef = useRef(awaitOperation); operationRef.current = awaitOperation;
   const accept = (value: NativeControlState) => {
     if (!active.current || !currentState(value)) return;
@@ -81,6 +90,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   };
   const [input] = useState(() => new NativeInputController(async (request, requestScope) => {
     if (!bridge.transfer) throw new Error('缺少原生控制桥接。');
+    await receipts.connect();
     wakeRef.current();
     const queued = await bridge.transfer('preview_control_submit', { request }, requestScope);
     return operationRef.current(queued, requestScope, true);
@@ -93,6 +103,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
   useEffect(() => { active.current = true; return () => { active.current = false; void input.cancel(); }; }, [input]);
   const runtimeKey = JSON.stringify([snapshot?.target?.id, snapshot?.project?.id, snapshot?.sessionId, snapshot?.build.buildId, snapshot?.build.generation]);
   useEffect(() => {
+    receipts.clear();
     setState(null); setError(null); inputSerial.current++; inputQueue.current = []; void input.cancel();
     const actual = context.current.snapshot;
     if (!bridge.transfer || !actual?.target || !actual.sessionId || !actual.project) return;
@@ -108,7 +119,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     }
     void read();
     return () => { live = false; clearTimeout(timer); };
-  }, [bridge, runtimeKey, input]);
+  }, [bridge, runtimeKey, input, receipts]);
   useEffect(() => {
     const cancelLocalInput = (all: boolean) => {
       inputSerial.current++; inputQueue.current = [];
@@ -157,6 +168,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     occupied.current = true; inputSerial.current++; inputQueue.current = []; setPending(fields.action); setError(null);
     const requestScope = scope();
     try {
+      await receipts.connect();
       await input.cancel(); wakeRef.current();
       const cancelled = await bridge.transfer('preview_control_cancel', { identity }, requestScope);
       await awaitOperation(cancelled, requestScope, false, true);
@@ -217,6 +229,7 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     void (async () => {
       let serial = inputSerial.current;
       try {
+        await receipts.connect();
         while (inputQueue.current.length && active.current) {
           const next = inputQueue.current.shift()!;
           serial = next.serial;
@@ -257,7 +270,9 @@ export function useNativeControls({ bridge, snapshot, store, visible, windowVisi
     if (chunks.length + inputQueue.current.length > 32) { fail('文字输入超出有界队列；本次提交未派发。'); return; }
     for (const chunk of chunks) enqueueInput({ action: 'textCommit', text: chunk }, 'text');
   }
-  return { state, error, pending, input, submit, enable, cancel, cancelInput,
+  const getPerformanceMetrics = useCallback(() => ({ receiptDurationMs: input.receiptDurationMs,
+    dispatched: input.metrics.dispatched, coalescedMoves: input.metrics.coalescedMoves }), [input]);
+  return { state, error, pending, input, submit, enable, cancel, cancelInput, getPerformanceMetrics,
     start: (frame: PreviewFrame, x: number, y: number) => {
       if (draining.current || inputQueue.current.length) { fail('等待文字或按键提交完成后再点击；本次点击未提交。'); return false; }
       const value = binding(frame, 'touch');

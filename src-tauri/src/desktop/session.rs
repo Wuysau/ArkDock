@@ -54,6 +54,19 @@ fn execution_gate(trusted: bool, available: bool, reason: &str) -> ExecutionGate
     }
 }
 
+fn update_device_association(
+    device: &mut crate::preview::device_runtime::DeviceRuntimeAdapter,
+    previous: Option<&ProjectRef>,
+    next: Option<&ProjectRef>,
+    trusted: bool,
+) {
+    if !trusted || next.is_none() || previous != next {
+        // Reset project identity and published state along with cancellation;
+        // cancel() alone leaves the manager's previous ProjectRef cached.
+        device.state(None);
+    }
+}
+
 impl Engine {
     /// Releases every resource owned by the current session. See the module comment for
     /// why the order is fixed. Session identity is left to the caller, because "stopped"
@@ -64,7 +77,6 @@ impl Engine {
         // 2. Native controls belong to the surface that is about to disappear.
         self.backend.cancel_controls();
         self.controls.reset();
-        self.device_runtime.cancel();
         // 3. A pending Inspector query must not report into a replaced session.
         self.inspection_tree = None;
         self.inspection_anchor = None;
@@ -104,9 +116,24 @@ impl Engine {
 
     /// Ends both the session and the workspace association.
     pub(super) fn close_session(&mut self) {
+        self.replace_preview_association(None);
+    }
+
+    /// Reset Previewer/session state. A trusted same-project replacement keeps
+    /// the independent device worker, selected target and installed application.
+    pub(super) fn replace_preview_association(&mut self, next: Option<&ProjectRef>) {
+        update_device_association(
+            &mut self.device_runtime,
+            self.snapshot.project.as_ref(),
+            next,
+            self.snapshot.trusted,
+        );
         self.suspend_execution();
         self.snapshot.project = None;
         self.associated_manually = false;
+        self.context_binding = None;
+        self.context_confirmation_required = false;
+        self.directory_candidates.clear();
     }
 
     /// Re-evaluates trust and toolchain availability before any build can start.
@@ -124,6 +151,11 @@ impl Engine {
             self.snapshot.backend.available,
             &reason,
         );
+        if !decision.trusted {
+            // Revocation is immediate for both independent backends. A mere
+            // Previewer stop/SDK limitation must not cancel a device run.
+            self.device_runtime.state(None);
+        }
         if decision.teardown {
             self.suspend_execution();
         }
@@ -136,6 +168,42 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::scheduler::FrameReject;
+
+    #[test]
+    fn same_project_preview_reopen_retains_device_run_but_detach_or_revoke_resets_it() {
+        use crate::preview::device_runtime::DeviceRuntimeAdapter;
+        let project = ProjectRef {
+            id: "workspace".into(),
+            name: "fixture".into(),
+            environment: Environment::WindowsLocal,
+            workspace_root: "fixture".into(),
+            app_root: "fixture".into(),
+            module: "entry".into(),
+            variant: "default".into(),
+            sdk_id: Some("sdk".into()),
+        };
+        let mut device = DeviceRuntimeAdapter::new(None);
+        let original = device.state(Some(project.clone())).identity.unwrap();
+        update_device_association(&mut device, Some(&project), Some(&project), true);
+        assert_eq!(
+            device.state(Some(project.clone())).identity.as_ref(),
+            Some(&original)
+        );
+        update_device_association(&mut device, Some(&project), None, true);
+        assert!(device.snapshot().identity.is_none());
+        let replacement = device.state(Some(project.clone())).identity.unwrap();
+        assert_ne!(
+            replacement.run_id, original.run_id,
+            "reconnecting same project cannot revive a cancelled run"
+        );
+        update_device_association(&mut device, Some(&project), Some(&project), false);
+        assert!(device.snapshot().identity.is_none());
+        device.state(Some(project.clone()));
+        let mut changed = project.clone();
+        changed.sdk_id = Some("other-sdk".into());
+        update_device_association(&mut device, Some(&project), Some(&changed), true);
+        assert!(device.snapshot().identity.is_none());
+    }
 
     #[test]
     fn an_untrusted_gate_closes_execution_before_entering_untrusted() {

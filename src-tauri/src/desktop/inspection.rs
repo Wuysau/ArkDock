@@ -8,7 +8,8 @@ pub(super) enum DataAction {
     ControlSubmit(NativeControlRequest),
     ControlCancel(NativeControlIdentity),
     DeviceState,
-    DeviceAction(DeviceRuntimeRequest),
+    DeviceAction(Box<DeviceRuntimeRequest>),
+    DeviceFrame(DeviceRunIdentity, u64),
     InspectorTree(BinaryFrameMetadata),
     SelectionCreate(SelectionDraft),
     SelectionGet(String),
@@ -32,6 +33,23 @@ pub(super) enum DataResult {
     Json(serde_json::Value),
     Bytes(Vec<u8>),
 }
+
+fn validate_action_scope(
+    snapshot: &AppSnapshot,
+    scope: &RequestScope,
+    action: &DataAction,
+) -> Result<(), String> {
+    match action {
+        DataAction::DeviceState => crate::ipc::validate_device_scope(snapshot, scope, None),
+        DataAction::DeviceAction(request) => {
+            crate::ipc::validate_device_scope(snapshot, scope, Some(&request.identity))
+        }
+        DataAction::DeviceFrame(identity, _) => {
+            crate::ipc::validate_device_scope(snapshot, scope, Some(identity))
+        }
+        _ => validate_scope(snapshot, scope),
+    }
+}
 pub(super) fn json_result<T: serde::Serialize>(value: T) -> Result<DataResult, String> {
     serde_json::to_value(value)
         .map(DataResult::Json)
@@ -49,6 +67,9 @@ pub(super) struct PendingInspection {
 impl Engine {
     pub(super) fn validate_data_scope(&self, scope: &RequestScope) -> Result<(), String> {
         validate_scope(&self.snapshot, scope)?;
+        self.validate_data_trust()
+    }
+    fn validate_data_trust(&self) -> Result<(), String> {
         self.current_target()?;
         let project = self.snapshot.project.as_ref().ok_or("PROJECT_REQUIRED")?;
         if !self.snapshot.trusted
@@ -91,7 +112,31 @@ impl Engine {
     ) {
         self.drain_events();
         let result = (|| {
-            self.validate_data_scope(&scope)?;
+            validate_action_scope(&self.snapshot, &scope, &action)?;
+            if matches!(
+                &action,
+                DataAction::ControlState
+                    | DataAction::ControlSubmit(_)
+                    | DataAction::ControlCancel(_)
+                    | DataAction::DeviceFrame(_, _)
+            ) {
+                // Runtime input operates on the already admitted running epoch.
+                // Source notifications and the periodic audit revoke it; builds,
+                // deployment, files and Agent operations still re-read trust.
+                self.current_target()?;
+                if !self.snapshot.trusted || self.snapshot.project.is_none() {
+                    return Err("TRUST_REQUIRED".into());
+                }
+            } else if matches!(
+                &action,
+                DataAction::DeviceState | DataAction::DeviceAction(_)
+            ) {
+                // Device scope is independent of Previewer, but device commands
+                // retain the full project-trust recheck before side effects.
+                self.validate_data_trust()?;
+            } else {
+                self.validate_data_scope(&scope)?;
+            }
             if matches!(
                 &action,
                 DataAction::AssistedInspect | DataAction::AssistedFill(_, _)
@@ -142,7 +187,11 @@ impl Engine {
                     json_result(self.cancel_control(identity, false)?)
                 }
                 DataAction::DeviceState => json_result(self.device_state()),
-                DataAction::DeviceAction(request) => json_result(self.device_action(request)?),
+                DataAction::DeviceAction(request) => json_result(self.device_action(*request)?),
+                DataAction::DeviceFrame(identity, after) => self
+                    .device_runtime
+                    .read_frame(&identity, after)
+                    .map(DataResult::Bytes),
                 DataAction::InspectorCapabilities => {
                     json_result(crate::inspector::capabilities(&self.snapshot.backend))
                 }
@@ -317,7 +366,19 @@ impl Engine {
             if latest.payload != pending.anchor.payload {
                 return Err("INSPECTOR_IMAGE_CHANGED: 画面变化后须刷新组件树".into());
             }
-            let tree = crate::inspector::parse_tree(&response?, &pending.frame)?;
+            self.validate_display_frame(&pending.frame)?;
+            let mut tree = crate::inspector::parse_tree(&response?, &pending.frame)?;
+            if let (Some(project), Some(artifacts)) = (
+                self.snapshot.project.as_ref(),
+                self.backend.artifact_context(),
+            ) {
+                if let Err(error) = crate::preview::route_adapter::remap_inspector_sources(
+                    project, &artifacts, &mut tree,
+                ) {
+                    tree.reason
+                        .push_str(&format!(" 源码位置暂不可用：{error}；组件几何信息仍保留。"));
+                }
+            }
             self.inspection_tree = Some(tree.clone());
             self.inspection_anchor = Some(pending.anchor);
             json_result(tree)
@@ -333,7 +394,7 @@ pub(super) async fn data_request(
     action: DataAction,
 ) -> Result<DataResult, IpcError> {
     check_window(&window)?;
-    validate_scope(&service.snapshot()?, &scope)?;
+    validate_action_scope(&service.snapshot()?, &scope, &action)?;
     let sender = service.sender.clone();
     let permit = match &action {
         DataAction::PairCreate(_, _, permit) => Some(permit.clone()),

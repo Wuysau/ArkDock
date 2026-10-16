@@ -115,7 +115,8 @@
     "PreviewColorMode": ["light", "dark"],
     "PreviewKey": ["enter", "backspace", "delete", "tab", "escape", "arrowUp", "arrowDown", "arrowLeft", "arrowRight", "home", "end"],
     "DeviceRuntimeKind": ["unknown", "emulator", "physicalDevice"],
-    "DeviceRuntimeAction": ["discover", "select", "deploy", "start", "stop", "capture", "disconnect", "cancel"],
+    "DeviceRuntimeAction": ["discover", "select", "build", "deploy", "start", "stop", "capture", "streamStart", "streamStop", "input", "emulatorList", "emulatorStart", "emulatorStop", "disconnect", "cancel"],
+    "DeviceInputKind": ["click", "doubleClick", "longClick", "swipe", "drag", "text", "key"],
     "DeliveryMode": [
       "native",
       "assisted",
@@ -451,10 +452,23 @@
       "id": "string", "label": "string", "kind": "DeviceRuntimeKind", "connectionState": "string", "reason": "string"
     },
     "DeviceRuntimeState": {
-      "identity": "NativeControlIdentity?", "kind": "DeviceRuntimeKind", "hdcPath": "string?", "toolSha256": "string?", "hdcPresent": "bool", "targets": "DeviceRuntimeTarget[]", "selectedTargetId": "string?", "phase": "string", "deploymentReady": "bool", "signatureStatus": "string", "foregroundVerified": "bool", "frameReady": "bool", "reason": "string"
+      "identity": "DeviceRunIdentity?", "kind": "DeviceRuntimeKind", "hdcPath": "string?", "toolSha256": "string?", "hdcPresent": "bool", "targets": "DeviceRuntimeTarget[]", "selectedTargetId": "string?", "phase": "string", "deploymentReady": "bool", "signatureStatus": "string", "foregroundVerified": "bool", "frameReady": "bool", "reason": "string",
+      "busy": "bool", "operationId": "u64", "bundleName": "string?", "moduleName": "string?", "abilityName": "string?", "artifactSha256": "string?", "deploymentToken": "string?", "frame": "DeviceFrameMetadata?", "streaming": "bool", "emulators": "DeviceEmulator[]", "selectedEmulator": "string?"
+    },
+    "DeviceRunIdentity": {
+      "runId": "string", "workspaceId": "string", "targetId": "string?", "generation": "u64"
+    },
+    "DeviceFrameMetadata": {
+      "runId": "string", "targetId": "string", "bundleName": "string", "sequence": "u64", "width": "u32", "height": "u32", "captureStartedAt": "u64", "receivedAt": "u64", "payloadLength": "u32", "foregroundVerified": "bool"
+    },
+    "DeviceEmulator": {
+      "name": "string", "running": "bool", "owned": "bool", "hdcTarget": "string?", "reason": "string"
+    },
+    "DeviceInputRequest": {
+      "kind": "DeviceInputKind", "frameSequence": "u64", "x": "u32?", "y": "u32?", "endX": "u32?", "endY": "u32?", "velocity": "u32?", "text": "string?", "keyCode": "u32?"
     },
     "DeviceRuntimeRequest": {
-      "identity": "NativeControlIdentity", "action": "DeviceRuntimeAction", "targetId": "string?", "kind": "DeviceRuntimeKind", "connectionConsent": "bool", "deploymentConsent": "bool"
+      "identity": "DeviceRunIdentity", "action": "DeviceRuntimeAction", "targetId": "string?", "kind": "DeviceRuntimeKind", "connectionConsent": "bool", "deploymentConsent": "bool", "captureConsent": "bool", "inputConsent": "bool", "deploymentToken": "string?", "input": "DeviceInputRequest?", "emulatorName": "string?"
     },
     "MotionMetrics": {
       "frames": "u64",
@@ -590,7 +604,31 @@
       "pairLayout": "PairLayoutStatus?",
       "display": "DisplayStatus",
       "motion": "MotionSettings",
-      "dockConfirmation": "DockConfirmation?"
+      "dockConfirmation": "DockConfirmation?",
+      "contextSource": "ContextSourceStatus?"
+    },
+    "ContextPairing": {
+      "pipeName": "string",
+      "pairingFile": "string"
+    },
+    "ContextSourceStatus": {
+      "paired": "bool",
+      "activeSessions": "u32",
+      "lastEventAt": "u64",
+      "reason": "string?",
+      "registrations": "ContextRegistration[]",
+      "boundRegistrationId": "string?"
+    },
+    "ContextRegistration": {
+      "id": "string",
+      "session": "string",
+      "hostSession": "string?",
+      "agent": "string?",
+      "originalProject": "string?",
+      "executionDirectory": "string?",
+      "suggestedDirectory": "string?",
+      "hintSource": "string?",
+      "environment": "Environment"
     },
     "NativeFrame": {
       "sessionId": "string",
@@ -821,6 +859,9 @@
     }
   },
   "commandResponses": {
+    "context_select_project": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
+    "context_pair_create": { "rust": "ContextPairing", "typescript": "ContextPairing", "error": "IpcError" },
+    "context_pair_revoke": { "rust": "bool", "typescript": "boolean", "error": "IpcError" },
     "snapshot": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "collapse_to_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
     "expand_from_orb": { "rust": "AppSnapshot", "typescript": "AppSnapshot", "error": "IpcError" },
@@ -851,6 +892,7 @@
     "preview_control_cancel": { "rust": "NativeControlReceipt", "typescript": "NativeControlReceipt", "error": "IpcError" },
     "device_runtime_state": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "IpcError" },
     "device_runtime_action": { "rust": "DeviceRuntimeState", "typescript": "DeviceRuntimeState", "error": "IpcError" },
+    "read_device_frame": { "rust": "tauri::ipc::Response", "typescript": "ArrayBuffer", "error": "IpcError" },
     "get_motion_metrics": {
       "rust": "MotionMetrics",
       "typescript": "MotionMetrics",
@@ -968,12 +1010,16 @@
     }
   },
   "commands": {
+    "context_select_project": { "scope": "RequestScope", "registrationId": "string" },
+    "context_pair_create": {},
+    "context_pair_revoke": {},
     "preview_control_state": { "scope": "RequestScope" },
     "preview_control_enable": { "scope": "RequestScope", "enabled": "bool" },
     "preview_control_submit": { "scope": "RequestScope", "request": "NativeControlRequest" },
     "preview_control_cancel": { "scope": "RequestScope", "identity": "NativeControlIdentity" },
     "device_runtime_state": { "scope": "RequestScope" },
     "device_runtime_action": { "scope": "RequestScope", "request": "DeviceRuntimeRequest" },
+    "read_device_frame": { "scope": "RequestScope", "identity": "DeviceRunIdentity", "afterSequence": "u64" },
     "get_motion_metrics": {
       "scope": "RequestScope"
     },

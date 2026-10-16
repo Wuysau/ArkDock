@@ -60,10 +60,15 @@ impl FrameDelivery {
         self.latest = Some(frame);
     }
     pub(super) fn clear(&mut self) {
-        self.latest = None;
+        self.clear_pixels();
         self.binary_enabled = false;
         self.binary_session = None;
         self.consumer_id = None;
+    }
+    /// A profile restart replaces pixels/build identity within the same session.
+    /// Its existing frontend lease stays acknowledged until session teardown.
+    pub(super) fn clear_pixels(&mut self) {
+        self.latest = None;
         self.retained.clear();
     }
     pub(super) fn disable(&mut self, consumer_id: &str) -> Result<(), String> {
@@ -146,6 +151,71 @@ mod tests {
         delivery.disable("new").unwrap();
         assert!(!delivery.binary_enabled);
         assert!(delivery.enable(1, "session", "").is_err());
+    }
+
+    #[test]
+    fn profile_restart_releases_old_pixels_but_preserves_same_session_binary_lease() {
+        let mut state = initial(crate::preview::probe(None));
+        state.session_id = Some("session".into());
+        state.trusted = true;
+        state.phase = Phase::Building;
+        state.project = Some(ProjectRef {
+            id: "workspace".into(),
+            name: "fixture".into(),
+            environment: Environment::WindowsLocal,
+            workspace_root: "fixture".into(),
+            app_root: "fixture".into(),
+            module: "entry".into(),
+            variant: "default".into(),
+            sdk_id: None,
+        });
+        let mut frame = BinaryFrame {
+            metadata: BinaryFrameMetadata {
+                protocol_version: 1,
+                workspace_id: "workspace".into(),
+                session_id: "session".into(),
+                build_id: "old-build".into(),
+                generation: 1,
+                sequence: 1,
+                width: 360,
+                height: 640,
+                captured_at: 1,
+                rotation: 0,
+                format: NativeFrameFormat::Jpeg,
+                payload_length: 4,
+            },
+            payload: vec![0xff, 0xd8, 0xff, 0xd9],
+        };
+        let mut delivery = FrameDelivery::default();
+        delivery.enable(1, "session", "consumer").unwrap();
+        delivery.push(frame.clone());
+        delivery.clear_pixels();
+        assert!(delivery.retained().is_empty());
+        assert!(!delivery.wants_legacy_delivery("session"));
+        assert!(delivery
+            .take_current(&state, "consumer")
+            .unwrap()
+            .is_empty());
+        state.phase = Phase::Running;
+        state.build.build_id = Some("profile-build".into());
+        state.build.generation = 2;
+        state.build.displayed_generation = Some(2);
+        frame.metadata.build_id = "profile-build".into();
+        frame.metadata.generation = 2;
+        frame.metadata.width = 800;
+        frame.metadata.height = 1280;
+        delivery.push(frame);
+        let packet = delivery.take_current(&state, "consumer").unwrap();
+        let length = u32::from_le_bytes(packet[..4].try_into().unwrap()) as usize;
+        let metadata: BinaryFrameMetadata = serde_json::from_slice(&packet[4..4 + length]).unwrap();
+        assert_eq!(metadata.build_id, "profile-build");
+        assert_eq!((metadata.width, metadata.height), (800, 1280));
+        state.session_id = Some("replacement".into());
+        assert_eq!(
+            delivery.take_current(&state, "consumer").unwrap_err(),
+            "STALE_SESSION"
+        );
+        assert!(!delivery.binary_enabled);
     }
 
     #[test]

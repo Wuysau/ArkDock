@@ -71,15 +71,53 @@ function harness(bridge) {
   return { controller, store, timers, update: (next) => { current = next; store.sync(next); controller.update(next); }, fire: async () => { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); await tick(); return timer.delay; } };
 }
 
-test('启用回执之前不读取也不接收兼容帧；空轮询自适应且不超过 30Hz', async () => {
+test('启用回执之前不读取也不接收兼容帧；兼容轮询为 60Hz，交互立即唤醒', async () => {
   const ack = deferred(); let reads = 0;
   const h = harness({ request: (command) => command === 'enable_binary_preview_frames' ? ack.promise : Promise.resolve(state()), readFrame: async () => { reads++; return new ArrayBuffer(0); } });
   h.update(state()); h.controller.acceptLegacy(legacy()); assert.equal(h.store.getSnapshot(), null); assert.equal(reads, 0); assert.equal(h.timers.size, 0);
   ack.resolve(state()); await tick(); assert.equal(h.controller.getMode(), 'binary');
   const delays = []; for (let i = 0; i < 8; i++) delays.push(await h.fire());
-  assert.equal(reads, 8); assert.ok(delays.every((delay) => delay >= 1000 / 30 && delay <= 250)); assert.equal(delays.at(-1), 250);
+  assert.equal(reads, 8); assert.ok(delays.every((delay) => delay === 1000 / 60));
+  h.controller.wake(); assert.equal(await h.fire(), 0);
   h.controller.setVisible(false); assert.equal(h.timers.size, 0); h.controller.setVisible(true); assert.equal(h.timers.size, 1);
   h.controller.dispose(); assert.equal(h.timers.size, 0);
+});
+
+test('帧就绪通知合并，读取期间只保留一次补读；旧构建通知无效且清理监听器', async () => {
+  let ready, off = 0, reads = 0;
+  const first = deferred();
+  const h = harness({ request: async () => state(), observeFrameReady: async (listener) => { ready = listener; return () => off++; },
+    readFrame: async () => { reads++; return reads === 1 ? first.promise : new ArrayBuffer(0); } });
+  h.update(state()); await tick();
+  ready({ sessionId: 's', buildId: 'old', generation: 1, sequence: 1 });
+  assert.equal([...h.timers.values()][0].delay, 1000 / 60);
+  ready({ sessionId: 's', buildId: 'b', generation: 1, sequence: 1 });
+  assert.equal(await h.fire(), 0); assert.equal(reads, 1);
+  for (let sequence = 2; sequence <= 100; sequence++) ready({ sessionId: 's', buildId: 'b', generation: 1, sequence });
+  assert.equal(reads, 1); assert.equal(h.timers.size, 0);
+  first.resolve(packet()); await tick(); assert.equal(h.timers.size, 1);
+  assert.equal(await h.fire(), 0); assert.equal(reads, 2);
+  assert.equal(h.timers.size, 1); assert.equal([...h.timers.values()][0].delay, 1000 / 60);
+  h.update({ ...state(), revision: 2, build: { ...state().build, buildId: 'new', generation: 2 } });
+  ready({ sessionId: 's', buildId: 'new', generation: 2, sequence: 1 });
+  assert.equal([...h.timers.values()][0].delay, 0, 'same-session new build resets notification sequence');
+  h.controller.dispose(); assert.equal(off, 1); assert.equal(h.timers.size, 0);
+});
+
+test('迟到帧事件订阅在控制器销毁后清理，不恢复拉取', async () => {
+  const subscribed = deferred(); let off = 0;
+  const h = harness({ request: async () => state(), readFrame: async () => packet(), observeFrameReady: () => subscribed.promise });
+  h.controller.dispose(); subscribed.resolve(() => off++); await tick();
+  assert.equal(off, 1); assert.equal(h.timers.size, 0);
+});
+
+test('IPC 延迟样本保留最近 120 次，不随空闲轮询增长', async () => {
+  const h = harness({ request: async () => state(), readFrame: async () => new ArrayBuffer(0) });
+  h.update(state()); await tick();
+  for (let i = 0; i < 150; i++) await h.fire();
+  assert.equal(h.controller.readDurationMs.length, 120);
+  assert.ok(h.controller.readDurationMs.every((value) => value >= 0));
+  h.controller.dispose();
 });
 
 test('兼容路径仅在明确不支持协商后启用，一般错误保留 BLOCKED', async () => {

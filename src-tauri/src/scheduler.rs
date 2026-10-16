@@ -455,6 +455,25 @@ pub fn is_source_path(root: &Path, path: &Path) -> bool {
             return false;
         }
     }
+    // Windows also reports parent-directory metadata changes for generated files.
+    // Source file events carry the content change; existing directories alone do
+    // not. A removed directory remains relevant because it no longer is_dir().
+    if path.is_dir() {
+        return false;
+    }
+    // Hvigor rewrites this file on every build, outside the build directories.
+    // Only exclude the generated module-root location: a user-authored file with
+    // the same name under src/ must still trigger a preview refresh.
+    if path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("BuildProfile.ets"))
+        && path.parent().is_some_and(|module| {
+            module.join("build-profile.json5").is_file()
+                && module.join("oh-package.json5").is_file()
+        })
+    {
+        return false;
+    }
     true
 }
 
@@ -700,6 +719,42 @@ mod tests {
             assert!(!is_source_path(root, &root.join(path)), "{path}");
         }
         assert!(!is_source_path(root, Path::new("/other/Index.ets")));
+    }
+
+    #[test]
+    fn watcher_excludes_generated_module_profiles_but_keeps_source_and_configuration_changes() {
+        let root = tempfile::tempdir().unwrap();
+        for module in ["entry", "features/home", "commons/utils"] {
+            let directory = root.path().join(module);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("build-profile.json5"), "{}").unwrap();
+            std::fs::write(directory.join("oh-package.json5"), "{}").unwrap();
+            assert!(!is_source_path(root.path(), &directory));
+            assert!(!is_source_path(
+                root.path(),
+                &directory.join("BuildProfile.ets")
+            ));
+            for source in [
+                "src/main/ets/BuildProfile.ets",
+                "src/main/ets/Index.ets",
+                "build-profile.json5",
+                "hvigorfile.ts",
+            ] {
+                assert!(
+                    is_source_path(root.path(), &directory.join(source)),
+                    "{module}/{source}"
+                );
+            }
+        }
+        // The reserved name alone cannot hide an ordinary file outside a module.
+        assert!(is_source_path(
+            root.path(),
+            &root.path().join("custom/BuildProfile.ets")
+        ));
+        assert!(is_source_path(
+            root.path(),
+            &root.path().join("removed-source-directory")
+        ));
     }
 
     #[test]
