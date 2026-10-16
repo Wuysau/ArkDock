@@ -12,7 +12,7 @@ const variant = (name) => name.toUpperCase() === name
 function type(value, rust) {
   if (value.endsWith('?')) return rust ? `Option<${type(value.slice(0, -1), true)}>` : `${type(value.slice(0, -1), false)} | null`;
   if (value.endsWith('[]')) return rust ? `Vec<${type(value.slice(0, -2), true)}>` : `Array<${type(value.slice(0, -2), false)}>`;
-  return ({ string: rust ? 'String' : 'string', bool: rust ? 'bool' : 'boolean', u32: rust ? 'u32' : 'number', u64: rust ? 'u64' : 'number', f64: rust ? 'f64' : 'number' })[value] ?? value;
+  return ({ string: rust ? 'String' : 'string', bool: rust ? 'bool' : 'boolean', u8: rust ? 'u8' : 'number', u32: rust ? 'u32' : 'number', u64: rust ? 'u64' : 'number', f64: rust ? 'f64' : 'number' })[value] ?? value;
 }
 function supportsEq(name, seen = new Set()) {
   const base = name.replace(/\?|\[\]/g, '');

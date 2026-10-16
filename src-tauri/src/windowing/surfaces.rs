@@ -1,6 +1,7 @@
 //! Small Win32 recovery surfaces. Both HWNDs belong to the existing window actor.
 use super::display::orb_edge;
 use super::geometry::Rect;
+use super::ORB_MIN_OPACITY;
 use crate::ipc::model::{DockSide, MotionIntensity, MotionSettings};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -269,6 +270,7 @@ pub(super) struct Surfaces {
     fixed: Option<DockSide>,
     drag: Option<Drag>,
     auto_hide: bool,
+    opacity: u8,
     tucked: bool,
     last_interaction: Instant,
     bitmap: Option<OrbBitmap>,
@@ -320,6 +322,7 @@ impl Surfaces {
             fixed: None,
             drag: None,
             auto_hide: false,
+            opacity: 100,
             tucked: false,
             last_interaction: Instant::now(),
             bitmap: None,
@@ -525,6 +528,23 @@ impl Surfaces {
         self.auto_hide = enabled;
         if !enabled {
             self.reveal()?;
+        }
+        Ok(())
+    }
+
+    /// Percent form, `20..=100`. A visible idle Orb redraws at once; an in-flight
+    /// animation keeps its envelope and picks the new multiplier up on the next frame.
+    pub fn set_opacity(&mut self, opacity: u8) -> Result<(), String> {
+        if !(ORB_MIN_OPACITY..=100).contains(&opacity) {
+            return Err(format!(
+                "Orb opacity must stay between {ORB_MIN_OPACITY} and 100 percent"
+            ));
+        }
+        self.opacity = opacity;
+        if self.orb_visible() && self.animation.is_none() {
+            if let Some(bounds) = self.bounds {
+                self.draw(bounds, 255)?;
+            }
         }
         Ok(())
     }
@@ -770,10 +790,13 @@ impl Surfaces {
     }
 
     fn draw(&mut self, rect: Rect, alpha: u8) -> Result<(), String> {
-        self.bitmap
-            .as_ref()
-            .ok_or("Orb bitmap unavailable")?
-            .draw(self.orb, rect, alpha)?;
+        // The user's opacity multiplies every layer, including entry fade and
+        // press feedback, so animation ratios survive any configured transparency.
+        self.bitmap.as_ref().ok_or("Orb bitmap unavailable")?.draw(
+            self.orb,
+            rect,
+            scaled_alpha(alpha, self.opacity),
+        )?;
         self.bounds = Some(rect);
         Ok(())
     }
@@ -898,6 +921,12 @@ fn monitor(point: POINT) -> Result<(Rect, u32), String> {
         Rect::new(work.left, work.top, work.right, work.bottom).ok_or("Orb work area invalid")?,
         x,
     ))
+}
+
+/// Scales a 0..=255 blend alpha by the configured Orb opacity percentage.
+/// `100` stays lossless so an untouched setting renders exactly the base artwork.
+fn scaled_alpha(alpha: u8, opacity: u8) -> u8 {
+    (u32::from(alpha) * u32::from(opacity) / 100).min(255) as u8
 }
 
 fn orb_pixels(size: i32) -> Vec<u32> {
@@ -1035,6 +1064,15 @@ mod tests {
         assert_eq!(surfaces.side, DockSide::Right);
         assert!(surfaces.fixed.is_none());
         assert!(!surfaces.orb_visible());
+        // Configurable transparency keeps an opaque default and refuses values
+        // that would erase the only recovery entry.
+        assert_eq!(surfaces.opacity, 100);
+        assert!(surfaces.set_opacity(ORB_MIN_OPACITY - 1).is_err());
+        assert!(surfaces.set_opacity(101).is_err());
+        assert_eq!(surfaces.opacity, 100);
+        surfaces.set_opacity(ORB_MIN_OPACITY).unwrap();
+        assert_eq!(surfaces.opacity, ORB_MIN_OPACITY);
+        surfaces.set_opacity(100).unwrap();
         assert_eq!(unsafe { GetAncestor(orb, GA_ROOT) }, orb);
         assert!(unsafe { GetWindow(orb, GW_OWNER) }.is_null());
         let style = unsafe { GetWindowLongPtrW(orb, GWL_EXSTYLE) } as u32;
@@ -1088,6 +1126,16 @@ mod tests {
         unsafe {
             DestroyWindow(fixture);
         }
+    }
+
+    #[test]
+    fn orb_opacity_percentage_scales_every_blend_alpha_and_stays_lossless_at_full() {
+        assert_eq!(scaled_alpha(255, 100), 255);
+        assert_eq!(scaled_alpha(80, 100), 80);
+        assert_eq!(scaled_alpha(230, 100), 230);
+        assert_eq!(scaled_alpha(255, 20), 51);
+        assert_eq!(scaled_alpha(80, 40), 32);
+        assert_eq!(scaled_alpha(0, ORB_MIN_OPACITY), 0);
     }
 
     #[test]

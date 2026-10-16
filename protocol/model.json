@@ -483,6 +483,7 @@
       "mode": "DisplayMode",
       "requestId": "u64",
       "orbAutoHide": "bool",
+      "orbOpacity": "u8",
       "trayAvailable": "bool",
       "reason": "string?"
     },
@@ -1042,6 +1043,10 @@
     "set_orb_auto_hide": {
       "scope": "RequestScope",
       "enabled": "bool"
+    },
+    "set_orb_opacity": {
+      "scope": "RequestScope",
+      "opacity": "u8"
     },
     "set_motion_preferences": {
       "scope": "RequestScope",

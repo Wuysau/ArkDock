@@ -146,7 +146,11 @@ h2 { font-size: 19px; font-weight: 650; }
 h3 { font-size: 15px; line-height: 1.6; font-weight: 600; }
 code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.app { position: relative; height: 100dvh; min-height: 0; overflow: hidden; background: var(--shell-gradient); border: 1px solid var(--border-strong); border-radius: var(--radius-shell); transition: opacity var(--motion-display) var(--ease), background-color var(--motion-state) var(--ease), border-color var(--motion-state) var(--ease); }
+/* The native window owns the outer shape: Windows 11 rounds the real window edge,
+   so a CSS radius and ring here paint a second, inner rounded boundary with a
+   background-colored crescent between the two arcs. The shell fills the whole
+   client area instead, and every panel keeps its own border. */
+.app { position: relative; height: 100dvh; min-height: 0; overflow: hidden; background: var(--shell-gradient); border: 0; border-radius: 0; transition: opacity var(--motion-display) var(--ease), background-color var(--motion-state) var(--ease); }
 .app[data-display="collapsing"], .app[data-display="orb"], .app[data-display="hidden"] { opacity: 0; pointer-events: none; }
 .dock-ripple { position: absolute; inset: 0; z-index: 40; overflow: hidden; border-radius: inherit; pointer-events: none; contain: paint; }
 .dock-ripple-wave { position: absolute; top: 50%; left: 0; width: 200vmax; height: 200vmax; border: 1px solid rgb(120 184 255 / 42%); border-radius: 50%; background: radial-gradient(circle, rgb(75 130 255 / 3%) 60%, rgb(75 130 255 / 8%) 69%, transparent 72%); opacity: 0; transform: translate(-50%, -50%) scale(.025); animation: dock-ripple var(--motion-ripple) var(--ease) both; }
@@ -410,6 +414,27 @@ code, .path { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px
 .setting-toggle strong { font-size: 12px; font-weight: 600; }
 .setting-toggle small { color: var(--muted); line-height: 1.65; }
 .setting-toggle input { width: 17px; height: 17px; flex-shrink: 0; margin: 0; }
+/* 悬浮球透明度：示例球即时反馈通透程度；原生写入只在松开、走键或失焦时发生一次。 */
+.setting-slider { display: block; padding: 12px 0; border-top: 1px solid var(--line); }
+.setting-slider-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.setting-slider-head > span { display: flex; flex-direction: column; gap: 6px; }
+.setting-slider-head strong { font-size: 12px; font-weight: 600; }
+.setting-slider-head small { color: var(--muted); line-height: 1.65; }
+.setting-slider-value { color: var(--highlight); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 40px; text-align: right; }
+.setting-slider-control { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.orb-preview { width: 48px; height: 48px; flex-shrink: 0; display: grid; place-items: center; border: 1px solid var(--border-soft); border-radius: 10px; background-color: var(--surface-elevated); background-image: radial-gradient(circle, var(--border-strong) 1px, transparent 1.3px); background-size: 7px 7px; background-position: 3px 2px; box-shadow: var(--card-highlight); }
+.orb-specimen { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; border: 1px solid rgb(112 141 180 / 58%); background: radial-gradient(circle at 33% 26%, rgb(37 56 87 / 94%), rgb(17 30 52 / 96%) 46%, rgb(10 21 39 / 97%) 100%); box-shadow: inset 0 1px 2px rgb(226 240 255 / 16%), 0 3px 8px rgb(0 0 0 / 36%); transition: opacity var(--motion-hover) var(--ease); }
+.orb-specimen .mark { transform: scale(.62); }
+.orb-specimen-dot { position: absolute; right: 9px; bottom: 9px; width: 4px; height: 4px; border-radius: 50%; background: #4e9eff; box-shadow: 0 0 0 1.5px rgb(10 21 39 / 90%); }
+.setting-slider input[type="range"] { flex: 1; min-width: 0; height: 24px; margin: 0; padding: 0; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+.setting-slider input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--accent) 0 var(--orb-slider-fill, 0%), var(--border-strong) var(--orb-slider-fill, 0%) 100%); }
+.setting-slider input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; border: 1px solid var(--primary-border); background: var(--primary-gradient); box-shadow: 0 1px 4px rgb(0 0 0 / 38%), inset 0 1px 1px rgb(255 255 255 / 42%); transition: transform var(--motion-hover) var(--ease), box-shadow var(--motion-hover) var(--ease); }
+.setting-slider input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.1); }
+.setting-slider input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.18); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 24%, transparent), 0 1px 4px rgb(0 0 0 / 38%); }
+.setting-slider input[type="range"]:focus-visible { outline: none; }
+.setting-slider input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 45%, transparent), 0 1px 4px rgb(0 0 0 / 38%); }
+.setting-slider:has(input:disabled) { opacity: .62; }
+.setting-slider:has(input:disabled) input[type="range"] { cursor: not-allowed; }
 button.selected { background: var(--selected); border-color: var(--accent); color: var(--highlight); }
 .menu-list { display: flex; flex-direction: column; gap: 5px; }
 .menu-list button { justify-content: flex-start; padding: 12px; border-color: transparent; gap: 10px; }

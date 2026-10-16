@@ -1,5 +1,8 @@
 import type { AppSnapshot, MotionIntensity } from '../ipc/model.ts';
 import type { MotionPreference } from '../motion.ts';
+import type { CSSProperties } from 'react';
+import { useState } from 'react';
+import { orbOpacityTransparencyCeiling } from '../orb-preferences.ts';
 import { displayPath } from '../path-display.ts';
 import { environmentLabel } from './candidates.ts';
 import type { Panel } from './navigation.ts';
@@ -54,12 +57,45 @@ export function PathPanel({ snapshot, busy, copy, browse, untrust }: {
   return <div className="settings-card"><h3>{project.name}</h3><dl className="details-list"><div><dt>应用根</dt><dd className="path">{appRoot}</dd></div><div><dt>工作区根</dt><dd className="path">{displayPath(project.workspaceRoot)}</dd></div><div><dt>环境</dt><dd>{environmentLabel(project.environment)}</dd></div><div><dt>模块 · 变体</dt><dd>{project.module} · {project.variant}</dd></div><div><dt>执行信任</dt><dd>{snapshot?.trusted ? '已信任当前构建配置' : '未信任 · 只读'}</dd></div></dl><div className="panel-actions"><button onClick={() => copy(appRoot, '工程路径')}>复制完整路径</button><button onClick={browse}>切换工程</button><button disabled={!snapshot?.trusted || busy} onClick={untrust}>撤销工程信任</button></div></div>;
 }
 
-export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMotion, intensity, setIntensity, chooseOrbAutoHide, changeDisplay, pair, detach, open }: {
+/**
+ * 拖动只在本地即时预览通透程度，松开、走键或失焦时才写入原生一次。
+ * 悬浮球是收起后的唯一恢复入口，因此透明度上限保留可辨认的底。
+ */
+function OrbOpacitySetting({ opacity, disabled, commit }: {
+  opacity: number; disabled: boolean; commit: (opacity: number) => void;
+}) {
+  const committed = 100 - opacity;
+  const [dragged, setDragged] = useState<number | null>(null);
+  const transparency = dragged ?? committed;
+  const finish = () => {
+    if (dragged === null) return;
+    commit(100 - dragged);
+    setDragged(null);
+  };
+  return <label className="setting-slider">
+    <span className="setting-slider-head">
+      <span><strong>透明度</strong><small>拖动调节悬浮球的通透程度；上限 80%，保证它作为恢复入口依然容易找到。</small></span>
+      <output className="setting-slider-value" aria-hidden="true">{transparency}%</output>
+    </span>
+    <span className="setting-slider-control">
+      <span className="orb-preview" aria-hidden="true"><span className="orb-specimen" style={{ opacity: (100 - transparency) / 100 }}>
+        <span className="mark"><span /><span /></span><span className="orb-specimen-dot" />
+      </span></span>
+      <input type="range" min={0} max={orbOpacityTransparencyCeiling} step={5} value={transparency}
+        aria-label="悬浮球透明度" aria-valuetext={`${transparency}% 透明`} disabled={disabled}
+        style={{ '--orb-slider-fill': `${(transparency / orbOpacityTransparencyCeiling) * 100}%` } as CSSProperties}
+        onChange={(event) => setDragged(Number(event.target.value))} onPointerUp={finish} onKeyUp={finish} onBlur={finish} />
+    </span>
+  </label>;
+}
+
+export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMotion, intensity, setIntensity, chooseOrbAutoHide, orbOpacity, chooseOrbOpacity, changeDisplay, pair, detach, open }: {
   snapshot: AppSnapshot | null; shell: ShellControls;
   theme: Theme; setTheme: (value: Theme) => void;
   motion: MotionPreference; setMotion: (value: MotionPreference) => void;
   intensity: MotionIntensity; setIntensity: (value: MotionIntensity) => void;
   chooseOrbAutoHide: (enabled: boolean) => void;
+  orbOpacity: number; chooseOrbOpacity: (opacity: number) => void;
   changeDisplay: (command: 'collapse_to_orb') => void;
   pair: PairInfo; detach: () => void; open: (panel: Panel) => void;
 }) {
@@ -81,7 +117,7 @@ export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMot
       </div>;
     })}</div></div>
     <div className="settings-card"><h3>动画偏好</h3><p className="muted">系统减少动画优先生效；关闭或轻量时不播放贴边涟漪与悬浮球装饰。</p><div className="motion-options" aria-label="减少动画偏好">{(['system', 'reduce'] as const).map((option) => <button key={option} aria-pressed={motion === option} className={motion === option ? 'selected' : ''} onClick={() => setMotion(option)}>{option === 'system' ? '跟随系统动画' : '减少动画'}</button>)}</div><div className="intensity-options" aria-label="动效强度">{(['off', 'light', 'standard', 'enhanced'] as const).map((option) => <button key={option} aria-pressed={intensity === option} className={intensity === option ? 'selected' : ''} onClick={() => setIntensity(option)}>{({ off: '关闭', light: '轻量', standard: '标准', enhanced: '增强' })[option]}</button>)}</div><output className="motion-status">{!connected ? '桌面桥接未连接，原生动效偏好尚未同步。' : snapshot?.motion.reduced ? '原生窗口已减少动画。' : snapshot?.motion.intensity === 'off' ? '原生窗口动效已关闭。' : snapshot?.motion.intensity === 'light' ? '原生窗口使用轻量动效。' : snapshot?.motion.intensity === 'enhanced' ? '原生窗口使用增强动效。' : '原生窗口使用标准动效。'}</output></div>
-    <div className="settings-card"><h3>悬浮球</h3><label className="setting-toggle"><span><strong>贴边自动隐藏</strong><small>悬浮球闲置时沿屏幕边缘收起，靠近后恢复显示。</small></span><input type="checkbox" role="switch" aria-checked={snapshot?.display.orbAutoHide ?? false} aria-label="悬浮球贴边自动隐藏" checked={snapshot?.display.orbAutoHide ?? false} disabled={!connected || !nativeReady || displayBusy} onChange={(event) => chooseOrbAutoHide(event.target.checked)} /></label><button disabled={!connected || !nativeReady || displayBusy || snapshot?.display.mode !== 'expanded'} onClick={() => changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button></div>
+    <div className="settings-card"><h3>悬浮球</h3><label className="setting-toggle"><span><strong>贴边自动隐藏</strong><small>悬浮球闲置时沿屏幕边缘收起，靠近后恢复显示。</small></span><input type="checkbox" role="switch" aria-checked={snapshot?.display.orbAutoHide ?? false} aria-label="悬浮球贴边自动隐藏" checked={snapshot?.display.orbAutoHide ?? false} disabled={!connected || !nativeReady || displayBusy} onChange={(event) => chooseOrbAutoHide(event.target.checked)} /></label><OrbOpacitySetting opacity={orbOpacity} disabled={!connected || !nativeReady} commit={chooseOrbOpacity} /><button disabled={!connected || !nativeReady || displayBusy || snapshot?.display.mode !== 'expanded'} onClick={() => changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button></div>
     <div className="settings-card"><h3>窗口与工程</h3><p className="pair-mode-description">{pair.label}{snapshot?.pairLayout?.reason && ` · ${snapshot.pairLayout.reason}`}</p><p className="muted">两个独立窗口全贴合，尺寸联动；共同最大化时 ArkDock 保持右侧。解除绑定会停止自有预览资源。</p><button disabled={!snapshot?.target || shell.busy} onClick={detach}>解除当前绑定</button>{snapshot?.project && <button onClick={() => open('path')}>管理工程信任</button>}</div>
   </>;
 }

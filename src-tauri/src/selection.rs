@@ -1071,7 +1071,7 @@ pub(crate) mod test_support {
                 "sdkPath":null,"sdkVersion":null,"canClick":true,"canSwipe":false,"canText":false,"canRotate":false},
             "build":{"generation":1,"displayedGeneration":1,"buildId":"build","durationMs":null,"error":null,"stale":false},
             "diagnostics":[],"dockHint":null,"layoutRequired":false,"sessionRef":null,"pairLayout":null,
-            "display":{"mode":"expanded","requestId":0,"orbAutoHide":false,"trayAvailable":false,"reason":null},
+            "display":{"mode":"expanded","requestId":0,"orbAutoHide":false,"orbOpacity":100,"trayAvailable":false,"reason":null},
             "motion":{"reduced":false,"intensity":"standard"},"dockConfirmation":null
         })).unwrap()
     }

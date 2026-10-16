@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T09:16:50.221Z",
+  "title": "Design System: ArkDock",
+  "extensions": {
+    "colorMeta": {
+      "bg": { "role": "neutral", "displayName": "Deep Harbor Navy", "canonical": "#0b1220", "tonalRamp": ["#050b18", "#1d2534", "#394253", "#586173", "#798395", "#9ba5b9", "#bfcade", "#e6efff"] },
+      "surface": { "role": "neutral", "displayName": "Hull Slate", "canonical": "#111c2d", "tonalRamp": ["#030b1a", "#1a2537", "#364356", "#556277", "#758399", "#97a6bd", "#bbcae2", "#e5efff"] },
+      "surface-elevated": { "role": "neutral", "displayName": "Deck Slate", "canonical": "#152238", "tonalRamp": ["#020a1e", "#18253b", "#34425b", "#52627c", "#73839e", "#95a6c2", "#b8cae8", "#e5efff"] },
+      "panel": { "role": "neutral", "displayName": "Bridge Indigo", "canonical": "#17243a", "tonalRamp": ["#020a1e", "#18253b", "#34425a", "#52627b", "#73839e", "#95a6c2", "#b8cae7", "#e5efff"] },
+      "surface-overlay": { "role": "neutral", "displayName": "Overlay Glass", "canonical": "rgb(17 28 45 / 94%)", "tonalRamp": ["#030b1a", "#1a2537", "#364356", "#556277", "#758399", "#97a6bd", "#bbcae2", "#e5efff"] },
+      "text": { "role": "neutral", "displayName": "Frost White", "canonical": "#eaf1fb", "tonalRamp": ["#070b12", "#20252d", "#3d424a", "#5c626a", "#7d838c", "#9fa6af", "#c3cad3", "#e8eff9"] },
+      "muted": { "role": "neutral", "displayName": "Harbor Mist", "canonical": "#a5b4c9", "tonalRamp": ["#030b19", "#1a2636", "#364354", "#556275", "#758497", "#98a6bb", "#bbcbe0", "#e4f0ff"] },
+      "accent": { "role": "primary", "displayName": "Beacon Blue", "canonical": "#4b82ff", "tonalRamp": ["#000038", "#00007d", "#052fa7", "#2354ce", "#4379f5", "#76a2ff", "#aec9ff", "#e6efff"] },
+      "accent-soft": { "role": "primary", "displayName": "Beacon Glow", "canonical": "#78b8ff", "tonalRamp": ["#000b21", "#00254b", "#00427c", "#2363a4", "#4785c9", "#6aa9ef", "#a1cdff", "#e3f0ff"] },
+      "highlight": { "role": "primary", "displayName": "Ice Highlight", "canonical": "#78b8ff", "tonalRamp": ["#000b21", "#00254b", "#00427c", "#2363a4", "#4785c9", "#6aa9ef", "#a1cdff", "#e3f0ff"] },
+      "action": { "role": "primary", "displayName": "Command Blue", "canonical": "#356eea", "tonalRamp": ["#000039", "#001769", "#002fa8", "#1e55cf", "#3f79f6", "#74a3ff", "#adcaff", "#e6efff"] },
+      "action-hover": { "role": "primary", "displayName": "Command Blue Deep", "canonical": "#245bd2", "tonalRamp": ["#000039", "#001867", "#0030a5", "#1f56cc", "#407af4", "#74a3ff", "#adcaff", "#e6efff"] },
+      "selected": { "role": "primary", "displayName": "Beacon Tint", "canonical": "rgb(75 130 255 / 14%)", "tonalRamp": ["#000038", "#00007d", "#052fa7", "#2354ce", "#4379f5", "#76a2ff", "#aec9ff", "#e6efff"] },
+      "success": { "role": "success", "displayName": "Verified Green", "canonical": "#39cf84", "tonalRamp": ["#001005", "#002e17", "#00502d", "#007444", "#009b5c", "#25c379", "#59e89c", "#c4ffd9"] },
+      "warning": { "role": "warning", "displayName": "Amber Caution", "canonical": "#f5b84b", "tonalRamp": ["#140900", "#342100", "#593c00", "#805900", "#ab7700", "#d49922", "#fabd51", "#ffecce"] },
+      "danger": { "role": "danger", "displayName": "Coral Alarm", "canonical": "#ff687a", "tonalRamp": ["#200003", "#4d0012", "#7f0025", "#b1183c", "#da455c", "#ff6f7f", "#ffb1b5", "#ffe8e9"] },
+      "line": { "role": "neutral", "displayName": "Hairline Rim", "canonical": "rgb(192 211 240 / 13%)", "tonalRamp": ["#020a1e", "#17253b", "#33435a", "#52627b", "#72839e", "#94a6c2", "#b8cbe7", "#e5efff"] },
+      "line-soft": { "role": "neutral", "displayName": "Soft Hairline", "canonical": "rgb(192 211 240 / 10%)", "tonalRamp": ["#020a1e", "#17253b", "#33435a", "#52627b", "#72839e", "#94a6c2", "#b8cbe7", "#e5efff"] },
+      "line-strong": { "role": "neutral", "displayName": "Strong Hairline", "canonical": "rgb(192 211 240 / 24%)", "tonalRamp": ["#020a1e", "#17253b", "#33435a", "#52627b", "#72839e", "#94a6c2", "#b8cbe7", "#e5efff"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "The empty-state headline only (21px, weight 650)." },
+      "headline": { "displayName": "Headline", "purpose": "Sheet titles (19px, weight 650)." },
+      "title": { "displayName": "Title", "purpose": "Section headings inside panels and cards (15px)." },
+      "body": { "displayName": "Body", "purpose": "Paragraphs and settings copy (12px, line-height 1.75)." },
+      "label": { "displayName": "Label", "purpose": "Status lines, metadata and buttons (11px); the 10px eyebrow adds +1px tracking." },
+      "code": { "displayName": "Mono", "purpose": "Paths, diagnostics, log codes and measured values (12px; 11px inside panels)." }
+    },
+    "shadows": [
+      { "name": "lit-rim", "value": "inset 0 1px 0 rgb(255 255 255 / 4%)", "purpose": "Top light on every card, button, candidate and theme card at rest." },
+      { "name": "card-rest", "value": "0 4px 16px rgb(0 0 0 / 16%)", "purpose": "Workspace strip, settings cards, evidence blocks." },
+      { "name": "floating", "value": "0 6px 18px rgb(0 0 0 / 24%)", "purpose": "Chrome triggers, toasts, status pills, art highlights." },
+      { "name": "sheet-lift", "value": "0 12px 36px rgb(0 0 0 / 28%)", "purpose": "Bottom sheets and the inspector's selection panel." },
+      { "name": "device-frame", "value": "0 5px 18px rgb(0 0 0 / 22%), inset 0 0 0 1px rgb(126 145 168 / 13%)", "purpose": "The phone bezel — the deepest object allowed." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(.2, .8, .2, 1)", "purpose": "The single easing curve for all UI transitions." },
+      { "name": "hover", "value": "140ms", "purpose": "Button and candidate hover/selection tint." },
+      { "name": "hint", "value": "160ms", "purpose": "Dock-hint reveal near a target window." },
+      { "name": "state", "value": "180ms", "purpose": "State-strip and status changes." },
+      { "name": "sheet", "value": "230ms", "purpose": "Bottom sheet rise (16px translate plus fade)." },
+      { "name": "frame", "value": "210ms", "purpose": "First valid frame fade-in per session." },
+      { "name": "diagnostic", "value": "210ms", "purpose": "Diagnostics panel open." },
+      { "name": "display", "value": "320ms", "purpose": "Expanded/Orb display-mode opacity transitions." },
+      { "name": "ripple", "value": "600ms", "purpose": "Dock ripple after a confirmed attachment." },
+      { "name": "chrome", "value": "180ms", "purpose": "Preview chrome trigger and body reveal." },
+      { "name": "workspace", "value": "210ms", "purpose": "Workspace card details expand/collapse." }
+    ],
+    "breakpoints": [
+      { "name": "narrow", "value": "390px", "purpose": "Width: reduce paddings, hide minimize/maximize, collapse the 收起 label." },
+      { "name": "toolbar-narrow", "value": "380px", "purpose": "Width: tighten the preview toolbar rows and hide the mode caption." },
+      { "name": "short", "value": "690px", "purpose": "Height: scale welcome art to 0.7–0.85 and tighten margins." },
+      { "name": "logs-short", "value": "560px", "purpose": "Height: diagnostics sheet switches to the 8px rhythm." }
+    ],
+    "themes": {
+      "canonical": "dark",
+      "note": "Every theme swaps the same token names; layout, type and motion do not change. 'system' resolves to classic dark on a dark system preference and classic light on light.",
+      "palettes": [
+        {
+          "id": "light",
+          "name": "Classic Light",
+          "tone": "light",
+          "colors": {
+            "bg": "#e9eff8", "surface": "#f7f9fd", "surface-elevated": "#ffffff", "panel": "#fff",
+            "surface-overlay": "rgb(255 255 255 / 95%)", "text": "#192b46", "muted": "#50637c",
+            "accent": "#275fd3", "accent-soft": "#4b82ff", "highlight": "#245cbc",
+            "action": "#356eea", "action-hover": "#245bd2", "selected": "rgb(45 103 229 / 9%)",
+            "success": "#147542", "warning": "#946000", "danger": "#ba2d43",
+            "line": "rgb(34 57 88 / 17%)", "line-soft": "rgb(34 57 88 / 11%)", "line-strong": "rgb(34 57 88 / 26%)"
+          }
+        },
+        {
+          "id": "minimal-light",
+          "name": "Minimal Light",
+          "tone": "light",
+          "colors": {
+            "bg": "#f5f8fc", "surface": "#ffffff", "surface-elevated": "#f8fafd", "panel": "#ffffff",
+            "surface-overlay": "rgb(255 255 255 / 96%)", "text": "#182941", "muted": "#5b6b82",
+            "accent": "#3277f5", "accent-soft": "#65a5ff", "highlight": "#1e60dc",
+            "action": "#2566e5", "action-hover": "#1d56c9", "selected": "rgb(50 119 245 / 9%)",
+            "success": "#159b62", "warning": "#946000", "danger": "#c42b42",
+            "line": "#dbe5f1", "line-soft": "#e5edf7", "line-strong": "#cddbeb"
+          }
+        },
+        {
+          "id": "titanium-dark",
+          "name": "Titanium Dark",
+          "tone": "dark",
+          "colors": {
+            "bg": "#10161d", "surface": "#19212c", "surface-elevated": "#212c39", "panel": "#212c39",
+            "surface-overlay": "linear-gradient(180deg, rgb(36 47 62 / 95%) 0%, rgb(24 32 43 / 95%) 100%)",
+            "text": "#eef3fa", "muted": "#a4b0c1", "accent": "#5799fa", "accent-soft": "#83baff", "highlight": "#83baff",
+            "action": "#255fd1", "action-hover": "#1e50b5", "selected": "rgb(87 153 250 / 16%)",
+            "success": "#43ce93", "warning": "#f5b84b", "danger": "#ff6b7d",
+            "line": "rgb(148 175 208 / 22%)", "line-soft": "rgb(148 175 208 / 15%)", "line-strong": "#4c5e73"
+          }
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one action a surface most wants, capped at one per screen.",
+      "html": "<button class=\"ds-btn-primary\">信任此工程</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 9px 14px; border: 1px solid var(--primary-border, #4b82ff); border-radius: var(--radius-button, 8px); color: #fff; font: inherit; cursor: pointer; background-color: var(--primary-bg, #356eea); background-image: var(--primary-gradient, linear-gradient(180deg, #4279f0, #356eea)); box-shadow: var(--card-highlight, inset 0 1px 0 rgb(255 255 255 / 4%)); transition: background-color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), border-color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), box-shadow var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-btn-primary:hover:enabled { background-image: none; background-color: var(--primary-hover, #245bd2); } .ds-btn-primary:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: .62; cursor: not-allowed; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "The default working control: Hull Slate at rest, beacon wash on hover.",
+      "html": "<button class=\"ds-btn\">手动选择</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 7px 11px; border: 1px solid var(--line, rgb(192 211 240 / 13%)); border-radius: var(--radius-button, 8px); background: var(--surface, #111c2d); color: var(--text, #eaf1fb); font: inherit; cursor: pointer; transition: background var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), border-color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-btn:hover:enabled { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); } .ds-btn:active:enabled { background: color-mix(in srgb, var(--accent, #4b82ff) 23%, var(--surface, #111c2d)); } .ds-btn:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-btn:disabled { color: var(--muted, #a5b4c9); opacity: .62; cursor: not-allowed; }"
+    },
+    {
+      "name": "Icon Button",
+      "kind": "button",
+      "refersTo": "icon-button",
+      "description": "32px square glyph controls; the close variant is the only coral affordance.",
+      "html": "<button class=\"ds-icon-btn\" aria-label=\"刷新\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 8a8 8 0 1 0 0 8M20 3v5h-5\"/></svg></button> <button class=\"ds-icon-btn ds-icon-btn-close\" aria-label=\"隐藏到系统托盘\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m6 6 12 12M6 18 18 6\"/></svg></button>",
+      "css": ".ds-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-button, 8px); background: transparent; color: var(--muted, #a5b4c9); cursor: pointer; transition: background var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), border-color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-icon-btn:hover:enabled { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); } .ds-icon-btn:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-icon-btn-close:hover:enabled { background: rgb(255 104 122 / 15%); border-color: var(--danger, #ff687a); color: var(--danger, #ff687a); }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Search input on a strong hairline; focus keeps the global ring.",
+      "html": "<label class=\"ds-search\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15ZM16 16l5 5\"/></svg><input type=\"search\" placeholder=\"搜索工程名称或路径\" /></label>",
+      "css": ".ds-search { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--border-strong, rgb(192 211 240 / 24%)); border-radius: 8px; background: var(--surface-elevated, #152238); color: var(--text, #eaf1fb); } .ds-search > svg { color: var(--muted, #a5b4c9); flex-shrink: 0; } .ds-search input { min-width: 0; flex: 1; border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px; padding: 3px; } .ds-search input::placeholder { color: var(--muted, #a5b4c9); } .ds-search input:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; border-radius: 2px; }"
+    },
+    {
+      "name": "Candidate Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Full-width project candidate; the reliable one is pre-lit in beacon blue.",
+      "html": "<button class=\"ds-candidate ds-candidate-reliable\"><span class=\"ds-candidate-heading\"><strong>expense-app</strong><span class=\"ds-badge\">可执行</span></span><span class=\"ds-candidate-path\">D:\\Projects\\expense-app</span><span class=\"ds-candidate-reason\">模块 entry · 变体 default · 依据 build-profile.json5</span></button>",
+      "css": ".ds-candidate { display: flex; flex-direction: column; align-items: stretch; width: 100%; gap: 7px; padding: 12px; text-align: left; background: var(--surface-elevated, #152238); border: 1px solid var(--line, rgb(192 211 240 / 13%)); border-radius: var(--radius-card, 12px); box-shadow: var(--card-highlight, inset 0 1px 0 rgb(255 255 255 / 4%)); color: var(--text, #eaf1fb); font: inherit; cursor: pointer; transition: background var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), border-color var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-candidate:hover:enabled { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); } .ds-candidate:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-candidate-reliable { border-color: var(--accent, #4b82ff); background: var(--selected, rgb(75 130 255 / 14%)); } .ds-candidate-heading { display: flex; align-items: center; gap: 8px; } .ds-candidate-heading strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; } .ds-badge { font-size: 10px; color: var(--highlight, #78b8ff); background: var(--selected, rgb(75 130 255 / 14%)); padding: 3px 5px; border-radius: 5px; white-space: nowrap; } .ds-candidate-path { font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--highlight, #78b8ff); overflow-wrap: anywhere; } .ds-candidate-reason { font-size: 11px; color: var(--muted, #a5b4c9); border-top: 1px solid var(--line, rgb(192 211 240 / 13%)); padding-top: 7px; }"
+    },
+    {
+      "name": "Workspace Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The 46px project identity strip: icon tile, name, dot status, expand chevron.",
+      "html": "<section class=\"ds-workspace\"><button class=\"ds-workspace-main\"><span class=\"ds-workspace-icon\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7ZM3 8h18M8 12v4M12 12v4M16 12v4\"/></svg></span><span class=\"ds-workspace-copy\"><strong>expense-app</strong><span class=\"ds-workspace-status\"><span class=\"ds-dot\"></span>已绑定 · 构建就绪</span></span></button><button class=\"ds-workspace-expand\" aria-label=\"展开工程信息\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 5 7 7-7 7\"/></svg></button></section>",
+      "css": ".ds-workspace { display: flex; align-items: center; gap: 6px; min-height: 46px; padding: 2px 6px 2px 3px; border: 1px solid var(--border-strong, rgb(192 211 240 / 24%)); border-radius: var(--radius-card, 12px); background: var(--card-bg, linear-gradient(135deg, rgb(141 181 249 / 4%), transparent), var(--surface, #111c2d)); box-shadow: var(--shadow-card, 0 4px 16px rgb(0 0 0 / 16%)); color: var(--text, #eaf1fb); } .ds-workspace-main { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex: 1; min-width: 0; padding: 6px 8px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; border-radius: 6px; text-align: left; } .ds-workspace-main:hover { background: var(--selected, rgb(75 130 255 / 14%)); } .ds-workspace-main:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-workspace-icon { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px; color: var(--highlight, #78b8ff); background: var(--selected, rgb(75 130 255 / 14%)); border: 1px solid var(--border-soft, rgb(192 211 240 / 10%)); } .ds-workspace-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .ds-workspace-copy strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-workspace-status { display: flex; align-items: center; gap: 5px; color: var(--muted, #a5b4c9); font-size: 10px; } .ds-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent, #4b82ff); flex-shrink: 0; } .ds-workspace-expand { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; background: transparent; color: var(--muted, #a5b4c9); cursor: pointer; border-radius: 6px; } .ds-workspace-expand:hover { color: var(--text, #eaf1fb); background: var(--selected, rgb(75 130 255 / 14%)); }"
+    },
+    {
+      "name": "Preview Control Pill",
+      "kind": "custom",
+      "description": "Glass edge trigger for the preview chrome; the chevron rotates when open.",
+      "html": "<button class=\"ds-chrome-trigger\" aria-expanded=\"false\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg><span>预览控制</span><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 5 7 7-7 7\"/></svg></button>",
+      "css": ".ds-chrome-trigger { display: inline-flex; align-items: center; max-width: 100%; gap: 6px; min-height: 28px; padding: 4px 9px; border: 1px solid var(--border-strong, rgb(192 211 240 / 24%)); border-radius: 8px; color: var(--text, #eaf1fb); background: var(--surface-overlay, rgb(17 28 45 / 94%)); box-shadow: var(--shadow-floating, 0 6px 18px rgb(0 0 0 / 24%)); font: inherit; font-size: 11px; cursor: pointer; transition: background var(--motion-chrome, 180ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), border-color var(--motion-chrome, 180ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-chrome-trigger:hover:enabled { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); } .ds-chrome-trigger:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-chrome-trigger > svg:last-child { transition: transform var(--motion-chrome, 180ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-chrome-trigger[aria-expanded=\"true\"] > svg:last-child { transform: rotate(-90deg); }"
+    },
+    {
+      "name": "Bottom Sheet",
+      "kind": "custom",
+      "refersTo": "sheet",
+      "description": "The signature in-window modal: 16px corners, grab handle, eyebrow + headline title.",
+      "html": "<div class=\"ds-sheet\"><div class=\"ds-sheet-handle\" aria-hidden=\"true\"></div><div class=\"ds-sheet-title\"><div><span class=\"ds-eyebrow\">ARKDOCK</span><h2>设置</h2></div><button class=\"ds-sheet-close\" aria-label=\"关闭面板\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m6 6 12 12M6 18 18 6\"/></svg></button></div><div class=\"ds-sheet-body\"><p>仅改变 ArkDock 外壳，不改变鸿蒙应用主题。</p></div></div>",
+      "css": ".ds-sheet { display: flex; flex-direction: column; width: 100%; min-height: 160px; max-height: 320px; overflow: hidden; border: 1px solid var(--border-strong, rgb(192 211 240 / 24%)); border-radius: var(--radius-shell, 16px); background: var(--panel, #17243a); box-shadow: var(--shadow, 0 12px 36px rgb(0 0 0 / 28%)); color: var(--text, #eaf1fb); } .ds-sheet-handle { width: 32px; height: 3px; margin: 9px auto 0; border-radius: 3px; background: var(--line, rgb(192 211 240 / 13%)); } .ds-sheet-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line, rgb(192 211 240 / 13%)); } .ds-eyebrow { color: var(--muted, #a5b4c9); font-size: 10px; letter-spacing: 1px; } .ds-sheet-title h2 { margin: 0; font-size: 19px; font-weight: 650; } .ds-sheet-close { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-button, 8px); background: transparent; color: var(--muted, #a5b4c9); cursor: pointer; } .ds-sheet-close:hover { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); } .ds-sheet-close:focus-visible { outline: 2px solid var(--focus-ring, #78b8ff); outline-offset: 2px; } .ds-sheet-body { padding: 16px; overflow: auto; font-size: 12px; line-height: 1.75; color: var(--muted, #a5b4c9); }"
+    },
+    {
+      "name": "Theme Card",
+      "kind": "custom",
+      "refersTo": "theme-card",
+      "description": "Theme picker card with canvas/surface/accent swatch strip and selected check dot.",
+      "html": "<div class=\"ds-theme-card ds-theme-selected\" role=\"button\" tabindex=\"0\" aria-pressed=\"true\"><span class=\"ds-swatch\"><span class=\"ds-swatch-canvas\" style=\"background:#0b1220\"></span><span class=\"ds-swatch-surface\" style=\"background:#17243a\"></span><span class=\"ds-swatch-accent\" style=\"background:#4b82ff\"></span></span><span class=\"ds-theme-heading\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 14a8 8 0 0 1-10-10 9 9 0 1 0 10 10Z\"/></svg><strong>深色</strong><span class=\"ds-theme-check\" aria-hidden=\"true\"></span></span><small class=\"ds-theme-desc\">标准深海蓝玻璃外壳</small></div>",
+      "css": ".ds-theme-card { position: relative; display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 10px 10px 30px; text-align: left; border: 1px solid var(--line, rgb(192 211 240 / 13%)); border-radius: 10px; background: var(--surface-elevated, #152238); color: var(--text, #eaf1fb); cursor: pointer; box-shadow: var(--card-highlight, inset 0 1px 0 rgb(255 255 255 / 4%)); } .ds-theme-card.ds-theme-selected { background: var(--selected, rgb(75 130 255 / 14%)); border-color: var(--accent, #4b82ff); color: var(--highlight, #78b8ff); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #4b82ff) 45%, transparent), var(--card-highlight, inset 0 1px 0 rgb(255 255 255 / 4%)); } .ds-swatch { position: relative; display: flex; align-items: center; gap: 5px; height: 26px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border-soft, rgb(192 211 240 / 10%)); overflow: hidden; } .ds-swatch-canvas { position: absolute; inset: 0; } .ds-swatch-surface { position: relative; z-index: 1; flex: 1; height: 14px; border-radius: 4px; border: 1px solid rgb(128 148 176 / 28%); box-shadow: 0 1px 3px rgb(0 0 0 / 14%); } .ds-swatch-accent { position: relative; z-index: 1; width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 2px rgb(255 255 255 / 22%); } .ds-theme-heading { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; } .ds-theme-heading strong { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-theme-check { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted, #a5b4c9); opacity: .55; flex-shrink: 0; } .ds-theme-card.ds-theme-selected .ds-theme-check { background: var(--accent, #4b82ff); border-color: var(--accent, #4b82ff); opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4b82ff) 24%, transparent); } .ds-theme-desc { position: absolute; left: 10px; right: 10px; bottom: 8px; color: var(--muted, #a5b4c9); font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }"
+    },
+    {
+      "name": "Orb Opacity Slider",
+      "kind": "input",
+      "description": "Custom range slider with the primary-gradient thumb; drives the orb transparency cap of 80%.",
+      "html": "<label class=\"ds-slider\"><output class=\"ds-slider-value\">20%</output><input type=\"range\" min=\"0\" max=\"80\" step=\"5\" value=\"20\" aria-label=\"悬浮球透明度\" style=\"--orb-slider-fill: 25%\" /></label>",
+      "css": ".ds-slider { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text, #eaf1fb); } .ds-slider-value { color: var(--highlight, #78b8ff); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; } .ds-slider input[type=\"range\"] { flex: 1; min-width: 0; height: 24px; margin: 0; padding: 0; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; } .ds-slider input[type=\"range\"]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--accent, #4b82ff) 0 var(--orb-slider-fill, 0%), var(--border-strong, rgb(192 211 240 / 24%)) var(--orb-slider-fill, 0%) 100%); } .ds-slider input[type=\"range\"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; border: 1px solid var(--primary-border, #4b82ff); background: var(--primary-gradient, linear-gradient(180deg, #4279f0, #356eea)); box-shadow: 0 1px 4px rgb(0 0 0 / 38%), inset 0 1px 1px rgb(255 255 255 / 42%); transition: transform var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)), box-shadow var(--motion-hover, 140ms) var(--ease, cubic-bezier(.2, .8, .2, 1)); } .ds-slider input[type=\"range\"]:hover::-webkit-slider-thumb { transform: scale(1.1); } .ds-slider input[type=\"range\"]:active::-webkit-slider-thumb { transform: scale(1.18); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #4b82ff) 24%, transparent), 0 1px 4px rgb(0 0 0 / 38%); } .ds-slider input[type=\"range\"]:focus-visible { outline: none; } .ds-slider input[type=\"range\"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring, #78b8ff) 45%, transparent), 0 1px 4px rgb(0 0 0 / 38%); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Dockside Instrument",
+    "overview": "ArkDock reads like a precision instrument berthed beside the workbench. The shell is deep-harbor navy glass — #0b1220 at night, tonal slates stepping up to the panel — separated by hairlines of tinted light, with a single beacon-blue family marking whatever is live, selected, or actionable. Nothing decorative is allowed to pretend to be informative: a dot sits next to a word, a hairline divides sections, a glow appears only when a real frame arrives. The instrument reports; it does not perform.\n\nThe instrument is small on purpose. It lives in a 360–560 DIP column beside a window it never touches, so density is a feature: a 12px working band of type, a 4/8/12/16/24 spacing rhythm, one column of stacked surfaces, and the native frame claiming the flexible middle. Controls behave the way good hardware does — visible state, immediate confirmation, no surprise. The five themes are skins over one mechanism, not five different instruments.\n\nMotion confirms events rather than asking for attention: a 140ms state tint, a 230ms sheet rise, a 600ms dock ripple after a confirmed attachment — plus a first-class reduced-motion ladder (off / light / standard / enhanced on top of system settings). The reference scene set the tone; its Agent window, desktop chrome, promotional annotations, and example bookkeeping content stay outside the product surface.",
+    "keyCharacteristics": [
+      "Deep-harbor navy glass with translucent hairlines and a 1px lit rim on every card-like surface",
+      "One beacon-blue signal family; color expresses state, never paint",
+      "A single narrow column where the native preview owns the flexible space",
+      "Status as dot + label pairs at 10–11px — readable at a glance, never color alone",
+      "Five swappable themes over one token contract; the classic dark skin is normative in DESIGN.md",
+      "Motion that confirms real events only, with reduce-motion and four intensity levels"
+    ],
+    "rules": [
+      { "name": "The One Beacon Rule", "body": "Blue is a signal, not a paint. Full-strength beacon blues mark what is live, selected, actionable, or focused; ambient presence (card washes, glows, ripples) stays at ≤16% alpha. If everything glows, nothing is a signal.", "section": "colors" },
+      { "name": "The Five Skins, One Instrument Rule", "body": "Five themes (system / light / dark / minimal-light / titanium-dark; system resolves to the classic light-dark pair) swap the same token names and nothing else. Layout, type, motion, and component structure never change with a theme, and no surface may introduce a color that is not a token.", "section": "colors" },
+      { "name": "The Translucent Hairline Rule", "body": "Borders are tinted light with alpha (or a tinted solid in light skins), never neutral gray. In the dark skins the figure is light-on-dark at 10/13/24%; in light skins the same structure is navy at comparable alpha.", "section": "colors" },
+      { "name": "The 12px Anchor Rule", "body": "The document base is 12px and the working band is 10–12px; anything above 15px is reserved for display and headline moments, and body text never scales below 10px. If a control needs more room, it gets more space, not smaller type than the anchor.", "section": "typography" },
+      { "name": "The One-Column Rule", "body": "One column, one job. Nothing may add a second navigational column or a control panel that takes vertical space from the native frame; new controls first live in edge overlays, sheets, or collapse into triggers.", "section": "layout" },
+      { "name": "The Lit-Rim Rule", "body": "Every card-like surface carries the 1px inset top light; a bright top edge is how this system says \"resting surface\". Cards without the rim look unfinished.", "section": "elevation" },
+      { "name": "The Ambient-Only Rule", "body": "Shadows are wide, soft, and low-contrast; never tight dark drop shadows, never more than one stacking step below the device frame. Elevation reads from tonal steps and hairlines first, shadow second.", "section": "elevation" },
+      { "name": "The Native-Edge Rule", "body": "ArkDock never draws its own outer frame. The operating system owns the window edge; decorative roundness belongs to objects inside it (device bezel, sheets, cards). Concretely: .app stays border-radius: 0.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do express every color through a token; the frontmatter of DESIGN.md is normative for the classic dark skin and every theme swaps the same names.",
+      "Do keep ambient blue at ≤16% alpha and reserve full-strength beacon for live, selected, and actionable states.",
+      "Do pair state with a dot + label at 10–11px; status is a first-class citizen and never color alone.",
+      "Do set every path, ID, timestamp, and diagnostic value in the mono stack (11–12px) with tabular figures.",
+      "Do keep UI responses at 140–230ms and reserve 600ms for the dock ripple; honor reduce-motion (1ms) and the off / light / standard / enhanced intensity ladder.",
+      "Do keep the native frame on the stage: new controls live in 28px triggers, overlays, and sheets first.",
+      "Do respect the 12px anchor when adding controls; if a control needs room, give it space — body text never scales below 10px."
+    ],
+    "donts": [
+      "Don't paint a CSS border-radius or ring on the app shell; the native window owns the outer edge and a second arc would show between the two curves.",
+      "Don't introduce hues outside the token set, and keep status colors single-purpose: Verified Green and Coral Alarm are signals, not decoration.",
+      "Don't draw fabricated progress, invented percentages, or fake paths; the discovery orbit spins only while a real task runs and disappears the moment it ends.",
+      "Don't let the promotional scene leak into the product: the wave-and-mesh glow, the reference Agent window, desktop chrome, and the sample bookkeeping content are context, not UI vocabulary.",
+      "Don't use the shell theme to imitate the HarmonyOS app's own appearance; themes change ArkDock's shell only.",
+      "Don't load web fonts or icon packages; icons are inline 24-box strokes at 1.65px with round caps (the drag grip thickens to 3.5px), in currentColor.",
+      "Don't use pill-shaped buttons or tight dark drop shadows; softness in this system comes from alpha and blur, not from smaller radii or heavier ink."
+    ]
+  }
+}

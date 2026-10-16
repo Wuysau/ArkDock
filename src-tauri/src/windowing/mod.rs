@@ -32,12 +32,16 @@ pub struct WindowUpdate {
     pub exit_requested: bool,
 }
 
+/// The faintest configured Orb remains findable as the only recovery entry.
+pub const ORB_MIN_OPACITY: u8 = 20;
+
 impl Default for DisplayStatus {
     fn default() -> Self {
         Self {
             mode: DisplayMode::Expanded,
             request_id: 0,
             orb_auto_hide: false,
+            orb_opacity: 100,
             tray_available: false,
             reason: None,
         }
@@ -96,6 +100,19 @@ impl WindowController {
         #[cfg(not(windows))]
         {
             let _ = auto_hide;
+            Err("Windows display surfaces are unsupported on this platform".into())
+        }
+    }
+
+    /// Percent form, `20..=100`: 20 keeps a faint but locatable recovery entry.
+    pub fn set_orb_opacity(&self, opacity: u8) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            self.inner.set_orb_opacity(opacity)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = opacity;
             Err("Windows display surfaces are unsupported on this platform".into())
         }
     }

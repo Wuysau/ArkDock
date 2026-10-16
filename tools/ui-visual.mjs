@@ -271,6 +271,43 @@ try {
     await driver.send('Page.reload'); await pause(200);
     assert.equal(await driver.evaluate('document.documentElement.dataset.theme'), 'dark');
   });
+  await check('V1: 悬浮球透明度拖动即时预览、松开写入一次、键盘同样合并并持久化', async () => {
+    await load('running', 'dark', 440, 820);
+    await click('[aria-label="更多操作"]'); await click('button', '偏好设置'); await pause(40);
+    const slider = 'input[aria-label="悬浮球透明度"]';
+    await driver.evaluate(`document.querySelector(${JSON.stringify(slider)}).scrollIntoView({block:'center'})`); await pause(60);
+    // 连接后的启动同步会先写入一次偏好；以它为基线衡量拖动与键盘各自只追加一次。
+    await waitUntil(async () => (await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").length')) >= 1, '启动偏好透明度未写入');
+    const baseline = await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").length');
+    const initial = await driver.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(slider)});return {value:e.value,min:e.min,max:e.max,step:e.step,disabled:e.disabled,specimen:document.querySelector(".orb-specimen").style.opacity};})()`);
+    assert.deepEqual({ value: initial.value, min: initial.min, max: initial.max, step: initial.step, disabled: initial.disabled }, { value: '0', min: '0', max: '80', step: '5', disabled: false });
+    assert.equal(Number(initial.specimen), 1, '默认不透明时示例球不应用额外透明度');
+    const track = await driver.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(slider)}).getBoundingClientRect();return {left:r.left,top:r.top+r.height/2,width:r.width};})()`);
+    const at = (fraction) => ({ x: track.left + track.width * fraction, y: track.top });
+    await driver.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at(.75), button: 'left', clickCount: 1 });
+    await pause(60);
+    const preview = await driver.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(slider)});return {value:e.value,valuetext:e.getAttribute("aria-valuetext"),specimen:document.querySelector(".orb-specimen").style.opacity,output:document.querySelector(".setting-slider-value").textContent,calls:window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").length};})()`);
+    assert.equal(preview.calls, baseline, '拖动过程中不得发起原生写入');
+    assert.ok(Number(preview.value) > 0, '按压滑轨后透明度应即时变化');
+    assert.equal(preview.output, `${preview.value}%`);
+    assert.equal(preview.valuetext, `${preview.value}% 透明`);
+    assert.equal(Number(preview.specimen), (100 - Number(preview.value)) / 100, '示例球透明度跟随拖动值');
+    await driver.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at(.75), button: 'left', clickCount: 1 });
+    await waitUntil(async () => (await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").length')) === baseline + 1, '松开后透明度未写入原生一次');
+    const committed = await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").at(-1)');
+    assert.equal(committed.args.opacity, 100 - Number(preview.value));
+    const current = (await state()).fixture;
+    assert.deepEqual(committed.scope, { targetId: current.target.id, sessionId: current.sessionId });
+    assert.equal(current.display.orbOpacity, committed.args.opacity, '原生确认值回到快照');
+    assert.equal(await driver.evaluate('localStorage.getItem("arkdock:orb-opacity")'), String(committed.args.opacity));
+    await driver.evaluate(`document.querySelector(${JSON.stringify(slider)}).focus()`);
+    await key('ArrowDown');
+    await waitUntil(async () => (await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").length')) === baseline + 2, '键盘调整后透明度未合并为一次写入');
+    // ArrowDown 降低透明度 = 提高不透明度，同样只在 keyup 写入一次。
+    const stepped = await driver.evaluate('window.__ARKDOCK_DEMO__.calls.filter(c=>c.command==="set_orb_opacity").at(-1)');
+    assert.equal(stepped.args.opacity, committed.args.opacity + 5);
+    await screenshot('settings-orb-opacity-440x820');
+  });
   await check('V2: reliable candidate bypasses selection; trust gates execution', async () => {
     await load('reliable'); assert.equal((await state()).workspace, 'untrusted');
     assert.equal(await driver.evaluate('!!document.querySelector(".candidate-list")'), false);

@@ -111,6 +111,7 @@ enum Command {
     Metrics(mpsc::SyncSender<Result<MotionMetrics, String>>),
     Display(DisplayMode, u64, mpsc::SyncSender<Result<(), String>>),
     OrbAutoHide(bool, mpsc::SyncSender<Result<(), String>>),
+    OrbOpacity(u8, mpsc::SyncSender<Result<(), String>>),
     Motion(MotionSettings, mpsc::SyncSender<Result<(), String>>),
     BeginDrag(mpsc::SyncSender<Result<(), String>>),
     Arrange(mpsc::SyncSender<Result<(), String>>),
@@ -145,6 +146,9 @@ impl Controller {
     }
     pub fn set_orb_auto_hide(&self, enabled: bool) -> Result<(), String> {
         self.request(|reply| Command::OrbAutoHide(enabled, reply))
+    }
+    pub fn set_orb_opacity(&self, opacity: u8) -> Result<(), String> {
+        self.request(|reply| Command::OrbOpacity(opacity, reply))
     }
     pub fn set_motion_preferences(&self, settings: MotionSettings) -> Result<(), String> {
         self.request(|reply| Command::Motion(settings, reply))
@@ -610,6 +614,14 @@ impl Native {
                         let result = self.surfaces.set_auto_hide(enabled);
                         if result.is_ok() {
                             self.display.status.orb_auto_hide = enabled;
+                        }
+                        self.publish();
+                        let _ = reply.send(result);
+                    }
+                    Command::OrbOpacity(opacity, reply) => {
+                        let result = self.surfaces.set_opacity(opacity);
+                        if result.is_ok() {
+                            self.display.status.orb_opacity = opacity;
                         }
                         self.publish();
                         let _ = reply.send(result);
