@@ -11,6 +11,8 @@ export interface ShellControls {
   nativeReady: boolean;
   busy: boolean;
   displayBusy: boolean;
+  /** The native tray icon is registered, so a hidden window has a recovery surface. */
+  trayAvailable: boolean;
   trayReason: string;
   collapseToOrb: () => void;
   hideToTray: () => void;
@@ -71,8 +73,7 @@ export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMot
 export function MenuPanel({ snapshot, shell, pair, intents }: {
   snapshot: AppSnapshot | null; shell: ShellControls; pair: PairInfo; intents: MenuIntents;
 }) {
-  const { connected, nativeReady, busy, displayBusy, trayReason, collapseToOrb, hideToTray } = shell;
-  const trayAvailable = Boolean(snapshot?.display.trayAvailable);
+  const { connected, nativeReady, busy, displayBusy, trayAvailable, trayReason, collapseToOrb, hideToTray } = shell;
   const orbDisabled = !connected || !nativeReady || displayBusy || snapshot?.display.mode !== 'expanded';
   return <div className="menu-list">
     <button disabled={orbDisabled} onClick={collapseToOrb}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button>
@@ -93,5 +94,5 @@ export function MenuPanel({ snapshot, shell, pair, intents }: {
 }
 
 export function HelpPanel() {
-  return <div className="settings-card"><h3>从正在开发的窗口开始</h3><ol className="help-steps"><li>按住顶部标识或拖动区，靠近开发窗口右侧。</li><li>收到目标提示后松开；独立窗口由原生层贴边。</li><li>可靠工程直接关联；线索不足时确认候选，未发现时选择目录。</li><li>确认工程信任，再检查工具链，等待真实原生首帧。</li></ol><p className="muted">可随时重新识别、切换工程或解除绑定。只读识别目前不能中途取消；解除绑定使会话失效。</p></div>;
+  return <div className="settings-card"><h3>从正在开发的窗口开始</h3><ol className="help-steps"><li>按住顶部标识或拖动区，靠近开发窗口右侧。</li><li>收到目标提示后松开；独立窗口由原生层贴边。</li><li>可靠工程直接关联；线索不足时确认候选，未发现时选择目录。</li><li>确认工程信任，再检查工具链，等待真实原生首帧。</li></ol><p className="muted">可随时重新识别、切换工程或解除绑定。只读识别目前不能中途取消；解除绑定使会话失效。右上角关闭按钮会隐藏到系统托盘，需要完全退出时使用托盘图标的「退出」。</p></div>;
 }
