@@ -17,7 +17,7 @@ use crate::preview::{NativePoint, NativePreviewer, PreviewBackend, PreviewInput}
 use crate::scheduler::{
     watch_project, BuildCoordinator, BuildOutcome, CompletionDisposition, WatchEvent, WatchGuard,
 };
-use crate::windowing::{WindowController, WindowUpdate};
+use crate::windowing::{WindowController, WindowUpdate, ORB_MIN_OPACITY};
 use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
 mod agent_delivery;
@@ -56,6 +56,7 @@ enum Action {
     RestorePair,
     Display(DisplayMode, u64),
     OrbAutoHide(bool),
+    OrbOpacity(u8),
     Motion(MotionSettings),
     DisplaySnapshot,
     Click {
@@ -207,6 +208,7 @@ fn initial(backend: BackendStatus) -> AppSnapshot {
             mode: DisplayMode::Expanded,
             request_id: 0,
             orb_auto_hide: false,
+            orb_opacity: 100,
             tray_available: false,
             reason: Some("Native display controller has not confirmed availability".into()),
         },
@@ -844,6 +846,18 @@ impl Engine {
                     .set_orb_auto_hide(enabled)?;
                 self.drain_events();
             }
+            Action::OrbOpacity(opacity) => {
+                if !(ORB_MIN_OPACITY..=100).contains(&opacity) {
+                    return Err(format!(
+                        "INVALID_ORB_OPACITY: opacity must stay between {ORB_MIN_OPACITY} and 100 percent"
+                    ));
+                }
+                self.controller
+                    .as_ref()
+                    .ok_or("WINDOWING_UNAVAILABLE")?
+                    .set_orb_opacity(opacity)?;
+                self.drain_events();
+            }
             Action::Motion(preferences) => {
                 self.controller
                     .as_ref()
@@ -1328,6 +1342,15 @@ async fn set_orb_auto_hide(
     request(window, service, scope, Action::OrbAutoHide(enabled)).await
 }
 #[tauri::command]
+async fn set_orb_opacity(
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Service>,
+    scope: RequestScope,
+    opacity: u8,
+) -> Result<AppSnapshot, IpcError> {
+    request(window, service, scope, Action::OrbOpacity(opacity)).await
+}
+#[tauri::command]
 async fn set_motion_preferences(
     window: tauri::WebviewWindow,
     service: tauri::State<'_, Service>,
@@ -1642,6 +1665,7 @@ pub fn run() {
             hide_to_tray,
             show_from_tray,
             set_orb_auto_hide,
+            set_orb_opacity,
             set_motion_preferences,
             get_display_mode,
             get_motion_metrics,

@@ -43,7 +43,7 @@ function base(revision: number): AppSnapshot {
     backend: { id: 'ui-fixture', mode: 'UI 演示 · 非原生渲染', available: false, reason: 'UI 演示数据，不能证明 Windows 贴边或 HarmonyOS 原生预览。', sdkPath: null, sdkVersion: null, canClick: false, canSwipe: false, canText: false, canRotate: false },
     build: { generation: 0, displayedGeneration: null, buildId: null, durationMs: null, error: null, stale: false },
     diagnostics: [], dockHint: null, layoutRequired: false, sessionRef: null, pairLayout: { state: 'unbound', preferredWidthDip: 440, reason: null },
-    display: { mode: 'expanded', requestId: 0, orbAutoHide: false, trayAvailable: false, reason: 'UI 演示不创建悬浮球或系统托盘。' },
+    display: { mode: 'expanded', requestId: 0, orbAutoHide: false, orbOpacity: 100, trayAvailable: false, reason: 'UI 演示不创建悬浮球或系统托盘。' },
     motion: { reduced: false, intensity: 'standard' }, dockConfirmation: null,
   };
 }
@@ -161,6 +161,10 @@ export function createFixtureDriver(initial: Scenario): FixtureDriver {
       if (command === 'get_display_mode') return copy(current);
       if (command === 'set_orb_auto_hide') {
         publish({ ...current, revision: ++revision, display: { ...current.display, orbAutoHide: (args as Omit<CommandArgs['set_orb_auto_hide'], 'scope'>).enabled } });
+        return copy(current);
+      }
+      if (command === 'set_orb_opacity') {
+        publish({ ...current, revision: ++revision, display: { ...current.display, orbOpacity: (args as Omit<CommandArgs['set_orb_opacity'], 'scope'>).opacity } });
         return copy(current);
       }
       if (['collapse_to_orb', 'expand_from_orb', 'hide_to_tray', 'show_from_tray'].includes(command)) throw new Error('UI 演示不能创建悬浮球或托盘；请在 Windows 桌面验证。');

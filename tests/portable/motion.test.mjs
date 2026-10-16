@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createDockRippleController } from '../../src/dock-ripple.ts';
 import { createMotionPreferenceSync, motionSettings } from '../../src/motion.ts';
 import { displayTransitioning, nextDisplayRequestId } from '../../src/display-state.ts';
-import { createOrbAutoHidePreferenceSync, nativeOrbPreferenceChanged, parseOrbAutoHide, settledOrbChoice } from '../../src/orb-preferences.ts';
+import { createOrbAutoHidePreferenceSync, createOrbOpacityPreferenceSync, nativeOrbPreferenceChanged, parseOrbAutoHide, parseOrbOpacity, settledOrbChoice } from '../../src/orb-preferences.ts';
 import { targetLifecycleKey } from '../../src/dock-ripple.ts';
 
 const standard = { reduced: false, intensity: 'standard' };
@@ -124,6 +124,15 @@ test('自动隐藏只读取明确布尔偏好，不执行或容忍其他存储�
   for (const value of [null, '', '1', '0', 'TRUE', ' true', '{"enabled":true}', 'window.close()']) assert.equal(parseOrbAutoHide(value), null);
 });
 
+test('透明度只读取 20–100 的明确整数百分比，不执行或容忍其他存储内容', () => {
+  assert.equal(parseOrbOpacity('100'), 100);
+  assert.equal(parseOrbOpacity('20'), 20);
+  assert.equal(parseOrbOpacity('55'), 55);
+  for (const value of [null, '', ' ', '19', '101', '0', '-40', '60.5', '060', 'NaN', '{"orbOpacity":60}', 'window.close()', '0x3c', '6e1']) {
+    assert.equal(parseOrbOpacity(value), null, `rejected: ${JSON.stringify(value)}`);
+  }
+});
+
 test('仅同一目标会话内原生偏好变化是外部选择，目标重置不覆盖已保存选择', () => {
   const previous = { target, sessionId: 'session-a', display: { orbAutoHide: true } };
   const changed = { ...previous, display: { orbAutoHide: false } };
@@ -178,4 +187,33 @@ test('当前偏好写入完成后采用较新原生确认，旧生命周期与�
   assert.equal(settledOrbChoice(job, result, { ...current, sessionId: 'session-b' }), null);
   assert.equal(settledOrbChoice(job, { ...result, target: { ...target, process: { ...target.process, pid: 25 } } }, current), null);
   assert.equal(settledOrbChoice(job, result, null), null);
+});
+
+test('透明度写入串行合并：拖动中的中间值只保留最新一次，确认值不回播', async () => {
+  const requests = [];
+  const accepted = [];
+  const sync = createOrbOpacityPreferenceSync({
+    send(value) { return new Promise((resolve) => requests.push({ value, resolve })); },
+    accept(value) { accepted.push(value.opacity); },
+    fail: () => assert.fail('unexpected opacity write failure'),
+  });
+  const job = (opacity, targetKey = 'editor-lifecycle', sessionId = 'session-a') => ({ targetKey, scope: { targetId: 'editor', sessionId }, opacity });
+  sync.enqueue(job(80));
+  sync.enqueue(job(50));
+  sync.enqueue(job(20));
+  assert.equal(requests.length, 1, '写入进行中的连续取值合并为最新一次');
+  requests[0].resolve({});
+  await settle();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].value.opacity, 20);
+  requests[1].resolve({});
+  await settle();
+  assert.deepEqual(accepted, [20]);
+  sync.enqueue(job(20, 'new-target-lifecycle', 'session-b'));
+  assert.equal(requests.length, 3, '生命周期变化后相同数值也要重新应用');
+  requests[2].resolve({});
+  await settle();
+  sync.enqueue(job(20, 'new-target-lifecycle', 'session-b'));
+  assert.equal(requests.length, 3, '已确认的数值不会重复请求');
+  sync.dispose();
 });

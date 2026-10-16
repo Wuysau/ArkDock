@@ -3,7 +3,7 @@ import type { AppSnapshot, MotionIntensity } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
 import { applyMotion, createMotionPreferenceSync, motionSettings, readMotion, readMotionIntensity } from '../motion.ts';
 import type { MotionPreference } from '../motion.ts';
-import { createOrbAutoHidePreferenceSync, nativeOrbPreferenceChanged, readOrbAutoHide, saveOrbAutoHide, settledOrbChoice } from '../orb-preferences.ts';
+import { createOrbAutoHidePreferenceSync, createOrbOpacityPreferenceSync, nativeOrbPreferenceChanged, readOrbAutoHide, readOrbOpacity, saveOrbAutoHide, saveOrbOpacity, settledOrbChoice } from '../orb-preferences.ts';
 import { targetLifecycleKey } from '../dock-ripple.ts';
 import type { DesktopSession } from './useDesktopSession.ts';
 import type { Notices } from './notices.ts';
@@ -18,12 +18,15 @@ export interface Preferences {
   chooseOrbAutoHide: (enabled: boolean) => void;
   /** Adopts a native context-menu change once queued UI writes have settled. */
   adoptNativeOrbChange: (previous: AppSnapshot | null, updated: AppSnapshot) => boolean;
+  /** Effective Orb opacity in percent, 20..=100; 100 keeps the default artwork. */
+  orbOpacity: number;
+  chooseOrbOpacity: (opacity: number) => void;
 }
 
 /**
- * Native shell preferences: animation settings and orb auto-hide. Both writes are
- * serialized per target lifecycle, raced replies are dropped, and a failure
- * never loops a request — the same guarantees the inline effects had.
+ * Native shell preferences: animation settings, orb auto-hide and orb opacity.
+ * Every write is serialized per target lifecycle, raced replies are dropped, and
+ * a failure never loops a request — the same guarantees the inline effects had.
  */
 export function usePreferences({ bridge, session, notices }: {
   bridge: UiBridge; session: DesktopSession; notices: Notices;
@@ -35,9 +38,12 @@ export function usePreferences({ bridge, session, notices }: {
   const [intensity, setIntensity] = useState(readMotionIntensity);
   const [systemReduced, setSystemReduced] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const [orbAutoHide, setOrbAutoHide] = useState(readOrbAutoHide);
+  const [orbOpacity, setOrbOpacity] = useState(readOrbOpacity);
   const orbChoice = useRef(orbAutoHide);
+  const orbOpacityChoice = useRef(orbOpacity);
   const motionSync = useRef<ReturnType<typeof createMotionPreferenceSync<AppSnapshot>> | null>(null);
   const orbSync = useRef<ReturnType<typeof createOrbAutoHidePreferenceSync<AppSnapshot>> | null>(null);
+  const orbOpacitySync = useRef<ReturnType<typeof createOrbOpacityPreferenceSync<AppSnapshot>> | null>(null);
   const motionTargetKey = targetLifecycleKey(session.state);
   const effectiveMotion = motionSettings(motion, intensity, systemReduced);
 
@@ -88,7 +94,35 @@ export function usePreferences({ bridge, session, notices }: {
     orbSync.current = sync;
     return () => { sync.dispose(); if (orbSync.current === sync) orbSync.current = null; };
   }, [bridge, receive, stateRef, report]);
+  useEffect(() => {
+    const sync = createOrbOpacityPreferenceSync<AppSnapshot>({
+      send: (job) => bridge.request('set_orb_opacity', { opacity: job.opacity }, job.scope),
+      accept: (job, result) => {
+        if (job.targetKey !== targetLifecycleKey(stateRef.current) || job.scope.sessionId !== (stateRef.current?.sessionId ?? null)) return;
+        receive(result);
+        // The confirmed native value is authoritative; adopt it when it differs.
+        const confirmed = result.display.orbOpacity;
+        if (confirmed !== orbOpacityChoice.current) {
+          orbOpacityChoice.current = confirmed;
+          setOrbOpacity(confirmed);
+        }
+      },
+      fail: (job, reason) => {
+        if (job.targetKey !== targetLifecycleKey(stateRef.current) || job.scope.sessionId !== (stateRef.current?.sessionId ?? null)) return;
+        report(reason);
+        // A rejected write never happened natively: fall back to the committed value.
+        const confirmed = stateRef.current?.display.orbOpacity;
+        if (orbOpacityChoice.current === job.opacity && confirmed !== undefined && confirmed !== job.opacity) {
+          orbOpacityChoice.current = confirmed;
+          setOrbOpacity(confirmed);
+        }
+      },
+    });
+    orbOpacitySync.current = sync;
+    return () => { sync.dispose(); if (orbOpacitySync.current === sync) orbOpacitySync.current = null; };
+  }, [bridge, receive, stateRef, report]);
   useEffect(() => { if (orbAutoHide !== null) saveOrbAutoHide(orbAutoHide); }, [orbAutoHide]);
+  useEffect(() => { if (orbOpacity !== null) saveOrbOpacity(orbOpacity); }, [orbOpacity]);
   useEffect(() => {
     if (!connected || !nativeReady || !stateRef.current) return;
     const enabled = orbAutoHide ?? stateRef.current.display.orbAutoHide;
@@ -100,6 +134,16 @@ export function usePreferences({ bridge, session, notices }: {
     });
     initialSnapshotApplied.current = false;
   }, [connected, nativeReady, motionTargetKey, session.state?.sessionId, orbAutoHide, stateRef, initialSnapshotApplied]);
+  useEffect(() => {
+    if (!connected || !nativeReady || !stateRef.current) return;
+    const opacity = orbOpacity ?? stateRef.current.display.orbOpacity;
+    orbOpacityChoice.current = opacity;
+    if (orbOpacity === null) setOrbOpacity(opacity);
+    orbOpacitySync.current?.enqueue({
+      scope: { targetId: stateRef.current.target?.id ?? null, sessionId: stateRef.current.sessionId },
+      targetKey: motionTargetKey, opacity,
+    });
+  }, [connected, nativeReady, motionTargetKey, session.state?.sessionId, orbOpacity, stateRef]);
 
   const chooseOrbAutoHide = useCallback((enabled: boolean) => {
     orbChoice.current = enabled;
@@ -112,6 +156,17 @@ export function usePreferences({ bridge, session, notices }: {
     }, true);
   }, [connected, nativeReady, stateRef]);
 
+  const chooseOrbOpacity = useCallback((opacity: number) => {
+    orbOpacityChoice.current = opacity;
+    setOrbOpacity(opacity);
+    const current = stateRef.current;
+    if (!connected || !nativeReady || !current) return;
+    orbOpacitySync.current?.enqueue({
+      scope: { targetId: current.target?.id ?? null, sessionId: current.sessionId },
+      targetKey: targetLifecycleKey(current), opacity,
+    }, true);
+  }, [connected, nativeReady, stateRef]);
+
   const adoptNativeOrbChange = useCallback((previous: AppSnapshot | null, updated: AppSnapshot) => {
     if (!nativeReadyRef.current || initialSnapshotApplied.current || orbSync.current?.pending()
       || !nativeOrbPreferenceChanged(previous, updated) || orbChoice.current === updated.display.orbAutoHide) return false;
@@ -120,5 +175,6 @@ export function usePreferences({ bridge, session, notices }: {
     return true;
   }, [nativeReadyRef, initialSnapshotApplied]);
 
-  return { motion, setMotion, intensity, setIntensity, effectiveMotion, chooseOrbAutoHide, adoptNativeOrbChange };
+  return { motion, setMotion, intensity, setIntensity, effectiveMotion, chooseOrbAutoHide, adoptNativeOrbChange,
+    orbOpacity: orbOpacity ?? session.state?.display.orbOpacity ?? 100, chooseOrbOpacity };
 }

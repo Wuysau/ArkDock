@@ -92,7 +92,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
   const { panel, anchor, navigate: navigateTo, open: openPanel, openAutomatic, resetAutomatic } = navigation;
   const { act, cancelAssociation, pending, cancelling, pendingRef, activeCommand, cancelRequested } = commands;
   const { report, notify, clear } = notices;
-  const { motion, intensity, effectiveMotion, adoptNativeOrbChange, setMotion, setIntensity, chooseOrbAutoHide } = preferences;
+  const { motion, intensity, effectiveMotion, adoptNativeOrbChange, setMotion, setIntensity, chooseOrbAutoHide, orbOpacity, chooseOrbOpacity } = preferences;
 
   const ui = deriveUiState(state, null);
   const pair = pairControl(state);
@@ -275,7 +275,7 @@ export function App({ bridge = nativeBridge }: { bridge?: UiBridge } = {}) {
       {panel === 'path' && <PathPanel snapshot={state} busy={busy} copy={(text, label) => void copy(text, label)} browse={() => navigate('projects')} untrust={() => void untrustCurrentProject()} />}
       {panel === 'settings' && <SettingsPanel snapshot={state} shell={shell} theme={theme} setTheme={setTheme}
         motion={motion} setMotion={setMotion} intensity={intensity} setIntensity={setIntensity}
-        chooseOrbAutoHide={chooseOrbAutoHide} changeDisplay={(command) => void changeDisplay(command)} pair={pair} detach={() => void detach()} open={(next) => navigate(next)} />}
+        chooseOrbAutoHide={chooseOrbAutoHide} orbOpacity={orbOpacity} chooseOrbOpacity={chooseOrbOpacity} changeDisplay={(command) => void changeDisplay(command)} pair={pair} detach={() => void detach()} open={(next) => navigate(next)} />}
       {panel === 'menu' && <MenuPanel snapshot={state} shell={shell} pair={pair} intents={menuIntents} />}
       {panel === 'controls' && <PreviewCapabilities snapshot={state} store={store} busy={busy} controls={controls} refresh={async () => { if (await act('refresh_preview', {})) navigate(null); }} />}
       {panel === 'diagnostics' && <RuntimeLogs snapshot={state} />}
