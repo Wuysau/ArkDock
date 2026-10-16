@@ -4,12 +4,14 @@ import { App } from '../../src/App.tsx';
 import '../../src/styles.css';
 import { createFixtureDriver, scenarios } from './fixtures.ts';
 import type { FixtureDriver, Scenario } from './fixtures.ts';
+import { isTheme } from '../../src/theme.ts';
 
 declare global { interface Window { __ARKDOCK_DEMO__: FixtureDriver } }
 const query = new URLSearchParams(location.search);
 const requested = query.get('scenario');
 const initial: Scenario = requested && requested in scenarios ? requested as Scenario : 'welcome';
-if (query.get('theme') === 'dark' || query.get('theme') === 'light') localStorage.setItem('arkdock:theme', query.get('theme')!);
+const requestedTheme = query.get('theme');
+if (isTheme(requestedTheme)) localStorage.setItem('arkdock:theme', requestedTheme);
 const driver = createFixtureDriver(initial);
 window.__ARKDOCK_DEMO__ = driver;
 function Demo() {

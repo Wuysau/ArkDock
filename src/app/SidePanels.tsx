@@ -4,6 +4,8 @@ import { displayPath } from '../path-display.ts';
 import { environmentLabel } from './candidates.ts';
 import type { Panel } from './navigation.ts';
 import { Icon } from '../Icon.tsx';
+import { themeOptions } from '../theme.ts';
+import type { Theme } from '../theme.ts';
 
 /** Shell-level display and window intents shared by the settings and menu panels. */
 export interface ShellControls {
@@ -54,7 +56,7 @@ export function PathPanel({ snapshot, busy, copy, browse, untrust }: {
 
 export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMotion, intensity, setIntensity, chooseOrbAutoHide, changeDisplay, pair, detach, open }: {
   snapshot: AppSnapshot | null; shell: ShellControls;
-  theme: 'dark' | 'light' | 'system'; setTheme: (value: 'dark' | 'light' | 'system') => void;
+  theme: Theme; setTheme: (value: Theme) => void;
   motion: MotionPreference; setMotion: (value: MotionPreference) => void;
   intensity: MotionIntensity; setIntensity: (value: MotionIntensity) => void;
   chooseOrbAutoHide: (enabled: boolean) => void;
@@ -63,7 +65,21 @@ export function SettingsPanel({ snapshot, shell, theme, setTheme, motion, setMot
 }) {
   const { connected, nativeReady, displayBusy } = shell;
   return <>
-    <div className="settings-card"><h3>工具外观</h3><p className="muted">仅改变 ArkDock 外壳，不改变鸿蒙应用主题。</p><div className="theme-options" aria-label="外观主题">{(['dark', 'light', 'system'] as const).map((option) => <button key={option} className={theme === option ? 'selected' : ''} aria-pressed={theme === option} onClick={() => setTheme(option)}><Icon name={option === 'light' ? 'sun' : option === 'dark' ? 'moon' : 'monitor'} size={20} />{option === 'light' ? '浅色' : option === 'dark' ? '深色' : '跟随系统'}</button>)}</div></div>
+    <div className="settings-card"><h3>工具外观</h3><p className="muted">仅改变 ArkDock 外壳，不改变鸿蒙应用主题。</p><div className="theme-options" aria-label="外观主题">{themeOptions.map((option) => {
+      const selected = theme === option.id;
+      const descId = `theme-desc-${option.id}`;
+      return <div key={option.id} className={`theme-card ${selected ? 'selected' : ''}`} data-theme-id={option.id}>
+        <button type="button" className={`theme-card-button ${selected ? 'selected' : ''}`} aria-pressed={selected} aria-describedby={descId} onClick={() => setTheme(option.id)}>
+          <span className="theme-swatch" data-swatch={option.id} aria-hidden="true">
+            <span className="swatch-canvas" style={{ background: option.swatches[0] }} />
+            <span className="swatch-surface" style={{ background: option.swatches[1] }} />
+            <span className="swatch-accent" style={{ background: option.swatches[2] }} />
+          </span>
+          <span className="theme-card-heading"><Icon name={option.icon} size={15} /><strong>{option.label}</strong><span className="theme-card-check" aria-hidden="true" /></span>
+        </button>
+        <small id={descId} className="theme-card-description">{option.description}</small>
+      </div>;
+    })}</div></div>
     <div className="settings-card"><h3>动画偏好</h3><p className="muted">系统减少动画优先生效；关闭或轻量时不播放贴边涟漪与悬浮球装饰。</p><div className="motion-options" aria-label="减少动画偏好">{(['system', 'reduce'] as const).map((option) => <button key={option} aria-pressed={motion === option} className={motion === option ? 'selected' : ''} onClick={() => setMotion(option)}>{option === 'system' ? '跟随系统动画' : '减少动画'}</button>)}</div><div className="intensity-options" aria-label="动效强度">{(['off', 'light', 'standard', 'enhanced'] as const).map((option) => <button key={option} aria-pressed={intensity === option} className={intensity === option ? 'selected' : ''} onClick={() => setIntensity(option)}>{({ off: '关闭', light: '轻量', standard: '标准', enhanced: '增强' })[option]}</button>)}</div><output className="motion-status">{!connected ? '桌面桥接未连接，原生动效偏好尚未同步。' : snapshot?.motion.reduced ? '原生窗口已减少动画。' : snapshot?.motion.intensity === 'off' ? '原生窗口动效已关闭。' : snapshot?.motion.intensity === 'light' ? '原生窗口使用轻量动效。' : snapshot?.motion.intensity === 'enhanced' ? '原生窗口使用增强动效。' : '原生窗口使用标准动效。'}</output></div>
     <div className="settings-card"><h3>悬浮球</h3><label className="setting-toggle"><span><strong>贴边自动隐藏</strong><small>悬浮球闲置时沿屏幕边缘收起，靠近后恢复显示。</small></span><input type="checkbox" role="switch" aria-checked={snapshot?.display.orbAutoHide ?? false} aria-label="悬浮球贴边自动隐藏" checked={snapshot?.display.orbAutoHide ?? false} disabled={!connected || !nativeReady || displayBusy} onChange={(event) => chooseOrbAutoHide(event.target.checked)} /></label><button disabled={!connected || !nativeReady || displayBusy || snapshot?.display.mode !== 'expanded'} onClick={() => changeDisplay('collapse_to_orb')}><span className="orb-symbol" aria-hidden="true" />收起为悬浮球</button></div>
     <div className="settings-card"><h3>窗口与工程</h3><p className="pair-mode-description">{pair.label}{snapshot?.pairLayout?.reason && ` · ${snapshot.pairLayout.reason}`}</p><p className="muted">两个独立窗口全贴合，尺寸联动；共同最大化时 ArkDock 保持右侧。解除绑定会停止自有预览资源。</p><button disabled={!snapshot?.target || shell.busy} onClick={detach}>解除当前绑定</button>{snapshot?.project && <button onClick={() => open('path')}>管理工程信任</button>}</div>
