@@ -88,10 +88,9 @@ impl ContextPairingStore {
         let _operation = self.lock()?;
         self.ensure_parent()?;
         let export = self.export_path(export)?;
-        let pairing_file = export
-            .to_str()
-            .ok_or("CONTEXT_PAIRING_PATH_INVALID")?
-            .to_owned();
+        // The user pastes this value into another tool's configuration, so it must be the
+        // ordinary spelling, not the extended-length one `canonicalize` returns.
+        let pairing_file = reported_path(&export)?;
         let file = PairingFile {
             version: 1,
             pipe_name: CONTEXT_PIPE_NAME.to_owned(),
@@ -200,6 +199,62 @@ impl ContextPairingStore {
             return Err("CONTEXT_PAIRING_STATE_INVALID".into());
         }
         decode_token(&pairing.credential).map(Some)
+    }
+}
+
+/// The path this backend reports for a user-selected export.
+///
+/// Windows `canonicalize` returns an extended-length path (`\\?\D:\...`). That spelling
+/// is correct for our own file access, but the pairing path is not ours to consume: the
+/// user must paste it into another tool's configuration, where quoting, JSON/TOML
+/// escaping and host-side normalization all become error-prone and the prefix carries no
+/// ordinary-path meaning. Report the ordinary spelling instead; every filesystem
+/// operation still uses the canonical path.
+///
+/// This mirrors `src/path-display.ts::displayPath` on the frontend. The contract must be
+/// clean on its own, so both layers apply the rule.
+fn reported_path(path: &Path) -> Result<String, String> {
+    let value = path.to_str().ok_or("CONTEXT_PAIRING_PATH_INVALID")?;
+    #[cfg(windows)]
+    {
+        Ok(ordinary_windows_path(value))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(value.to_owned())
+    }
+}
+
+/// Pure form of the Windows rule, so it is testable on every host.
+///
+/// `\\?\C:\dir\x.json` becomes `C:\dir\x.json`, and `\\?\UNC\server\share\x.json`
+/// becomes `\\server\share\x.json` (a network remainder needs both a server and a
+/// share). Device and volume namespaces (`\\?\Volume{...}`, `\\?\GLOBALROOT\...`) have
+/// no ordinary equivalent and stay unchanged, as does anything that is not an
+/// extended-length path.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ordinary_windows_path(value: &str) -> String {
+    let Some(remainder) = value.strip_prefix(r"\\?\") else {
+        return value.to_owned();
+    };
+    if let Some(network) = remainder.strip_prefix(r"UNC\") {
+        // `\\?\UNC\server\share` names the same file as `\\server\share`; a remainder
+        // without both parts is not a network path and is left alone.
+        let mut parts = network.split('\\');
+        let (Some(server), Some(share)) = (parts.next(), parts.next()) else {
+            return value.to_owned();
+        };
+        if server.is_empty() || share.is_empty() {
+            return value.to_owned();
+        }
+        return format!(r"\\{network}");
+    }
+    let mut characters = remainder.chars();
+    let drive_letter = matches!((characters.next(), characters.next()), (Some(letter), Some(':')) if letter.is_ascii_alphabetic());
+    if drive_letter {
+        remainder.to_owned()
+    } else {
+        value.to_owned()
     }
 }
 
@@ -421,6 +476,57 @@ mod tests {
             .install(&store.path, &ContextHub::new(), [0xaa; 32])
             .is_err());
         assert!(!store.path.exists());
+    }
+
+    #[test]
+    fn the_reported_path_drops_only_a_removable_extended_length_prefix() {
+        // An ordinary drive path is what the host configuration needs.
+        assert_eq!(
+            ordinary_windows_path(r"\\?\D:\Projects\demo\arkdock-context-pairing.json"),
+            r"D:\Projects\demo\arkdock-context-pairing.json"
+        );
+        assert_eq!(
+            ordinary_windows_path(r"\\?\UNC\server\share\arkdock-context-pairing.json"),
+            r"\\server\share\arkdock-context-pairing.json"
+        );
+        // Device and volume namespaces have no ordinary spelling.
+        for value in [
+            r"\\?\Volume{0f9a1b2c-0000-0000-0000-100000000000}\arkdock-context-pairing.json",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\arkdock-context-pairing.json",
+            // A network part without a server and a share is not a UNC path.
+            r"\\?\UNC\\share\arkdock-context-pairing.json",
+        ] {
+            assert_eq!(ordinary_windows_path(value), value, "{value}");
+        }
+        // Already ordinary paths, UNC paths and POSIX paths are unchanged.
+        for value in [
+            r"D:\arkdock-context-pairing.json",
+            r"\\server\share\arkdock-context-pairing.json",
+            r"\\.\pipe\arkdock-context",
+            "/home/user/arkdock-context-pairing.json",
+        ] {
+            assert_eq!(ordinary_windows_path(value), value, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_reported_pairing_path_names_the_exported_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContextPairingStore::new(directory.path().join("app-data"));
+        let export = directory.path().join("arkdock-context-pairing.json");
+        let hub = ContextHub::new();
+        let pairing = store.install(&export, &hub, [0xaa; 32]).unwrap();
+        // The path the user copies must be usable as-is, without the extended-length
+        // prefix that Windows canonicalization would otherwise introduce.
+        assert!(
+            !pairing.pairing_file.starts_with(r"\\?\"),
+            "{}",
+            pairing.pairing_file
+        );
+        let file: PairingFile =
+            serde_json::from_slice(&fs::read(&pairing.pairing_file).unwrap()).unwrap();
+        assert_eq!(file.credential, "aa".repeat(32));
+        assert_eq!(file.pipe_name, CONTEXT_PIPE_NAME);
     }
 
     #[cfg(windows)]
