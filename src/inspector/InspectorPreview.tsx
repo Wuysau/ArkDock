@@ -211,7 +211,7 @@ export function InspectorPreview({ bridge, interactionMode, exit, actions, onPro
   return <div className="inspector-preview">
     <PreviewStage {...stage} interactionMode={interactionMode} overlay={interactionMode === 'inspect' && frame && current
       ? <SelectionOverlay width={frame.width} height={frame.height} index={index} regionMode={manualRegion || regionMode || !matched} selected={selection?.componentBounds ?? null} select={(bounds, node, hits) => void select(bounds, node, hits)} reject={onError} /> : undefined} />
-    {interactionMode === 'inspect' && selection && <SelectionPanel key={selection.selectionId} selection={selection} stale={stale} candidates={candidates} scope={scope} bridge={bridge} updated={(saved) => {
+    {interactionMode === 'inspect' && selection && <SelectionPanel key={selection.selectionId} selection={selection} stale={stale} candidates={candidates} scope={scope} snapshot={stage.snapshot} visible={stage.visible !== false && !stage.inputPaused} bridge={bridge} updated={(saved) => {
       const currentSelection = selectionRef.current;
       const currentState = stateRef.current;
       if (panelSerial === selectionSerial.current && currentSelection?.selectionId === saved.selectionId && currentState?.project?.id === saved.workspaceId && currentState.sessionId === saved.sessionId

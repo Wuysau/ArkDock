@@ -9,14 +9,14 @@ import type { InspectorBounds, InspectorNode, RequestScope, SelectionContext } f
 import '../../src/styles.css';
 import '../../src/inspector/inspector.css';
 
-const scenarios = ['idle-empty', 'idle-filled', 'pending-inspect', 'confirmed-offer', 'inspect-failure',
+const scenarios = ['idle-empty', 'idle-filled',
   'overlay-pointer', 'overlay-semantic', 'overlay-keyboard'] as const;
 type Scenario = typeof scenarios[number];
 const requested = new URLSearchParams(location.search).get('scenario');
 const scenario: Scenario = scenarios.includes(requested as Scenario) ? requested as Scenario : 'idle-empty';
 const scope = { targetId: 'layout-fixture-target', sessionId: 'layout-fixture-session' };
 const calls: string[] = [];
-const progress = { imageReads: 0, inspectReads: 0, selectedContexts: 0 };
+const progress = { imageReads: 0, selectedContexts: 0 };
 const eventSelections: { nodeId: string | null; bounds: InspectorBounds }[] = [];
 const eventNode: InspectorNode = { nodeId: 'fixture-center-button', componentType: 'Button', parentId: null, children: [],
   bounds: { x: 120, y: 260, width: 120, height: 120 }, visible: true, attributes: [], page: 'UI fixture only', depth: 0, paintOrder: 1 };
@@ -56,32 +56,17 @@ async function testTransfer(command: DataCommand, args: Record<string, unknown>,
   await delay();
   if (command === 'selection_read_image') { const bytes = await testImage(Boolean(args.crop)); progress.imageReads++; return bytes; }
   if (command === 'selection_update_instruction') { selection = { ...selection, userInstruction: String(args.userInstruction) }; return selection; }
-  if (command === 'agent_assisted_inspect') {
-    progress.inspectReads++;
-    if (scenario === 'pending-inspect') return new Promise<never>(() => {});
-    if (scenario === 'inspect-failure') throw new Error('TEST fixture cannot confirm an empty target composer');
-    if (scenario !== 'confirmed-offer') throw new Error('TEST fixture has no inspected composer');
-    return { confirmationId: 'fixture-offer',
-    targetId: scope.targetId, app: 'Synthetic TEST Agent', pid: 1,
-    composerName: 'TEST composer · very long synthetic input area description for layout', expiresAt: expiry,
-    reason: '这是测试桥接返回的辅助填写提议，不会检查任何外部窗口。此长说明用于检查辅助填写状态的按钮是否仍在初始视口中。' };
-  }
-  // Do not implement prompt, prepare, send, fill, pairing, export, or clipboard routes.
+  // This layout fixture refuses task submission, export, and clipboard routes.
   throw new Error(`TEST fixture refuses side effect: ${command}`);
 }
 const bridge: UiBridge = { available: true, request: async () => { throw new Error('TEST fixture has no native snapshot'); },
-  observe: async () => () => {}, transfer: testTransfer as UiBridge['transfer'] };
+  observe: async () => () => {}, mcpStatus: async () => { calls.push('mcp_status'); return { available: true, reason: '', configuration: { command: 'UI fixture only', args: ['--mcp'], json: '{}' }, contexts: [], tasks: [] }; }, transfer: testTransfer as UiBridge['transfer'] };
 
 declare global { interface Window { __ARKDOCK_SELECTION_LAYOUT__: {
-  scenario: Scenario; calls: string[]; progress: typeof progress; requestAssisted: () => boolean;
+  scenario: Scenario; calls: string[]; progress: typeof progress;
   eventSelections: typeof eventSelections;
 } } }
-window.__ARKDOCK_SELECTION_LAYOUT__ = { scenario, calls, progress, eventSelections, requestAssisted: () => {
-  const control = [...document.querySelectorAll<HTMLButtonElement>('.agent-delivery button')]
-    .find((button) => button.textContent === '检查目标输入框');
-  if (!control || control.disabled) return false;
-  control.click(); return true;
-} };
+window.__ARKDOCK_SELECTION_LAYOUT__ = { scenario, calls, progress, eventSelections };
 
 function Demo() {
   const overlayScenario = scenario.startsWith('overlay-');
@@ -106,7 +91,7 @@ function Demo() {
               selected={selected?.componentBounds ?? null} select={commit} />}
             <output className="inspection-status"><span>已选择合成组件</span><button>框选</button><button>刷新树</button></output>
             {selected && <SelectionPanel key={selected.selectionId} selection={selected} stale={false} candidates={candidates}
-              scope={scope} bridge={bridge} choose={() => {}} close={() => {}} updated={setSelected}/>}
+              scope={scope} snapshot={null} visible bridge={bridge} choose={() => {}} close={() => {}} updated={setSelected}/>}
           </div>
         </section>
         <footer className="footer"><button className="status-summary"><span className="dot"/><span className="status-copy"><strong>UI 布局验证</strong><span>无原生后端，无外部发送</span></span><span className="diagnostic-count">TEST bridge</span></button></footer>

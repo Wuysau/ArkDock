@@ -48,6 +48,14 @@ macro_rules! error_table {
 // Categories: validation, state, trust, environment, storage, discovery, toolchain,
 // transport, selection, agent, internal.
 error_table![
+    (
+        "MCP_REQUEST_REJECTED",
+        McpRequestRejected,
+        Agent,
+        false,
+        ReadDiagnostics,
+        "MCP 请求未完成，请检查连接、工程确认与任务状态"
+    ),
     // Request-level validation and authorization of the caller itself.
     (
         "UNAUTHORIZED_WINDOW",
@@ -434,78 +442,6 @@ error_table![
         "The page is not part of the verified compiled artifact"
     ),
     (
-        "AGENT_INSTRUCTION_REQUIRED",
-        AgentInstructionRequired,
-        Validation,
-        false,
-        CorrectRequest,
-        "Write the instruction that should be delivered to the Agent"
-    ),
-    (
-        "AGENT_SESSION_ID_INVALID",
-        AgentSessionIdInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "The Agent session identifier is malformed"
-    ),
-    (
-        "AGENT_TIMESTAMP_INVALID",
-        AgentTimestampInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "The Agent-provided timestamp is outside the accepted clock skew"
-    ),
-    (
-        "AGENT_CONTEXT_INVALID",
-        AgentContextInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "The Agent request context is malformed"
-    ),
-    (
-        "AGENT_BINDING_REQUIRED",
-        AgentBindingRequired,
-        Validation,
-        false,
-        CorrectRequest,
-        "Choose an available Agent session before binding"
-    ),
-    (
-        "AGENT_PAIR_PATH_INVALID",
-        AgentPairPathInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "Choose a local path for the pairing credential"
-    ),
-    (
-        "PAIRING_PATH_INVALID",
-        PairingPathInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "The pairing credential path is not an accepted local path"
-    ),
-    (
-        "ASSISTED_PROMPT_REQUIRED",
-        AssistedPromptRequired,
-        Validation,
-        false,
-        CorrectRequest,
-        "The assisted fill requires the prepared prompt text"
-    ),
-    (
-        "ASSISTED_ACTION_INVALID",
-        AssistedActionInvalid,
-        Validation,
-        false,
-        CorrectRequest,
-        "The assisted action is not implemented for this command"
-    ),
-    (
         "EXPORT_CANCELLED",
         ExportCancelled,
         Validation,
@@ -528,14 +464,6 @@ error_table![
         false,
         None,
         "No SDK directory was selected"
-    ),
-    (
-        "PAIRING_SAVE_CANCELLED",
-        PairingSaveCancelled,
-        Validation,
-        false,
-        None,
-        "The pairing credential was not saved and nothing was paired"
     ),
     // Session, target and transport identity.
     (
@@ -971,14 +899,6 @@ error_table![
         ConfirmTrust,
         "The build configuration changed; confirm trust again"
     ),
-    (
-        "AGENT_LOCAL_TRUSTED_WORKSPACE_REQUIRED",
-        AgentLocalTrustedWorkspaceRequired,
-        Trust,
-        false,
-        ConfirmTrust,
-        "The Agent bridge needs a local trusted workspace"
-    ),
     // Host environment and windowing.
     (
         "UNSUPPORTED_ENVIRONMENT",
@@ -1263,78 +1183,6 @@ error_table![
         true,
         RetryRequest,
         "The export worker stopped unexpectedly"
-    ),
-    (
-        "PAIRING_LOCAL_DISK_REQUIRED",
-        PairingLocalDiskRequired,
-        Storage,
-        false,
-        None,
-        "The pairing credential must be written to a local disk path"
-    ),
-    (
-        "PAIRING_PRIVATE_ACL_FAILED",
-        PairingPrivateAclFailed,
-        Storage,
-        false,
-        ReadDiagnostics,
-        "The pairing credential could not be restricted to the current user"
-    ),
-    (
-        "PAIRING_RANDOM_FAILED",
-        PairingRandomFailed,
-        Storage,
-        false,
-        RetryRequest,
-        "No secure random source was available for the pairing credential"
-    ),
-    (
-        "PAIRING_REPLACE_FAILED",
-        PairingReplaceFailed,
-        Storage,
-        true,
-        RetryRequest,
-        "The pairing credential could not be replaced"
-    ),
-    (
-        "PAIRING_ROLLBACK_FAILED",
-        PairingRollbackFailed,
-        Storage,
-        false,
-        ReadDiagnostics,
-        "The pairing credential rollback failed; inspect the credential directory"
-    ),
-    (
-        "PAIRING_SERIALIZE_FAILED",
-        PairingSerializeFailed,
-        Internal,
-        false,
-        ReadDiagnostics,
-        "The pairing credential could not be serialized"
-    ),
-    (
-        "PAIRING_WRITE_FAILED",
-        PairingWriteFailed,
-        Storage,
-        false,
-        ReadDiagnostics,
-        "The pairing credential write did not settle; nothing was paired"
-    ),
-    (
-        "PAIRING_WRITE_TIMEOUT",
-        PairingWriteTimeout,
-        Storage,
-        false,
-        ReadDiagnostics,
-        "The pairing credential write timed out; nothing was paired"
-    ),
-    (
-        "PAIRING_CANCELLED",
-        PairingCancelled,
-        State,
-        false,
-        None,
-        "The pending pairing was cancelled; nothing was paired"
     ),
     // Read-only project discovery.
     (
@@ -1675,38 +1523,6 @@ error_table![
         None,
         "Reconnect the selected target on the device"
     ),
-    (
-        "AGENT_TRANSPORT_UNAVAILABLE",
-        AgentTransportUnavailable,
-        Transport,
-        false,
-        ReadDiagnostics,
-        "No implemented Agent transport is available"
-    ),
-    (
-        "AGENT_TRANSPORT_UNSUPPORTED",
-        AgentTransportUnsupported,
-        Transport,
-        false,
-        None,
-        "This Agent transport is unsupported"
-    ),
-    (
-        "AGENT_TRANSPORT_LEASE_EXPIRED",
-        AgentTransportLeaseExpired,
-        Transport,
-        false,
-        RefreshSnapshot,
-        "The Agent transport lease expired; re-verify the session"
-    ),
-    (
-        "AGENT_TRANSPORT_DELIVERY_LIMIT_REPAIR_REQUIRED",
-        AgentTransportDeliveryLimitRepairRequired,
-        Transport,
-        false,
-        ReadDiagnostics,
-        "The Agent transport delivery limit was reached; repair the binding"
-    ),
     // Selection lifecycle.
     (
         "SELECTION_NOT_FOUND",
@@ -1863,364 +1679,12 @@ error_table![
     // Agent sessions, pairing and delivery. These operations are not idempotent, so
     // none of them is retryable and none suggests an automatic retry.
     (
-        "AGENT_ADAPTER_NOT_IMPLEMENTED",
-        AgentAdapterNotImplemented,
-        Agent,
-        false,
-        None,
-        "No adapter implements this Agent kind"
-    ),
-    (
-        "AGENT_BINDING_EXPIRED",
-        AgentBindingExpired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent binding expired; verify the session again"
-    ),
-    (
-        "AGENT_BINDING_LIMIT",
-        AgentBindingLimit,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent binding limit was reached"
-    ),
-    (
-        "AGENT_BINDING_NOT_FOUND",
-        AgentBindingNotFound,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent binding is unknown or expired"
-    ),
-    (
-        "AGENT_BUSY_RETRY_AFTER_CURRENT_TURN",
-        AgentBusyRetryAfterCurrentTurn,
-        Agent,
-        false,
-        AwaitCurrentOperation,
-        "The Agent is busy; retry manually after the current turn"
-    ),
-    (
-        "AGENT_DELIVERY_LIMIT_WAIT_FOR_SELECTION_EXPIRY",
-        AgentDeliveryLimitWaitForSelectionExpiry,
-        Agent,
-        false,
-        AwaitCurrentOperation,
-        "The Agent delivery limit was reached; wait for a selection to expire"
-    ),
-    (
-        "AGENT_DELIVERY_NOT_FOUND",
-        AgentDeliveryNotFound,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent delivery is unknown"
-    ),
-    (
-        "AGENT_PAIR_ALREADY_USED",
-        AgentPairAlreadyUsed,
-        Agent,
-        false,
-        None,
-        "This pairing credential was already activated"
-    ),
-    (
-        "AGENT_PAIR_EXPIRED",
-        AgentPairExpired,
-        Agent,
-        false,
-        None,
-        "The pending pairing expired; nothing was paired"
-    ),
-    (
-        "AGENT_PAIR_EXPIRED_OR_WRONG_KIND",
-        AgentPairExpiredOrWrongKind,
-        Agent,
-        false,
-        None,
-        "The pairing credential expired or names another Agent kind"
-    ),
-    (
-        "AGENT_PAIR_PREPARE_REQUIRED",
-        AgentPairPrepareRequired,
-        Agent,
-        false,
-        None,
-        "Prepare the pairing before activating it"
-    ),
-    (
-        "AGENT_PAIR_PREPARE_SUPERSEDED",
-        AgentPairPrepareSuperseded,
-        Agent,
-        false,
-        None,
-        "A newer pairing preparation replaced this one"
-    ),
-    (
-        "AGENT_PAIR_REQUIRED",
-        AgentPairRequired,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "No active Agent pairing credential"
-    ),
-    (
-        "AGENT_PAIR_REVOKED",
-        AgentPairRevoked,
-        Agent,
-        false,
-        None,
-        "The pairing credential was revoked"
-    ),
-    (
-        "AGENT_PAIR_SCOPE_CHANGED",
-        AgentPairScopeChanged,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The target or session changed during pairing; nothing was paired"
-    ),
-    (
-        "AGENT_PAIRING_IN_PROGRESS",
-        AgentPairingInProgress,
-        Agent,
-        false,
-        AwaitCurrentOperation,
-        "A pairing write is still settling; retry manually afterwards"
-    ),
-    (
-        "AGENT_PREVIEW_SESSION_REQUIRED",
-        AgentPreviewSessionRequired,
-        Agent,
-        false,
-        RestartPreview,
-        "An active preview session is required for Agent delivery"
-    ),
-    (
-        "AGENT_RECEIPT_INVALID",
-        AgentReceiptInvalid,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent receipt is invalid"
-    ),
-    (
-        "AGENT_RECEIPT_MISMATCH",
-        AgentReceiptMismatch,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent receipt does not match the submitted delivery"
-    ),
-    (
-        "AGENT_RECEIPT_SCOPE_MISMATCH",
-        AgentReceiptScopeMismatch,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent receipt names another scope"
-    ),
-    (
-        "AGENT_RECEIPT_TRANSITION_INVALID",
-        AgentReceiptTransitionInvalid,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent receipt transition is not allowed"
-    ),
-    (
-        "AGENT_REGISTRATION_EXPIRED",
-        AgentRegistrationExpired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent registration expired"
-    ),
-    (
-        "AGENT_REGISTRATION_INVALID",
-        AgentRegistrationInvalid,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent registration is invalid"
-    ),
-    (
-        "AGENT_REGISTRATION_REQUIRED",
-        AgentRegistrationRequired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "No matching Agent registration was observed"
-    ),
-    (
-        "AGENT_REGISTRATION_SCOPE_INVALID",
-        AgentRegistrationScopeInvalid,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent registration names another scope"
-    ),
-    (
-        "AGENT_REQUEST_DEADLINE",
-        AgentRequestDeadline,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent request passed its deadline"
-    ),
-    (
-        "AGENT_ROUTE_NOT_FOUND",
-        AgentRouteNotFound,
-        Agent,
-        false,
-        None,
-        "No Agent route matches this request"
-    ),
-    (
-        "AGENT_RUNTIME_LEASE_EXPIRED",
-        AgentRuntimeLeaseExpired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent runtime lease expired"
-    ),
-    (
-        "AGENT_RUNTIME_UNAVAILABLE",
-        AgentRuntimeUnavailable,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent runtime is unavailable"
-    ),
-    (
-        "AGENT_SELECTION_CHANGED",
-        AgentSelectionChanged,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The selection changed before delivery"
-    ),
-    (
-        "AGENT_SELECTION_SCOPE_MISMATCH",
-        AgentSelectionScopeMismatch,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The selection belongs to another session"
-    ),
-    (
-        "AGENT_SESSION_CHANGED_REPAIR_REQUIRED",
-        AgentSessionChangedRepairRequired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent session changed; repair the binding"
-    ),
-    (
-        "AGENT_SESSION_MISMATCH",
-        AgentSessionMismatch,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The Agent session does not match this binding"
-    ),
-    (
-        "AGENT_TARGET_LIFECYCLE_MISMATCH",
-        AgentTargetLifecycleMismatch,
-        Agent,
-        false,
-        ReselectTarget,
-        "The target window lifecycle changed; dock again"
-    ),
-    (
-        "AGENT_TARGET_REQUIRED",
-        AgentTargetRequired,
-        Agent,
-        false,
-        ReselectTarget,
-        "Connect a target window first"
-    ),
-    (
-        "AGENT_WORKSPACE_MISMATCH",
-        AgentWorkspaceMismatch,
-        Agent,
-        false,
-        ReselectProject,
-        "The Agent session belongs to another workspace"
-    ),
-    (
-        "AGENT_WORKSPACE_REQUIRED",
-        AgentWorkspaceRequired,
-        Agent,
-        false,
-        ReselectProject,
-        "Associate a project before Agent delivery"
-    ),
-    (
-        "AGENT_UNAUTHORIZED",
-        AgentUnauthorized,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The Agent request was not authorized"
-    ),
-    (
         "PAIR_REQUIRED",
         PairRequired,
         Agent,
         false,
         None,
         "No active pairing authorizes this Agent operation"
-    ),
-    (
-        "ASSISTED_CANCELLED",
-        AssistedCancelled,
-        Agent,
-        false,
-        AwaitCurrentOperation,
-        "The assisted operation was cancelled; confirm again before retrying"
-    ),
-    (
-        "ASSISTED_REPLY_INVALID",
-        AssistedReplyInvalid,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The assisted operation produced an unexpected reply"
-    ),
-    (
-        "ASSISTED_REQUEST_PENDING",
-        AssistedRequestPending,
-        Agent,
-        false,
-        AwaitCurrentOperation,
-        "An assisted operation is already running"
-    ),
-    (
-        "ASSISTED_SCOPE_CHANGED_RECONFIRM_REQUIRED",
-        AssistedScopeChangedReconfirmRequired,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The scope changed; inspect the window again before filling"
-    ),
-    (
-        "ASSISTED_TIMEOUT_OR_CANCELLED",
-        AssistedTimeoutOrCancelled,
-        Agent,
-        false,
-        RefreshSnapshot,
-        "The assisted operation timed out or was cancelled; verify the result manually"
-    ),
-    (
-        "ASSISTED_UNAVAILABLE",
-        AssistedUnavailable,
-        Agent,
-        false,
-        ReadDiagnostics,
-        "The assisted automation controller is unavailable"
     ),
     // Everything the contract does not recognise. Details are intentionally dropped.
     (
@@ -2268,6 +1732,15 @@ impl IpcError {
         };
         match spec_for(wire) {
             Some(spec) => Self::build(spec, residual),
+            None if wire.starts_with("MCP_")
+                && wire.len() <= MAX_CODE_CHARS
+                && is_code_token(wire) =>
+            {
+                Self::build(
+                    spec_for("MCP_REQUEST_REJECTED").expect("declared MCP error"),
+                    wire,
+                )
+            }
             // An unclassified failure never echoes the original text: it may contain
             // paths, tokens, or a foreign window title. Diagnostics keep the raw text.
             None => Self::internal(),
@@ -2624,11 +2097,7 @@ mod tests {
         }
         // The request-level timeout can be reported after the operation already
         // started, so it must never invite an automatic retry.
-        for wire in [
-            "REQUEST_TIMEOUT",
-            "DATA_REQUEST_TIMEOUT",
-            "PAIRING_WRITE_TIMEOUT",
-        ] {
+        for wire in ["REQUEST_TIMEOUT", "DATA_REQUEST_TIMEOUT"] {
             let spec = spec_for(wire).expect("declared");
             assert!(!spec.retryable, "{wire}");
         }

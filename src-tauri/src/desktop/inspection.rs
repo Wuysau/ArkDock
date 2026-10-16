@@ -17,17 +17,10 @@ pub(super) enum DataAction {
     SelectionInstruction(String, String),
     SelectionPrompt(String, bool),
     SelectionImage(String, bool),
-    AgentList,
-    AgentBind(AgentBindingDraft),
-    /// Pairing for `AgentKind`, saving the credential to the given path.
-    PairCreate(AgentKind, String, Arc<crate::agent::pairing::CommitPermit>),
-    PairRevoke,
-    RegistrationBind(String),
-    AssistedInspect,
-    AssistedFill(String, String),
-    DeliveryPrepare(String, Option<String>),
-    DeliverySend(String),
-    DeliveryStatus(String),
+    McpStatus,
+    McpRevoke(String),
+    McpSubmit(String, String),
+    McpRetry(String, String),
 }
 pub(super) enum DataResult {
     Json(serde_json::Value),
@@ -40,6 +33,7 @@ fn validate_action_scope(
     action: &DataAction,
 ) -> Result<(), String> {
     match action {
+        DataAction::McpStatus | DataAction::McpRevoke(_) => Ok(()),
         DataAction::DeviceState => crate::ipc::validate_device_scope(snapshot, scope, None),
         DataAction::DeviceAction(request) => {
             crate::ipc::validate_device_scope(snapshot, scope, Some(&request.identity))
@@ -113,7 +107,9 @@ impl Engine {
         self.drain_events();
         let result = (|| {
             validate_action_scope(&self.snapshot, &scope, &action)?;
-            if matches!(
+            if matches!(&action, DataAction::McpStatus | DataAction::McpRevoke(_)) {
+                // Local configuration and context revocation work before docking.
+            } else if matches!(
                 &action,
                 DataAction::ControlState
                     | DataAction::ControlSubmit(_)
@@ -136,25 +132,6 @@ impl Engine {
                 self.validate_data_trust()?;
             } else {
                 self.validate_data_scope(&scope)?;
-            }
-            if matches!(
-                &action,
-                DataAction::AssistedInspect | DataAction::AssistedFill(_, _)
-            ) {
-                self.start_assisted(scope.clone(), action, reply.clone())?;
-                return Ok(None);
-            }
-            if let DataAction::PairCreate(kind, credentials, permit) = &action {
-                // The reply follows the credential write, so the caller never
-                // observes a pairing that was not persisted.
-                self.start_pair(
-                    scope.clone(),
-                    kind.clone(),
-                    credentials.clone(),
-                    permit.clone(),
-                    reply.clone(),
-                )?;
-                return Ok(None);
             }
             if let DataAction::InspectorTree(frame) = &action {
                 let anchor = self.validate_display_frame(frame)?;
@@ -261,70 +238,17 @@ impl Engine {
                         .ok_or("SELECTION_STORAGE_UNAVAILABLE")?
                         .read_image(&self.snapshot, &id, crop, observed)?,
                 )),
-                DataAction::AgentList => json_result(self.agents.list(&self.snapshot, observed)),
-                DataAction::AgentBind(draft) => {
-                    json_result(self.agents.bind(&self.snapshot, &draft, observed)?)
+                DataAction::McpStatus => json_result(self.mcp_status_value()?),
+                DataAction::McpRevoke(id) => {
+                    let revoked = self.mcp.revoke_context(&id, observed)?;
+                    self.sync_context_binding();
+                    json_result(revoked)
                 }
-                DataAction::PairCreate(_, _, _) => unreachable!(),
-                DataAction::PairRevoke => {
-                    self.cancel_pairing();
-                    self.agents.revoke();
-                    if let Some(store) = &self.selections {
-                        store.revoke_delivery_grants()?;
-                    }
-                    json_result(true)
+                DataAction::McpSubmit(context, selection) => {
+                    json_result(self.submit_mcp_task(&context, &selection, observed)?)
                 }
-                DataAction::RegistrationBind(id) => json_result(self.agents.bind_registration(
-                    &self.snapshot,
-                    &id,
-                    observed,
-                )?),
-                DataAction::AssistedInspect | DataAction::AssistedFill(_, _) => unreachable!(),
-                DataAction::DeliveryPrepare(id, binding) => {
-                    let selection = self
-                        .selections
-                        .as_mut()
-                        .ok_or("SELECTION_STORAGE_UNAVAILABLE")?
-                        .get(&self.snapshot, &id, observed)?;
-                    json_result(self.agents.prepare(
-                        &self.snapshot,
-                        &selection,
-                        binding.as_deref(),
-                        observed,
-                    )?)
-                }
-                DataAction::DeliveryStatus(id) => {
-                    json_result(self.agents.status(&self.snapshot, &id, observed)?)
-                }
-                DataAction::DeliverySend(id) => {
-                    let prepared = self.agents.status(&self.snapshot, &id, observed)?;
-                    if prepared.state != DeliveryState::Ready {
-                        return Ok(Some(json_result(prepared)?));
-                    }
-                    let selection = self
-                        .selections
-                        .as_mut()
-                        .ok_or("SELECTION_STORAGE_UNAVAILABLE")?
-                        .get(&self.snapshot, &prepared.selection_id, observed)?;
-                    let storage = self
-                        .selections
-                        .as_mut()
-                        .ok_or("SELECTION_STORAGE_UNAVAILABLE")?;
-                    storage.read_image(&self.snapshot, &selection.selection_id, false, observed)?;
-                    storage.read_image(&self.snapshot, &selection.selection_id, true, observed)?;
-                    let attachments = storage.authorize_delivery(
-                        &self.snapshot,
-                        &selection.selection_id,
-                        &id,
-                        observed,
-                    )?;
-                    json_result(self.agents.send_with_attachments(
-                        &self.snapshot,
-                        &selection,
-                        &id,
-                        attachments,
-                        observed,
-                    )?)
+                DataAction::McpRetry(task, context) => {
+                    json_result(self.mcp.retry_task(&task, &context, observed)?)
                 }
             }?;
             Ok(Some(data))
@@ -396,44 +320,15 @@ pub(super) async fn data_request(
     check_window(&window)?;
     validate_action_scope(&service.snapshot()?, &scope, &action)?;
     let sender = service.sender.clone();
-    let permit = match &action {
-        DataAction::PairCreate(_, _, permit) => Some(permit.clone()),
-        _ => None,
-    };
-    struct CancelOnDrop(Option<Arc<crate::agent::pairing::CommitPermit>>);
-    impl Drop for CancelOnDrop {
-        fn drop(&mut self) {
-            if let Some(permit) = &self.0 {
-                permit.cancel();
-            }
-        }
-    }
-    // Dropping the Tauri command future also cancels an enqueued save.
-    let _cancel_on_drop = CancelOnDrop(permit.clone());
     tauri::async_runtime::spawn_blocking(move || -> Result<DataResult, IpcError> {
         let (send, receive) = mpsc::channel();
         sender
             .try_send(Message::Data(scope, action, send))
             .map_err(|_| IpcError::from("REQUEST_QUEUE_BUSY"))?;
-        let wait = permit
-            .as_ref()
-            .map(|permit| permit.remaining())
-            .unwrap_or(Duration::from_secs(5));
-        match receive.recv_timeout(wait) {
-            Ok(result) => result.map_err(IpcError::from),
-            Err(_) => {
-                if permit.is_some_and(|permit| !permit.cancel()) {
-                    // The atomic commit won; only the already computed reply
-                    // remains. Never report a timeout for a committed pairing.
-                    receive
-                        .recv()
-                        .map_err(|_| IpcError::from("DATA_REPLY_UNAVAILABLE"))?
-                        .map_err(IpcError::from)
-                } else {
-                    Err(IpcError::from("DATA_REQUEST_TIMEOUT"))
-                }
-            }
-        }
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| IpcError::from("DATA_REQUEST_TIMEOUT"))?
+            .map_err(IpcError::from)
     })
     .await
     .map_err(|_| IpcError::from("REQUEST_WORKER_FAILED"))?

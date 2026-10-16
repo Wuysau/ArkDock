@@ -418,7 +418,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 /// HMAC-SHA256 for our fixed 32-byte secret (shorter than SHA-256's 64-byte block).
-fn hmac_sha256(key: &[u8; 32], message: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8; 32], message: &[u8]) -> [u8; 32] {
     let mut inner_pad = [0x36u8; 64];
     let mut outer_pad = [0x5cu8; 64];
     for index in 0..key.len() {
@@ -530,7 +530,7 @@ fn validate_entry(entry: &mut ContextEntry) -> Result<(), String> {
         };
         validate_path(cwd, environment)?;
     }
-    valid_label(&entry.agent, 64, "AGENT")?;
+    valid_label(&entry.agent, 128, "AGENT")?;
     valid_label(&entry.host_session, 128, "HOST_SESSION")?;
     Ok(())
 }

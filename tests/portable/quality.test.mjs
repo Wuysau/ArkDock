@@ -13,9 +13,8 @@ test('编译器退出 2 是失败，只有原生 gate 定义的 2 是阻塞', ()
 
 test('所有修改命令带当前目标与会话，dialog 前后由后端核验', () => {
   const spec = JSON.parse(readFileSync('protocol/model.json', 'utf8'));
-  // 会话源配对是有意的预贴附能力：必须先于任何工程/会话存在，否则发现被
-  // “先选工程才能发现工程”死锁。后端仍核验调用窗口，且不授予执行信任。
-  const preDockingCommands = new Set(['context_pair_create', 'context_pair_revoke']);
+  // MCP 配置/连接管理先于贴附与工程信任；仍校验调用窗口。
+  const preDockingCommands = new Set(['mcp_status', 'mcp_revoke_context']);
   for (const [name, fields] of Object.entries(spec.commands)) {
     if (name !== 'snapshot' && !preDockingCommands.has(name)) assert.equal(fields.scope, 'RequestScope', name);
   }

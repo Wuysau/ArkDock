@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { AgentDeliveryPanel } from './AgentDeliveryPanel.tsx';
-import type { InspectorNode, SelectionContext } from '../ipc/model.ts';
+import type { AppSnapshot, InspectorNode, SelectionContext } from '../ipc/model.ts';
 import { Icon } from '../Icon.tsx';
 import type { UiBridge } from '../ipc/client.ts';
 import { describeError } from '../ipc/errors.ts';
 import type { RequestScope } from '../ipc/model.ts';
 
-export function SelectionPanel({ selection, stale, candidates, scope, bridge, choose, close, updated }: {
+export function SelectionPanel({ selection, stale, candidates, scope, snapshot, visible, bridge, choose, close, updated }: {
   selection: SelectionContext; stale: boolean; candidates: InspectorNode[];
-  scope: RequestScope; bridge: UiBridge; choose: (node: InspectorNode) => void; close: () => void; updated: (selection: SelectionContext) => void;
+  snapshot: AppSnapshot | null; visible: boolean; scope: RequestScope; bridge: UiBridge; choose: (node: InspectorNode) => void; close: () => void; updated: (selection: SelectionContext) => void;
 }) {
   const [instruction, setInstruction] = useState(selection.userInstruction);
   const [working, setWorking] = useState(false);
@@ -58,7 +58,7 @@ export function SelectionPanel({ selection, stale, candidates, scope, bridge, ch
       } else if (action === 'export' || action === 'crop') {
         await bridge.transfer('selection_export_image', { selectionId: selection.selectionId, crop: action === 'crop' }, scope);
         if (stillCurrent(requested)) setNotice(action === 'crop' ? '裁剪截图已导出。' : '真实原生截图已导出。');
-      } else setNotice('选择上下文和修改意见已保存；MCP 读取仍需显式授权。');
+      } else setNotice('选择上下文和修改意见已保存；提交到 MCP 后，所选上下文才可读取任务快照。');
     } catch (error) { if (stillCurrent(requested)) setNotice(describeError(error)); }
     finally { active.current = false; if (alive.current) setWorking(false); }
   }
@@ -70,7 +70,7 @@ export function SelectionPanel({ selection, stale, candidates, scope, bridge, ch
     <header><div><h3>{node?.componentType ?? '截图区域'}</h3><span className="selection-kind">{node ? 'ArkUI 组件' : '区域选择'}</span></div><button className="icon-button" aria-label="关闭组件详情" onClick={close}><Icon name="close" size={17} /></button></header>
     {stale && <p role="alert">EXPIRED · 工程、构建或画面已改变，请重新选择。</p>}
     <label htmlFor="selection-instruction">修改意见</label><textarea id="selection-instruction" maxLength={8192} value={instruction} disabled={working || stale} placeholder="描述要如何修改这个组件…" onChange={(event) => setInstruction(event.target.value)} />
-    <AgentDeliveryPanel selection={selection} scope={scope} bridge={bridge} disabled={working || stale} expired={stale} hasInstruction={Boolean(instruction.trim())} save={save} busy={setWorking} />
+    <AgentDeliveryPanel selection={selection} scope={scope} snapshot={snapshot} visible={visible} bridge={bridge} disabled={working || stale} expired={stale} hasInstruction={Boolean(instruction.trim())} save={save} busy={setWorking} />
     <details className="selection-evidence"><summary>组件与截图详情</summary>
     <dl className="selection-summary"><dt>工程</dt><dd>{selection.workspaceName}</dd>
       {node?.page && <><dt>页面</dt><dd>{node.page}</dd></>}

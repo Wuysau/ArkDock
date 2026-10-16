@@ -9,10 +9,7 @@ use crate::discovery::{
     resolution_complete, WORKSPACE_OBSERVATION_TTL_MS,
 };
 #[cfg(windows)]
-use crate::discovery::{
-    registration::RegistrationRegistry, resolve_with_sources, windows_tabs::WindowsTabResolver,
-    TitleResolver,
-};
+use crate::discovery::{registration::RegistrationRegistry, resolve_with_sources, TitleResolver};
 use crate::ipc::model::*;
 use crate::ipc::validate_scope;
 use crate::preview::frames::{BinaryFrame, BINARY_FRAME_PROTOCOL_VERSION};
@@ -23,13 +20,12 @@ use crate::scheduler::{
 use crate::windowing::{WindowController, WindowUpdate, ORB_MIN_OPACITY};
 use crate::workspace::WorkspaceStore;
 use sha2::{Digest, Sha256};
-mod agent_delivery;
 mod association;
 mod context_binding;
-mod context_pairing;
 mod diagnostics;
 mod frame_delivery;
 mod inspection;
+mod mcp_bridge;
 mod native_controls;
 mod session;
 mod visibility;
@@ -80,10 +76,8 @@ enum AssociationSource {
     Context,
 }
 enum Message {
+    Mcp(Box<mcp_bridge::McpRequest>),
     Metrics(RequestScope, mpsc::Sender<Result<MotionMetrics, String>>),
-    /// A state change outside the action lifecycle (context pairing) asks the
-    /// coordinator to republish immediately instead of waiting for the next probe.
-    Publish,
     Action(
         RequestScope,
         Action,
@@ -114,6 +108,7 @@ struct Service {
     state: Arc<Mutex<AppSnapshot>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     frames: Arc<Mutex<FrameDelivery>>,
+    _mcp_server: Mutex<Option<crate::mcp::pipe::ServerGuard>>,
 }
 
 impl Service {
@@ -153,12 +148,9 @@ struct Engine {
     detaching: bool,
     frames: Arc<Mutex<FrameDelivery>>,
     selections: Option<crate::selection::SelectionStore>,
-    agents: crate::agent::AgentRouter,
-    assisted: Arc<Mutex<crate::agent::assisted::AssistedController>>,
-    assisted_busy: Arc<std::sync::atomic::AtomicBool>,
-    pending_assisted: Option<agent_delivery::PendingAssisted>,
-    pending_pair: Option<agent_delivery::PendingPair>,
-    assisted_offer_scope: Option<RequestScope>,
+    mcp: Arc<crate::mcp::hub::McpHub>,
+    mcp_available: bool,
+    mcp_reason: String,
     inspection: Option<PendingInspection>,
     inspection_tree: Option<InspectorTree>,
     inspection_anchor: Option<BinaryFrame>,
@@ -316,6 +308,7 @@ impl Engine {
         self.snapshot.revision += 1;
         self.snapshot.build = self.scheduler.status();
         self.snapshot.context_source = Some(self.context_status());
+        self.mcp.sync_snapshot(&self.snapshot, now());
         // Candidate categories are backend truth: they are recomputed for the snapshot
         // that is emitted, never derived again by the frontend.
         self.grade_candidates();
@@ -431,42 +424,20 @@ impl Engine {
         #[cfg(windows)]
         let (mut candidates, observation, source_error) = {
             let controller = self.controller.as_ref().ok_or("WINDOWING_UNAVAILABLE")?;
-            let scope = controller.discovery_scope(&target.id)?;
-            let tabs = match mode {
-                DiscoveryMode::Explicit => {
-                    Some(WindowsTabResolver::collect(scope.handle, &target, observed))
-                }
-                DiscoveryMode::Lightweight => {
-                    WindowsTabResolver::collect_lightweight(scope.handle, &target, observed)
-                }
-            };
-            // HWND equality is insufficient: verify the controller's current lifecycle again.
+            // HWND equality is insufficient: verify the controller's current lifecycle.
             controller.discovery_scope(&target.id)?;
             let context = ContextSourceResolver::new(self.context.clone());
             let registry = RegistrationRegistry::default();
-            let retained_tabs = association::UnsampledTabEvidence(&self.snapshot.candidates);
-            let mut sources: Vec<&dyn crate::discovery::WorkspaceResolver> =
+            let sources: Vec<&dyn crate::discovery::WorkspaceResolver> =
                 vec![&context, &registry, &TitleResolver];
-            if let Some(tabs) = tabs.as_ref() {
-                sources.push(tabs);
-            } else {
-                sources.push(&retained_tabs);
-            }
             let candidates = resolve_with_sources(&target, observed, &sources);
             match candidates {
-                Ok(candidates) => (
-                    candidates,
-                    tabs.as_ref().and_then(WindowsTabResolver::observation),
-                    None,
-                ),
+                Ok(candidates) => (candidates, None, None),
                 Err(error) => (
                     Vec::new(),
                     Some(WorkspaceObservation {
                         status: WorkspaceStatus::Unknown,
-                        project_name: tabs
-                            .as_ref()
-                            .and_then(WindowsTabResolver::observation)
-                            .and_then(|observation| observation.project_name),
+                        project_name: None,
                         active_path: None,
                         reason: format!(
                             "Current workspace metadata could not be verified: {error}"
@@ -1838,19 +1809,11 @@ pub fn run() {
             inspection::selection_prompt,
             inspection::selection_read_image,
             inspection::selection_export_image,
-            agent_delivery::agent_session_list,
-            agent_delivery::agent_session_bind,
-            agent_delivery::agent_delivery_prepare,
-            agent_delivery::agent_delivery_send,
-            agent_delivery::agent_delivery_status,
-            agent_delivery::agent_pair_create,
-            agent_delivery::agent_pair_revoke,
-            agent_delivery::agent_registration_bind,
-            agent_delivery::agent_assisted_inspect,
-            agent_delivery::agent_assisted_fill,
             context_binding::context_select_project,
-            context_pairing::context_pair_create,
-            context_pairing::context_pair_revoke,
+            mcp_bridge::mcp_status,
+            mcp_bridge::mcp_revoke_context,
+            mcp_bridge::mcp_submit_task,
+            mcp_bridge::mcp_retry_task,
         ])
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
@@ -1883,15 +1846,21 @@ pub fn run() {
             let handle = app.handle().clone();
             let window_pending = Arc::new(Mutex::new(None));
             let context_hub = Arc::new(crate::context::ContextHub::new());
-            let context_pairing = Arc::new(crate::context_pairing_store::ContextPairingStore::new(app.path().app_data_dir()?));
-            // A failed restore leaves the optional context channel unpaired. Never
-            // load a user-selected export or log its secret during desktop startup.
-            if context_pairing.restore(&context_hub).is_err() {
-                eprintln!("ArkDock: context pairing could not be restored; pair again from the project panel.");
-            }
-            #[cfg(windows)]
-            crate::context_pipe::spawn(context_hub.clone());
-            app.manage(context_pairing::ContextHubHandle::new(context_hub.clone(), context_pairing));
+            let mcp_data = app.path().app_data_dir()?;
+            let credential = crate::mcp::auth::load_or_create(&mcp_data);
+            let mcp_available = credential.is_ok();
+            let mcp_reason = credential
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "MCP 已就绪；在 Agent 工具中添加配置后连接工程。".into());
+            let token = credential
+                .as_ref()
+                .map(|credential| credential.token)
+                .unwrap_or([0; 32]);
+            let mcp_hub = Arc::new(crate::mcp::hub::McpHub::new(context_hub.clone(), token));
+            let (mcp_server, mcp_available, mcp_reason) =
+                mcp_bridge::start_server(credential, sender.clone(), mcp_available, mcp_reason);
             let main = app
                 .get_webview_window("main")
                 .ok_or("MAIN_WINDOW_MISSING")?;
@@ -1923,14 +1892,9 @@ pub fn run() {
                     detaching: false,
                     frames,
                     selections: None,
-                    agents: crate::agent::AgentRouter::new(),
-                    assisted: Arc::new(Mutex::new(
-                        crate::agent::assisted::AssistedController::default(),
-                    )),
-                    assisted_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    pending_assisted: None,
-                    pending_pair: None,
-                    assisted_offer_scope: None,
+                    mcp: mcp_hub,
+                    mcp_available,
+                    mcp_reason,
                     inspection: None,
                     inspection_tree: None,
                     inspection_anchor: None,
@@ -1987,12 +1951,9 @@ pub fn run() {
                             let _ = reply.send(result);
                         }
                         Ok(Message::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            engine.cancel_assisted();
-                            engine.cancel_pairing();
                             break;
                         }
                         Ok(Message::Action(scope, action, reply)) => {
-                            engine.cancel_assisted();
                             engine.drain_events();
                             let result = engine.handle(scope, action);
                             if let Err(error) = &result {
@@ -2008,9 +1969,8 @@ pub fn run() {
                         Ok(Message::Data(scope, action, reply)) => {
                             engine.dispatch_data(scope, action, reply)
                         }
-                        Ok(Message::Publish) => {
-                            engine.sync_context_binding();
-                            engine.publish();
+                        Ok(Message::Mcp(request)) => {
+                            engine.dispatch_mcp(*request);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -2019,9 +1979,7 @@ pub fn run() {
                     engine.sync_control_lifecycle();
                     engine.poll_native_controls();
                     engine.poll_inspection();
-                    engine.poll_assisted();
-                    engine.poll_pair();
-                    engine.agents.sync(&engine.snapshot, now());
+                    engine.mcp.sync_snapshot(&engine.snapshot, now());
                     if now().saturating_sub(engine.last_visibility_sync) >= 100 {
                         engine.last_visibility_sync = now();
                         engine.sync_visibility();
@@ -2042,6 +2000,7 @@ pub fn run() {
                 state: service_state,
                 worker: Mutex::new(Some(worker)),
                 frames: service_frames,
+                _mcp_server: Mutex::new(mcp_server),
             });
             Ok(())
         })

@@ -140,7 +140,9 @@ impl Engine {
             .as_ref()
             .is_some_and(|binding| !binding_is_live(binding, &live))
         {
-            self.close_session();
+            // Transport loss preserves disconnected task evidence for an
+            // explicit retry. It must not be treated as a user project revoke.
+            self.replace_preview_association(None);
             self.context_confirmation_required = true;
             self.snapshot.candidates.clear();
             self.snapshot.phase = if self.snapshot.target.is_some() {
@@ -182,13 +184,30 @@ impl Engine {
             .into_iter()
             .find(|entry| entry.registration_id == id)
             .ok_or("STALE_SESSION: this context registration is no longer available")?;
+        if self.context_binding.as_ref().is_some_and(|current| {
+            current.registration_id == entry.registration_id
+                && current.client == entry.client
+                && current.session == entry.session
+        }) && self
+            .snapshot
+            .project
+            .as_ref()
+            .is_some_and(|project| matches_project(&entry, project))
+        {
+            // Confirmation of the same live association is idempotent. Do not
+            // restart Previewer or expire pending tasks by replacing its epoch.
+            return Ok(());
+        }
         if entry.execution_environment() != Environment::WindowsLocal {
             return Err("UNSUPPORTED_ENVIRONMENT: WSL/remote context is retained but native preview is unavailable".into());
         }
         let path = absolute_directory_input(entry.effective_execution_directory().ok_or(
             "INVALID_DIRECTORY_PATH: choose a context with an explicit execution directory",
         )?)?;
-        self.close_session();
+        // Confirming a replacement MCP connection is a context handover, not
+        // an explicit Detach. Preserve disconnected task evidence until the
+        // resolved project can be compared or the user explicitly retries it.
+        self.replace_preview_association(None);
         self.snapshot.candidates.clear();
         self.snapshot.workspace_observation = None;
         self.context_binding = Some(entry);

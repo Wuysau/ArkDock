@@ -15,8 +15,6 @@ pub(crate) mod context_source_windows;
 mod inspector;
 pub mod registration;
 mod resolver;
-#[cfg(all(windows, feature = "desktop"))]
-pub(crate) mod windows_tabs;
 
 pub use inspector::{inspect_directory, path_environment, project_id};
 pub use resolver::{

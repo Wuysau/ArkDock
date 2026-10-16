@@ -63,12 +63,6 @@ pub struct WindowController {
     inner: windows::Controller,
 }
 
-#[cfg(all(windows, feature = "desktop"))]
-#[derive(Clone)]
-pub(crate) struct DiscoveryScope {
-    pub handle: isize,
-}
-
 impl WindowController {
     pub fn motion_metrics(&self) -> Result<MotionMetrics, String> {
         #[cfg(windows)]
@@ -130,7 +124,7 @@ impl WindowController {
     }
 
     #[cfg(all(windows, feature = "desktop"))]
-    pub(crate) fn discovery_scope(&self, target_id: &str) -> Result<DiscoveryScope, String> {
+    pub(crate) fn discovery_scope(&self, target_id: &str) -> Result<(), String> {
         self.inner.discovery_scope(target_id)
     }
     /// Start after the independent main window has been created. `emit` runs on the

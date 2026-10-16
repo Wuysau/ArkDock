@@ -34,11 +34,6 @@
 .agent-mode { padding: 2px 6px; border-radius: 4px; color: var(--highlight); background: var(--selected); font-size: 10px; }
 .agent-delivery .selection-primary { margin: 6px 0; min-height: 32px; padding: 4px 10px; }
 .agent-delivery .agent-hint { color: var(--muted); font-size: 10px; }
-.agent-confirmation { padding: 2px 8px; border-left: 2px solid var(--warning); margin: 2px 0; font-size: 11px; }
-.agent-confirmation strong { display: flex; gap: 8px; align-items: center; line-height: 1.25; }
-.agent-confirmation strong > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-confirmation code { flex-shrink: 0; line-height: 1.25; }
-.agent-confirmation p { margin: 2px 0; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-receipt { display: block; padding: 8px 0; border-top: 1px solid var(--line); }
 .agent-receipt strong { font: 11px/1.5 Consolas, monospace; color: var(--highlight); }
 .agent-receipt small { display: block; overflow-wrap: anywhere; }

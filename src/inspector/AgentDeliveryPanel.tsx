@@ -1,97 +1,73 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AgentDelivery, AssistedOffer, RequestScope, SelectionContext } from '../ipc/model.ts';
+import type { AppSnapshot, McpTaskSummary, RequestScope, SelectionContext } from '../ipc/model.ts';
 import type { UiBridge } from '../ipc/client.ts';
 import { describeError } from '../ipc/errors.ts';
+import { contextMatches, mcpLifecycle, submitFrozenSelection, taskLabels } from '../mcp/model.ts';
+import { useMcpStatus } from '../mcp/useMcpStatus.ts';
+import '../mcp/mcp.css';
 
-/** Copy or fill a confirmed composer. This UI never queues or submits an Agent message. */
-export function AgentDeliveryPanel({ selection, scope, bridge, disabled, expired, hasInstruction, save, busy }: {
-  selection: SelectionContext; scope: RequestScope; bridge: UiBridge;
+/** A task is frozen by the backend only after the current instruction is saved. */
+export function AgentDeliveryPanel({ selection, scope, snapshot, visible, bridge, disabled, expired, hasInstruction, save, busy }: {
+  selection: SelectionContext; scope: RequestScope; snapshot: AppSnapshot | null; visible: boolean; bridge: UiBridge;
   disabled: boolean; expired: boolean; hasInstruction: boolean;
   save: () => Promise<SelectionContext>; busy: (value: boolean) => void;
 }) {
-  const [offer, setOffer] = useState<AssistedOffer | null>(null);
-  const [delivery, setDelivery] = useState<AgentDelivery | null>(null);
+  const lifecycle = mcpLifecycle(snapshot);
+  const { status, error } = useMcpStatus(bridge, lifecycle, visible && !expired);
+  const [contextId, setContextId] = useState('');
+  const [submitted, setSubmitted] = useState<McpTaskSummary | null>(null);
   const [notice, setNotice] = useState('');
   const [working, setWorking] = useState(false);
   const active = useRef(false);
   const alive = useRef(true);
-  const identity = JSON.stringify([selection.selectionId, selection.workspaceId, selection.buildId, selection.generation, scope.targetId, scope.sessionId]);
-  const current = useRef({ identity, expired }); current.current = { identity, expired };
-  const { targetId, sessionId } = scope;
+  const identity = JSON.stringify([selection.selectionId, selection.workspaceId, selection.buildId, selection.generation, scope.targetId, scope.sessionId, lifecycle]);
+  const current = useRef({ identity, expired, visible, snapshot }); current.current = { identity, expired, visible, snapshot };
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  useEffect(() => { setOffer(null); setDelivery(null); setNotice(''); }, [identity, expired]);
-  useEffect(() => {
-    if (!offer) return;
-    const timer = window.setTimeout(() => {
-      setOffer(value => value?.confirmationId === offer.confirmationId ? null : value);
-      setNotice('输入框确认已过期，请重新检查。');
-    }, Math.max(0, offer.expiresAt - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [offer]);
-  const usable = Boolean(offer && offer.targetId === targetId && offer.expiresAt > Date.now());
-  const stillCurrent = (requested: string) => alive.current && !current.current.expired && current.current.identity === requested;
-  async function perform(task: (requested: string) => Promise<void>) {
-    if (disabled || active.current || !bridge.transfer) return;
+  useEffect(() => { setContextId(''); setSubmitted(null); setNotice(''); }, [identity]);
+  const eligible = status?.contexts.filter(context => contextMatches(snapshot, context)) ?? [];
+  const selectedContext = eligible.find(context => context.contextId === contextId);
+  const task = status?.tasks.find(item => item.taskId === submitted?.taskId) ?? submitted;
+  const stillCurrent = (requested: string) => alive.current && current.current.visible && !current.current.expired && current.current.identity === requested;
+  async function perform(action: (requested: string) => Promise<void>) {
+    if (disabled || active.current || !bridge.transfer || !visible || expired) return;
     const requested = identity;
     active.current = true; setWorking(true); busy(true); setNotice('');
-    try { await task(requested); }
-    catch (error) { if (stillCurrent(requested)) setNotice(describeError(error)); }
-    finally {
-      active.current = false;
-      if (alive.current) { setWorking(false); busy(false); }
-    }
+    try { await action(requested); }
+    catch (reason) { if (stillCurrent(requested)) setNotice(describeError(reason)); }
+    finally { active.current = false; if (alive.current) { setWorking(false); busy(false); } }
   }
   async function copy() {
     await perform(async requested => {
       const saved = await save();
       if (!stillCurrent(requested)) return;
-      const prompt = await bridge.transfer!('selection_prompt', { selectionId: saved.selectionId, detailed: false }, { targetId, sessionId });
+      const prompt = await bridge.transfer!('selection_prompt', { selectionId: saved.selectionId, detailed: false }, scope);
       if (!stillCurrent(requested)) return;
       await navigator.clipboard.writeText(prompt);
-      if (stillCurrent(requested)) setNotice('精简修改要求已复制。粘贴到 Agent 输入框后，由你决定是否发送。');
+      if (stillCurrent(requested)) setNotice('修改要求已复制，可粘贴到客户端。需要图片时可在下方导出。');
     });
   }
-  async function inspect() {
+  async function submit() {
+    if (!selectedContext || !status?.available || task) return;
+    const context = selectedContext;
     await perform(async requested => {
-      setOffer(null); setDelivery(null);
-      try {
-        const result = await bridge.transfer!('agent_assisted_inspect', {}, { targetId, sessionId });
-        if (stillCurrent(requested) && result.targetId === targetId) setOffer(result);
-      } catch (error) {
-        if (stillCurrent(requested)) setNotice(`无法确认可填写的输入框：${describeError(error)}\n可复制修改要求后手动粘贴。`);
-      }
+      const result = await submitFrozenSelection({ context, selectionId: selection.selectionId, save,
+        isCurrent: () => stillCurrent(requested), snapshot: () => current.current.snapshot,
+        submit: (selectionId, contextId) => bridge.transfer!('mcp_submit_task', { contextId, selectionId }, scope) });
+      if (result && stillCurrent(requested)) { setSubmitted(result); setNotice('已提交修改意见与截图快照，等待客户端领取。'); }
     });
   }
-  async function fill() {
-    if (!usable || !offer) return;
-    const confirmationId = offer.confirmationId;
-    await perform(async requested => {
-      // Consume the local confirmation too; no automatic retry after an uncertain write.
-      setOffer(null); setDelivery(null);
-      const saved = await save();
-      if (!stillCurrent(requested)) return;
-      const result = await bridge.transfer!('agent_assisted_fill', { selectionId: saved.selectionId, confirmationId }, { targetId, sessionId });
-      if (stillCurrent(requested)) setDelivery(result);
-    });
-  }
-  return <section className="selection-target agent-delivery" aria-label="复制或填写修改要求">
-    <header><h4>交给 Agent 修改</h4><span className="agent-mode">由你发送</span></header>
-    <p className="agent-hint">复制后粘贴到对话框。可识别的空输入框也能辅助填写，发送由你决定。</p>
-    <button className="primary-button selection-primary" disabled={disabled || working || !hasInstruction} onClick={() => void copy()}>
-      {working ? '正在处理…' : '复制修改要求'}
-    </button>
-    <div className="composer-actions"><button disabled={disabled || working || !targetId || !hasInstruction} title="只检查当前绑定窗口的输入框；不需要 Agent 会话配对" onClick={() => void inspect()}>检查目标输入框</button></div>
-    {offer && <div className="agent-confirmation">
-      <strong><span title={offer.app}>填写到 {offer.app}</span><code>PID {offer.pid}</code></strong><p title={offer.composerName}>输入框：{offer.composerName}</p>
-      <p>只填写已确认的空输入框，不按 Enter、不点击发送。确认在 30 秒内有效。</p>
-      <div className="composer-actions"><button className="primary-button" disabled={disabled || working || !hasInstruction || !usable} onClick={() => void fill()}>确认填入输入框</button>
-        <button disabled={working} onClick={() => setOffer(null)}>取消</button></div>
-    </div>}
-    {delivery && <output aria-live="polite" className="agent-receipt">
-      <strong>{delivery.state === 'FILLED_PENDING_USER_SEND' ? '已填入，等待你发送' : delivery.state === 'UNKNOWN' ? '填写结果尚未确认' : '未完成填写'}</strong>
-      <p>{delivery.reason}</p>{delivery.state === 'UNKNOWN' && <p>请先检查目标输入框，避免重复填写。</p>}
-    </output>}
-    <p className="agent-hint">复制会覆盖剪贴板，不会自动附加截图。需要图片时，可在下方导出并手动添加。</p>
-    {notice && <output className="composer-notice" aria-live="polite">{notice}</output>}
+  return <section className="selection-target agent-delivery" aria-label="提交修改任务到 MCP">
+    <header><h4>交给 MCP 客户端</h4><span className="agent-mode">明确选择上下文</span></header>
+    <p className="agent-hint">提交会保存当前修改意见，并冻结组件与截图。客户端领取后自行处理，源码变更仍需你验收。</p>
+    <label>接收上下文<select aria-label="MCP 接收上下文" value={selectedContext?.contextId ?? ''} disabled={disabled || working || Boolean(task)} onChange={event => setContextId(event.target.value)}>
+      <option value="">请选择已确认的上下文</option>{eligible.map(context => <option key={context.contextId} value={context.contextId}>{context.displayName || context.clientName} · {context.contextId}</option>)}
+    </select></label>
+    {status && eligible.length === 0 && <p className="agent-hint">请先在「MCP 接入」中连接客户端，确认用于当前工程的上下文，并信任工程。</p>}
+    <button className="primary-button selection-primary" disabled={disabled || working || !hasInstruction || !selectedContext || !status?.available || Boolean(task)} onClick={() => void submit()}>{working ? '正在处理…' : task ? '已提交到 MCP' : '提交到 MCP'}</button>
+    <div className="composer-actions"><button disabled={disabled || working || !hasInstruction} onClick={() => void copy()}>复制修改要求</button></div>
+    {task && <output className="agent-receipt" aria-live="polite"><strong>{taskLabels[task.state]}</strong><code>{task.taskId}</code>{task.summary && <p>{task.summary}</p>}{task.validation && <p>Agent 验证说明：{task.validation}</p>}
+      {task.state === 'completed' && <p>Agent 报告完成，请检查源码与验证结果。</p>}{task.state === 'unknown' && <p>连接已中断。请检查已有修改；需要重试时，在「MCP 接入」中明确重新排队。</p>}</output>}
+    <p className="agent-hint">队列仅在本次运行中保留，重启 ArkDock 后清空。</p>
+    {(notice || error) && <output className="composer-notice" aria-live="polite">{notice || error}</output>}
   </section>;
 }

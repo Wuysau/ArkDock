@@ -5,7 +5,7 @@
 //! revoked trust, an unavailable toolchain, a runtime failure, or an explicit Stop.
 //!
 //! One order, one place, because the order is load-bearing:
-//! 1. invalidate queued assisted/Agent work, so no asynchronous reply can arrive later;
+//! 1. MCP task authorization is synchronized with every published workspace state;
 //! 2. cancel native controls and reset their state before the Previewer goes away;
 //! 3. drop any pending Inspector query and answer it as a stale session;
 //! 4. release the frame mailbox, so stale pixels cannot be read as the current build;
@@ -72,8 +72,6 @@ impl Engine {
     /// why the order is fixed. Session identity is left to the caller, because "stopped"
     /// and "suspended" differ in what they keep.
     fn teardown_resources(&mut self) {
-        // 1. Automatic workspace changes also invalidate user-confirmed assisted offers.
-        self.cancel_assisted();
         // 2. Native controls belong to the surface that is about to disappear.
         self.backend.cancel_controls();
         self.controls.reset();
@@ -116,6 +114,10 @@ impl Engine {
 
     /// Ends both the session and the workspace association.
     pub(super) fn close_session(&mut self) {
+        // A preceding MCP disconnect may already have cleared project while
+        // preserving retryable Unknown tasks. An explicit teardown revokes all
+        // evidence regardless of that transient association state.
+        self.mcp.invalidate_tasks(now());
         self.replace_preview_association(None);
     }
 
