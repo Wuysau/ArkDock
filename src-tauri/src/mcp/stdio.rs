@@ -55,6 +55,21 @@ impl Bridge {
         arguments: Value,
         cancelled: Arc<AtomicBool>,
     ) -> Value {
+        if name == "arkdock_wait_for_task" {
+            return super::wait::run(arguments, &cancelled, &self.stop, |args| {
+                self.call_backend(client_name, "arkdock_claim_task", args, cancelled.clone())
+            });
+        }
+        self.call_backend(client_name, name, arguments, cancelled)
+    }
+
+    fn call_backend(
+        &self,
+        client_name: &str,
+        name: &str,
+        arguments: Value,
+        cancelled: Arc<AtomicBool>,
+    ) -> Value {
         let result = (|| -> Result<Value, String> {
             if cancelled.load(Ordering::Acquire) {
                 return Err("MCP_REQUEST_CANCELLED".into());
@@ -400,7 +415,7 @@ mod tests {
             .collect();
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[0]["result"]["serverInfo"]["name"], "ArkDock");
-        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 10);
         assert!(!replies[0]["result"]["instructions"]
             .as_str()
             .unwrap()

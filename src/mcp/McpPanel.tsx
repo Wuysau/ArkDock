@@ -5,6 +5,7 @@ import { describeError } from '../ipc/errors.ts';
 import { currentScope } from '../request-state.ts';
 import { canRetry, contextMatches, mcpLifecycle, taskLabels } from './model.ts';
 import { useMcpStatus } from './useMcpStatus.ts';
+import { automaticProcessingPrompt } from './automatic-processing.ts';
 import './mcp.css';
 
 export function McpPanel({ bridge, snapshot, visible, busy, selectContext }: {
@@ -41,13 +42,17 @@ export function McpPanel({ bridge, snapshot, visible, busy, selectContext }: {
           <button disabled={pending} onClick={() => void perform(async () => { await navigator.clipboard.writeText(JSON.stringify({ command: status.configuration.command, args: status.configuration.args }, null, 2)); return '命令和参数已复制。'; })}>复制命令与参数</button></div>
         <p className="muted">{status.available ? 'MCP 服务可用。' : status.reason}</p></>}
     </section>
-    <section className="settings-card"><h3>上下文</h3><p className="muted">请在客户端调用连接工具，并明确原始工程及实际执行目录。这里的连接不证明当前可见对话或代码已修改。</p>
+    <section className="settings-card"><h3>上下文</h3><p className="muted">请在客户端调用连接工具，并明确原始工程及实际执行目录。确认并信任工程后，可复制自动处理提示词，在对应会话中发送一次。Agent 持续等待期间，后续提交会自动领取、执行并回报。</p>
+      <p className="muted">连接在线不代表 Agent 正在等待。客户端停止执行或断线后，需要重新启动自动处理。</p>
       {status && status.contexts.length === 0 && <p>尚无 MCP 上下文。</p>}
       {status?.contexts.map(context => <article className="mcp-entry" key={context.contextId}>
         <strong>{context.displayName || context.clientName}</strong><span className="muted">{context.clientName} · {context.connected ? '在线' : '离线'} · {context.confirmed && snapshot?.contextSource?.boundRegistrationId === context.registrationId ? '已确认' : '待确认'}</span>
         <code>{context.contextId}</code><span>原始工程</span><code>{context.originalProject}</code><span>实际执行目录</span><code>{context.executionDirectory}</code>
         <div className="mcp-actions"><button disabled={busy || pending || !snapshot?.target || !context.connected || context.environment !== 'windowsLocal' || snapshot.contextSource?.boundRegistrationId === context.registrationId}
           onClick={() => selectContext(context.registrationId)}>确认用于当前预览</button>
+          <button disabled={busy || pending || !contextMatches(snapshot, context)} onClick={() => void perform(async () => {
+            await navigator.clipboard.writeText(automaticProcessingPrompt(context.contextId)); return '自动处理提示词已复制。请在此上下文对应的 Agent 会话中发送一次。';
+          })}>复制自动处理提示词</button>
           <button disabled={busy || pending || !bridge.mcpRevokeContext} onClick={() => void perform(async () => { await bridge.mcpRevokeContext!(context.contextId); return '该上下文已撤销；相关任务访问已失效。'; })}>撤销上下文</button></div>
       </article>)}
     </section>

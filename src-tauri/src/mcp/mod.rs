@@ -4,6 +4,7 @@ mod catalog;
 pub mod hub;
 pub mod pipe;
 mod stdio;
+mod wait;
 
 use crate::ipc::model::{McpConfiguration, ProcessRef};
 

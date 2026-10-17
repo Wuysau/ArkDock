@@ -105,7 +105,7 @@ fn actual_executable_discovers_tools_offline_and_reports_desktop_unavailable() {
     host.initialize();
     host.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     let reply = host.reply(2);
-    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 10);
     assert!(!directory.path().join("dev.arkdock.desktop").exists());
     host.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arkdock_context_status","arguments":{}}}));
     let unavailable = host.reply(3);
@@ -215,5 +215,162 @@ fn business_rejection_keeps_context_claim_and_heartbeat_on_same_connection() {
     let (disconnected, tool) = received.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(tool, "__disconnect");
     assert_eq!(Some(disconnected.connection_id), owner);
+    drop(server);
+}
+
+#[test]
+fn wait_claims_a_later_submission_and_reuses_the_connection_for_the_next_task() {
+    let directory = tempfile::tempdir().unwrap();
+    let credential = auth::load_or_create(&directory.path().join("dev.arkdock.desktop")).unwrap();
+    let (events, received) = mpsc::channel();
+    let pending = Arc::new(Mutex::new(None::<String>));
+    let queue = pending.clone();
+    let server = pipe::start_server(credential, Arc::new(move |owner, tool, args| {
+        events.send((owner.connection_id, tool.clone())).unwrap();
+        match tool.as_str() {
+            "arkdock_claim_task" => {
+                assert_eq!(args, json!({"contextId":"fixture-context"}));
+                match queue.lock().unwrap().as_ref() {
+                    Some(id) => Ok(json!({"content":[],"structuredContent":{"task":{"taskId":id},"claimId":"fixture-claim"}})),
+                    None => Err("MCP_TASK_UNAVAILABLE".into()),
+                }
+            }
+            "arkdock_report_task" => { queue.lock().unwrap().take(); Ok(json!({"content":[]})) }
+            "__heartbeat" | "__disconnect" => Ok(json!({"content":[]})),
+            _ => panic!("wait must use the existing authorized claim operation"),
+        }
+    })).unwrap();
+    let mut host = Host::start(directory.path());
+    host.initialize();
+    host.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context","timeoutMs":25000}}}));
+    let (connection, tool) = received.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(tool, "arkdock_claim_task");
+    assert!(
+        host.replies.try_recv().is_err(),
+        "empty queue must wait without returning to the model"
+    );
+    *pending.lock().unwrap() = Some("first-task".into());
+    assert_eq!(
+        host.reply(2)["result"]["structuredContent"]["task"]["taskId"],
+        "first-task"
+    );
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        (connection, "arkdock_claim_task".into())
+    );
+    host.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arkdock_report_task","arguments":{"contextId":"fixture-context","taskId":"first-task","claimId":"fixture-claim","status":"completed"}}}));
+    host.reply(3);
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        (connection, "arkdock_report_task".into())
+    );
+    *pending.lock().unwrap() = Some("second-task".into());
+    host.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context","timeoutMs":0}}}));
+    assert_eq!(
+        host.reply(4)["result"]["structuredContent"]["task"]["taskId"],
+        "second-task"
+    );
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        (connection, "arkdock_claim_task".into())
+    );
+    host.close();
+    drop(server);
+}
+
+#[test]
+fn waiting_is_cancellable_and_stdin_eof_stops_further_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let credential = auth::load_or_create(&directory.path().join("dev.arkdock.desktop")).unwrap();
+    let (events, received) = mpsc::channel();
+    let server = pipe::start_server(
+        credential,
+        Arc::new(move |_, tool, _| {
+            events.send(tool.clone()).unwrap();
+            if tool == "arkdock_claim_task" {
+                Err("MCP_TASK_UNAVAILABLE".into())
+            } else {
+                Ok(json!({"content":[]}))
+            }
+        }),
+    )
+    .unwrap();
+    let mut host = Host::start(directory.path());
+    host.initialize();
+    host.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context"}}}));
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        "arkdock_claim_task"
+    );
+    host.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}));
+    assert_eq!(host.reply(2)["error"]["code"], -32800);
+    let deadline = Instant::now() + Duration::from_millis(1100);
+    while let Ok(event) = received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        // Cancellation during an in-flight atomic claim conservatively closes
+        // the connection. A disconnect is allowed, another claim is not.
+        assert_eq!(event, "__disconnect", "cancelled wait must not claim later");
+    }
+    host.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context"}}}));
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        "arkdock_claim_task"
+    );
+    host.close();
+    assert_eq!(received.recv_timeout(TIMEOUT).unwrap(), "__disconnect");
+    drop(server);
+}
+
+#[test]
+fn wait_timeout_and_authority_failure_return_without_reconnecting_or_retrying() {
+    let directory = tempfile::tempdir().unwrap();
+    let credential = auth::load_or_create(&directory.path().join("dev.arkdock.desktop")).unwrap();
+    let (events, received) = mpsc::channel();
+    let reject = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rejecting = reject.clone();
+    let server = pipe::start_server(
+        credential,
+        Arc::new(move |owner, tool, _| {
+            events.send((owner.connection_id, tool.clone())).unwrap();
+            if tool == "arkdock_claim_task" {
+                Err(if rejecting.load(std::sync::atomic::Ordering::Acquire) {
+                    "TRUST_REQUIRED"
+                } else {
+                    "MCP_TASK_UNAVAILABLE"
+                }
+                .into())
+            } else {
+                Ok(json!({"content":[]}))
+            }
+        }),
+    )
+    .unwrap();
+    let mut host = Host::start(directory.path());
+    host.initialize();
+    host.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context","timeoutMs":10}}}));
+    let reply = host.reply(2);
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(reply["result"]["structuredContent"]["status"], "waiting");
+    let (connection, tool) = received.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(tool, "arkdock_claim_task");
+    reject.store(true, std::sync::atomic::Ordering::Release);
+    host.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arkdock_wait_for_task","arguments":{"contextId":"fixture-context"}}}));
+    assert_eq!(
+        host.reply(3)["result"]["content"][0]["text"],
+        "TRUST_REQUIRED"
+    );
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        (connection, "arkdock_claim_task".into())
+    );
+    assert!(
+        received.recv_timeout(Duration::from_millis(1100)).is_err(),
+        "authority refusal must stop the wait"
+    );
+    host.close();
+    assert_eq!(
+        received.recv_timeout(TIMEOUT).unwrap(),
+        (connection, "__disconnect".into())
+    );
     drop(server);
 }
