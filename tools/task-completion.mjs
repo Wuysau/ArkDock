@@ -492,6 +492,75 @@ export function handleStop(input, { repo, cwd } = {}) {
   }
   return finishTask({ cwd: manifest.taskRoot, sessionId: id, repo: located.root });
 }
+// Stop-driven auto-commit of code and configuration only. Reviewed design,
+// instruction, image, and Harness files are never committed by this path.
+const autoCommitPrefix = 'chore(autocommit): ';
+function deferOnLocked(common, action) {
+  try { return locked(common, action); }
+  catch (error) {
+    if (error instanceof CompletionBlocked && /owns this repository lock/.test(error.message)) {
+      return { status: 'NOOP', reason: 'Another ArkDock operation owns the repository lock; the auto-commit resumes on the next stop.' };
+    }
+    throw error;
+  }
+}
+function changedCode(root) {
+  const all = changes(root);
+  return { all, selected: all.filter(isCodePath) };
+}
+export function autoCommitTask({ cwd = process.cwd(), repo: repoPath, stamp } = {}) {
+  const repo = repository(repoPath ?? cwd);
+  // The primary checkout, dev, and main are never auto-committed; only a linked task branch moves.
+  if (same(repo.gitDir, repo.common)) return { status: 'NOOP', reason: 'The primary checkout is never auto-committed.' };
+  if (['dev', 'main'].includes(repo.branch)) return { status: 'NOOP', reason: `Branch ${repo.branch} is never auto-committed.` };
+  const registered = registrations(repo.root).filter(record => same(record.path, repo.root) && record.branch === `refs/heads/${repo.branch}`);
+  if (registered.length !== 1 || registered[0].locked) return { status: 'NOOP', reason: 'The linked worktree registration is missing, ambiguous, or locked.' };
+  try { inProgress(repo); }
+  catch { return { status: 'NOOP', reason: 'A merge, rebase, cherry-pick, or revert is in progress; no auto-commit was attempted.' }; }
+  const { all, selected } = changedCode(repo.root);
+  if (!selected.length) {
+    return { status: 'NOOP', reason: all.length ? `Only ${all.length} non-code path(s) changed; nothing is auto-committed.` : 'No changes to commit.', excluded: all };
+  }
+  return deferOnLocked(repo.common, () => {
+    const current = changedCode(repo.root);
+    if (!sameRecords(current.selected, selected)) fail('The changed code set moved while the auto-commit waited for the repository lock.');
+    // Reuse the reviewed-source gate: regular file, under 8 MiB, no binary or secret content.
+    for (const path of selected) fileRecord(repo.root, path);
+    git(repo.root, ['add', '-A', '--', ...selected]);
+    const prepared = git(repo.root, ['diff', '--name-only', '-z', 'HEAD', '--', ...selected]).split('\0').filter(Boolean).sort();
+    if (!sameRecords(prepared, selected)) fail('The staged code set does not match the changed code set.');
+    const before = git(repo.root, ['rev-parse', 'HEAD']).trim();
+    const at = stamp ?? new Date().toISOString();
+    const message = `${autoCommitPrefix}${repo.branch} ${at}\n\n${prepared.length} file(s)\n${prepared.map(path => `- ${path}`).join('\n')}`;
+    // A pathspec commit ignores unrelated staged content, so a staged design file is never swept in.
+    git(repo.root, ['-c', 'commit.gpgSign=false', 'commit', '-m', message, '--', ...prepared]);
+    const commit = git(repo.root, ['rev-parse', 'HEAD']).trim();
+    const ancestry = git(repo.root, ['rev-list', '--parents', '-n', '1', 'HEAD']).trim().split(/\s+/);
+    if (ancestry[1] !== before) fail('The auto-commit did not advance HEAD by exactly one commit.');
+    const committed = [...new Set(git(repo.root, ['diff-tree', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z', 'HEAD']).split('\0').filter(Boolean))].sort();
+    if (!sameRecords(committed, prepared) || committed.some(path => !isCodePath(path))) {
+      fail(`The auto-commit recorded paths outside the changed code set: ${committed.join(', ')}`);
+    }
+    return { status: 'PASS', branch: repo.branch, commit, files: prepared, excluded: current.all.filter(path => !selected.includes(path)) };
+  });
+}
+export function handleStopCommit(input, { cwd } = {}) {
+  if (!input || input.hook_event_name !== 'Stop' || input.stop_hook_active === true) return { status: 'NOOP', reason: 'This is not an eligible Stop event.' };
+  const taskCwd = input.cwd ?? cwd ?? process.cwd();
+  let located;
+  try { located = repository(taskCwd); }
+  catch { return { status: 'NOOP', reason: 'Stop cwd is outside an accessible repository.' }; }
+  const id = input.session_id ?? input.thread_id;
+  if (typeof id === 'string' && id.trim()) {
+    let manifest = null;
+    try { manifest = load(located.common, id); } catch { manifest = null; }
+    // Never disturb an in-flight reviewed completion transaction.
+    if (manifest && manifest.phase !== 'begun') {
+      return { status: 'NOOP', reason: 'An ArkDock completion transaction is in flight; the auto-commit stays out of its way.' };
+    }
+  }
+  return autoCommitTask({ cwd: located.root });
+}
 function argumentsFor(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i++) {
@@ -515,11 +584,15 @@ export function main(argv = process.argv.slice(2)) {
     else if (command === 'ready') result = readyTask(options);
     else if (command === 'finish') result = finishTask(options);
     else if (command === 'recover-lock') result = recoverLock(options);
-    else if (command === 'stop') {
+    else if (command === 'autocommit') {
+      let input;
+      try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { input = null; }
+      result = handleStopCommit(input, options);
+    } else if (command === 'stop') {
       let input;
       try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { input = null; }
       result = handleStop(input, options);
-    } else fail('Use begin, ready --complete, finish, recover-lock, or stop (stdin JSON).');
+    } else fail('Use begin, ready --complete, finish, recover-lock, autocommit, or stop (stdin JSON).');
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {

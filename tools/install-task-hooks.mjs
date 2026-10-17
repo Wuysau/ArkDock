@@ -59,11 +59,15 @@ export function installTaskHooks({ cwd = process.cwd(), currentOnly = false } = 
     const installer = join(stable, 'install-task-hooks.mjs');
     writeChanged(installer, readFileSync(fileURLToPath(import.meta.url), 'utf8'));
     const launcher = join(versionDirectory, 'stop.ps1');
+    const commitLauncher = join(versionDirectory, 'autocommit.ps1');
     const repo = git(root, ['worktree', 'list', '--porcelain']).split('\n').find(line => line.startsWith('worktree '))?.slice(9);
     if (!repo) throw new Error('Stable main repository root unavailable');
-    writeChanged(launcher, `$ErrorActionPreference = 'Stop'\n$eventJson = [Console]::In.ReadToEnd()\n$actualHash = (Get-FileHash -LiteralPath ${psLiteral(runtime)} -Algorithm SHA256).Hash.ToLowerInvariant()\nif ($actualHash -ne '${digest}') { throw 'Pinned ArkDock hook runtime was modified' }\n$eventJson | & ${psLiteral(process.execPath)} ${psLiteral(runtime)} 'stop' '--repo' ${psLiteral(repo)}\nexit $LASTEXITCODE\n`);
+    const launcherBody = invocation => `$ErrorActionPreference = 'Stop'\n$eventJson = [Console]::In.ReadToEnd()\n$actualHash = (Get-FileHash -LiteralPath ${psLiteral(runtime)} -Algorithm SHA256).Hash.ToLowerInvariant()\nif ($actualHash -ne '${digest}') { throw 'Pinned ArkDock hook runtime was modified' }\n$eventJson | & ${psLiteral(process.execPath)} ${psLiteral(runtime)} ${invocation}\nexit $LASTEXITCODE\n`;
+    writeChanged(launcher, launcherBody(`'stop' '--repo' ${psLiteral(repo)}`));
+    writeChanged(commitLauncher, launcherBody(`'autocommit'`));
     const command = `pwsh -NoProfile -File "${launcher.replaceAll('\\', '/')}"`;
-    metadata = { version: 1, common, node: process.execPath, runtime, digest, launcher, installer, repo, command };
+    const commitCommand = `pwsh -NoProfile -File "${commitLauncher.replaceAll('\\', '/')}"`;
+    metadata = { version: 1, common, node: process.execPath, runtime, digest, launcher, commitLauncher, installer, repo, command, commitCommand };
     writeChanged(installed, `${JSON.stringify(metadata, null, 2)}\n`);
   }
   if (hash(readFileSync(metadata.runtime)) !== metadata.digest) throw new Error('Installed task runtime integrity failed');
@@ -79,11 +83,18 @@ export function installTaskHooks({ cwd = process.cwd(), currentOnly = false } = 
     if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error('Refusing linked Codex hook config');
     const config = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
     const groups = config.hooks?.Stop ?? [];
-    const retained = groups.map(group => ({ ...group, hooks: (group.hooks ?? []).filter(handler => !handler.statusMessage?.startsWith('ArkDock task completion')) }))
+    const owned = ['ArkDock task completion', 'ArkDock autocommit'];
+    const retained = groups.map(group => ({ ...group, hooks: (group.hooks ?? []).filter(handler => !owned.some(prefix => handler.statusMessage?.startsWith(prefix))) }))
       .filter(group => group.hooks.length);
-    const definition = { type: 'command', command: metadata.command, commandWindows: metadata.command, timeout: 180,
-      statusMessage: 'ArkDock task completion: commit, integrate dev, archive worktree' };
-    config.hooks = { ...config.hooks, Stop: [...retained, { hooks: [definition] }] };
+    const autoCommitCommand = metadata.commitCommand
+      ?? `pwsh -NoProfile -File "${(metadata.commitLauncher ?? join(dirname(metadata.launcher), 'autocommit.ps1')).replaceAll('\\', '/')}"`;
+    const definitions = [
+      { type: 'command', command: metadata.command, commandWindows: metadata.command, timeout: 180,
+        statusMessage: 'ArkDock task completion: commit, integrate dev, archive worktree' },
+      { type: 'command', command: autoCommitCommand, commandWindows: autoCommitCommand, timeout: 180,
+        statusMessage: 'ArkDock autocommit: commit changed code and configuration only' },
+    ];
+    config.hooks = { ...config.hooks, Stop: [...retained, ...definitions.map(definition => ({ hooks: [definition] }))] };
     config.description ??= 'Project-local ArkDock lifecycle hooks';
     writeChanged(path, `${JSON.stringify(config, null, 2)}\n`);
     // This is local workflow policy, never a tracked public Harness file.
@@ -93,7 +104,7 @@ export function installTaskHooks({ cwd = process.cwd(), currentOnly = false } = 
     const end = '<!-- /arkdock-task-completion -->';
     let text = existsSync(instructions) ? readFileSync(instructions, 'utf8') : '# ArkDock local task workflow\n';
     const lifecycle = `& ${psLiteral(metadata.node)} ${psLiteral(metadata.runtime)}`;
-    const block = `${start}\n协作流程：Worker Agent → Integration Agent → 用户验收，详见 docs/development/agent-workflow.md。实现任务从最新 dev 创建干净独立工作树，先执行生命周期工具 begin 登记当前 CODEX_THREAD_ID；Worker 只开发、验证和提交本任务，报告分支、完整 SHA、范围及测试结果，不直接修改 dev/main，不执行 ready/finish。PowerShell 生命周期工具为 \`${lifecycle}\`。ready --complete --message "提交说明" 与 finish/Stop 自动快进仅由 Integration Agent 在任务实际完成、用户明确授权、代码已审阅且完整集成验证通过后使用；工具会提交、合入 dev 并归档，不得替代用户验收后的清理阶段。main 仅用于稳定发布；长期仅保留原始 ArkDock 目录检出 dev。状态问答、暂停、未完成或等待验收不能标记 ready。dev 有他人修改、冲突、未保存成果或进程占用时保留现场，不强删、不推送。测试遵守用户本轮约定，NOT_RUN 不能当 PASS。新 hook 定义需要用户在 /hooks 信任一次。\n${end}`;
+    const block = `${start}\n协作流程：Worker Agent → Integration Agent → 用户验收，详见 docs/development/agent-workflow.md。实现任务从最新 dev 创建干净独立工作树，先执行生命周期工具 begin 登记当前 CODEX_THREAD_ID；Worker 只开发、验证和提交本任务，报告分支、完整 SHA、范围及测试结果，不直接修改 dev/main，不执行 ready/finish。PowerShell 生命周期工具为 \`${lifecycle}\`。ready --complete --message "提交说明" 与 finish/Stop 自动快进仅由 Integration Agent 在任务实际完成、用户明确授权、代码已审阅且完整集成验证通过后使用；工具会提交、合入 dev 并归档，不得替代用户验收后的清理阶段。main 仅用于稳定发布；长期仅保留原始 ArkDock 目录检出 dev。状态问答、暂停、未完成或等待验收不能标记 ready。dev 有他人修改、冲突、未保存成果或进程占用时保留现场，不强删、不推送。测试遵守用户本轮约定，NOT_RUN 不能当 PASS。另外，每次 Stop 都会自动把当前 worktree 内改动的代码与配置文件提交为 \`chore(autocommit): <分支> <时间戳>\`（仅限代码/配置，绝不提交 docs、AGENTS.md、CLAUDE.md 等指示性文档，也不在 primary 检出或 dev/main 上提交）；需要人工整理的提交请在 Stop 前完成。新 hook 定义需要用户在 /hooks 信任一次。\n${end}`;
     const offset = text.indexOf(start), tail = text.indexOf(end);
     if (offset >= 0 && tail >= offset) text = `${text.slice(0, offset)}${block}${text.slice(tail + end.length)}`;
     else text = `${text.trimEnd()}\n\n${block}\n`;
