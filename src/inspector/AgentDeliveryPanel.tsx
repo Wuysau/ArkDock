@@ -4,6 +4,7 @@ import type { UiBridge } from '../ipc/client.ts';
 import { describeError } from '../ipc/errors.ts';
 import { contextMatches, mcpLifecycle, submitFrozenSelection, taskLabels } from '../mcp/model.ts';
 import { useMcpStatus } from '../mcp/useMcpStatus.ts';
+import { automaticProcessingPrompt } from '../mcp/automatic-processing.ts';
 import '../mcp/mcp.css';
 
 /** A task is frozen by the backend only after the current instruction is saved. */
@@ -56,15 +57,24 @@ export function AgentDeliveryPanel({ selection, scope, snapshot, visible, bridge
       if (result && stillCurrent(requested)) { setSubmitted(result); setNotice('已提交修改意见与截图快照，等待客户端领取。'); }
     });
   }
+  async function copyAutomatic() {
+    if (!selectedContext) return;
+    const contextId = selectedContext.contextId;
+    await perform(async requested => {
+      await navigator.clipboard.writeText(automaticProcessingPrompt(contextId));
+      if (stillCurrent(requested)) setNotice('自动处理提示词已复制。请在对应的 Agent 会话中发送一次，保持等待后再提交任务。');
+    });
+  }
   return <section className="selection-target agent-delivery" aria-label="提交修改任务到 MCP">
     <header><h4>交给 MCP 客户端</h4><span className="agent-mode">明确选择上下文</span></header>
-    <p className="agent-hint">提交会保存当前修改意见，并冻结组件与截图。客户端领取后自行处理，源码变更仍需你验收。</p>
+    <p className="agent-hint">提交会保存当前修改意见，并冻结组件与截图。在 Agent 会话中启动一次自动处理后，持续等待期间提交即可自动领取；源码变更仍需你验收。</p>
     <label>接收上下文<select aria-label="MCP 接收上下文" value={selectedContext?.contextId ?? ''} disabled={disabled || working || Boolean(task)} onChange={event => setContextId(event.target.value)}>
       <option value="">请选择已确认的上下文</option>{eligible.map(context => <option key={context.contextId} value={context.contextId}>{context.displayName || context.clientName} · {context.contextId}</option>)}
     </select></label>
     {status && eligible.length === 0 && <p className="agent-hint">请先在「MCP 接入」中连接客户端，确认用于当前工程的上下文，并信任工程。</p>}
     <button className="primary-button selection-primary" disabled={disabled || working || !hasInstruction || !selectedContext || !status?.available || Boolean(task)} onClick={() => void submit()}>{working ? '正在处理…' : task ? '已提交到 MCP' : '提交到 MCP'}</button>
-    <div className="composer-actions"><button disabled={disabled || working || !hasInstruction} onClick={() => void copy()}>复制修改要求</button></div>
+    <div className="composer-actions"><button disabled={disabled || working || !selectedContext || !status?.available} onClick={() => void copyAutomatic()}>复制自动处理提示词</button>
+      <button disabled={disabled || working || !hasInstruction} onClick={() => void copy()}>复制修改要求</button></div>
     {task && <output className="agent-receipt" aria-live="polite"><strong>{taskLabels[task.state]}</strong><code>{task.taskId}</code>{task.summary && <p>{task.summary}</p>}{task.validation && <p>Agent 验证说明：{task.validation}</p>}
       {task.state === 'completed' && <p>Agent 报告完成，请检查源码与验证结果。</p>}{task.state === 'unknown' && <p>连接已中断。请检查已有修改；需要重试时，在「MCP 接入」中明确重新排队。</p>}</output>}
     <p className="agent-hint">队列仅在本次运行中保留，重启 ArkDock 后清空。</p>

@@ -34,7 +34,20 @@ MCP 模式不初始化桌面、WebView、托盘或预览器。桌面未运行时
 4. 调用 arkdock_get_task_image(contextId, taskId, claimId, image) 读取 screen 或 crop。返回标准 MCP 图片内容，格式以真实 mimeType 为准，无需手动添加图片。
 5. Agent 用自己的代码编辑与验证工具处理，再通过 arkdock_report_task(contextId, taskId, claimId, status, summary?, validation?) 报告 acknowledged、completed 或 failed。
 
-任务由 Agent 主动领取，MCP 不向聊天输入框写入、不自动唤醒对话。组件文本是技术证据，不是高优先级指令。完成状态是 Agent 的报告，仍需用户检查修改和验证结果。
+任务由 Agent 主动领取，MCP 不向聊天输入框写入、不自动唤醒已结束的对话。组件文本是技术证据，不是高优先级指令。完成状态是 Agent 的报告，仍需用户检查修改和验证结果。
+
+## 会话内自动处理
+
+升级到包含此功能的可执行文件后，先在 Agent 客户端重新加载 MCP，确认工具列表出现 arkdock_wait_for_task；旧 MCP 子进程不会自动获得新工具。重新连接并保存当前有效的 contextId。
+
+1. 连接并确认上下文、信任工程后，在“MCP 接入”的对应上下文点击“复制自动处理提示词”；组件选区的接收上下文旁也提供同一入口。
+2. 在该上下文对应的 Agent 会话发送一次提示词。Agent 检查上下文，调用 arkdock_wait_for_task(contextId, timeoutMs?) 开始主动等待。
+3. 此后在 ArkDock 提交组件修改任务。等待中的调用会原子领取并返回 task/claimId；Agent 读取要求和截图、上报 acknowledged、编辑验证、上报 completed/failed，再等待下一项。无需逐项发送领取提示词。
+4. 要停止时，在 Agent 客户端取消执行或要求停止。客户端停止当前轮、断线或重启后，需重新启动自动处理；在线状态本身不证明正在等待。
+
+等待工具默认与最长等待均为 25 秒，timeoutMs 为 0 时只尝试一次。无任务时返回正常结果 status=waiting，不表示已领取或已执行；自动模式继续调用等待工具。内部最多每秒检查一次队列，复用同一连接和既有原子领取、工程确认、执行信任及 claimId 校验；等待发生在 stdio 子进程，不阻塞桌面事件循环。客户端的工具超时应覆盖等待时间与本地通信开销，也可传更短 timeoutMs。
+
+只有明确的空队列继续等待；连接、权限、信任和结果未知等错误立即结束当前等待，Agent 应停止循环并说明，不自动恢复未知领取。取消期间若领取已经被接受，结果仍可能未知，应检查任务状态。客户端自身的权限确认、会话时限与模型执行策略仍然生效，ArkDock 不承诺永久后台运行。
 
 ## 生命周期与限制
 
